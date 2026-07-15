@@ -1,0 +1,11 @@
+[project]
+name = "support-distribution-uv"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dataclasses>=0.8",
+    "pyinstaller>=6.20.0",
+    "pylint>=4.0.5",
+]
