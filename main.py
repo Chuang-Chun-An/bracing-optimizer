@@ -1,1320 +1,5729 @@
-from __future__ import annotations
-
-import random
-from dataclasses import dataclass, field
-from math import inf
-from typing import Dict, List, Optional, Tuple
-
-
-def generate_candidate_joint_points(
-    total_length: int,
-    min_piece_length: int,
-    step: int = 500,
-) -> List[int]:
-    """Generate candidate joint positions every `step` from min_piece_length to total_length - min_piece_length."""
-    if total_length < 2 * min_piece_length:
-        return []
-    return list(range(min_piece_length, total_length - min_piece_length + 1, step))
-
-
-# =========================
-# 1. 設定區
-# =========================
-
-@dataclass
-class Config:
-    # 幾何需求
-    total_length: int
-    support_points: List[int]
-    candidate_joint_points: List[int] = field(default_factory=list)
-
-    # 長度限制
-    min_piece_length: int = 1000
-    preferred_min_piece_length: int = 4000
-    max_piece_length: int = 10000
-    joint_clearance_to_support: int = 300
-    candidate_joint_step: int = 500
-    purchasable_lengths: List[int] = field(default_factory=list)
-
-    # 短/中/長段分類範圍
-    short_segment_min: int = 4000
-    short_segment_max: int = 6000
-    mid_segment_min: int = 6000
-    mid_segment_max: int = 8000
-    long_segment_min: int = 8000
-    long_segment_max: int = 10000
-
-    # 最佳段長比例設定
-    short_segment_ratio_target: float = 0.2
-    mid_segment_ratio_target: float = 0.5
-    long_segment_ratio_target: float = 0.3
-    ratio_penalty_weight: float = 100_000
-
-
-
-    # GA 參數
-    population_size: int = 120
-    generations: int = 200
-    crossover_rate: float = 0.85
-    mutation_rate: float = 0.08
-    elite_size: int = 8
-    tournament_k: int = 4
-
-    def __post_init__(self) -> None:
-        if not self.candidate_joint_points:
-            self.candidate_joint_points = generate_candidate_joint_points(
-                self.total_length,
-                self.min_piece_length,
-                self.candidate_joint_step,
-            )
-
-        if not self.purchasable_lengths:
-            self.purchasable_lengths = list(range(
-                self.min_piece_length,
-                self.max_piece_length + 1,
-                self.candidate_joint_step,
-            ))
-
-    # 輸出
-    top_n: int = 5
-
-
-# =========================
-# 2. 基本工具函式
-# =========================
+import copy
+import json
+import math
+import queue
+import threading
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import tkinter as tk
-from tkinter import messagebox
-from typing import List, Dict, Optional
+from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
+
+import wales
+
+import matplotlib
+matplotlib.use("TkAgg")
+import matplotlib.pyplot as plt
+plt.rcParams["font.sans-serif"] = ["Microsoft JhengHei"]
+plt.rcParams["axes.unicode_minus"] = False
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+
+import support
 
 
+class PreviewNavigationToolbar(NavigationToolbar2Tk):
+    """現場圖面只保留常用工具；縮放由滑鼠滾輪操作。"""
 
-def get_initial_config_from_gui(
-    default_total_length: int,
-    default_support_points: List[int],
-) -> Optional[Dict[str, object]]:
+    PAN_THROTTLE_MS = 40
+
+    toolitems = (
+        ("全圖", "回到完整圖面", "home", "home"),
+        ("平移", "拖曳平移", "move", "pan"),
+        ("儲存", "儲存圖片", "filesave", "save_figure"),
+    )
+
+    def __init__(
+        self,
+        canvas,
+        window=None,
+        *,
+        pack_toolbar=True,
+        export_callback=None,
+        zoom_getter=None,
+        interaction_start_callback=None,
+        interaction_end_callback=None,
+    ):
+        self.export_callback = export_callback
+        self.zoom_getter = zoom_getter
+        self.interaction_start_callback = interaction_start_callback
+        self.interaction_end_callback = interaction_end_callback
+        self._zoom_percent = 100.0
+        self._base_message = ""
+        self._pending_pan_event = None
+        self._pan_after_id = None
+        self._pan_interaction_active = False
+        super().__init__(canvas, window, pack_toolbar=pack_toolbar)
+
+    @staticmethod
+    def _format_zoom_percent(percent):
+        if math.isclose(percent, round(percent), abs_tol=0.05):
+            return f"{int(round(percent))}%"
+        return f"{percent:.1f}%"
+
+    def set_zoom_percent(self, percent):
+        self._zoom_percent = float(percent)
+        self._refresh_message()
+
+    def sync_zoom_display(self):
+        if self.zoom_getter is not None:
+            self.set_zoom_percent(self.zoom_getter())
+
+    def set_message(self, message):
+        self._base_message = message
+        self._refresh_message()
+
+    def _refresh_message(self):
+        percent = self._zoom_percent
+        if self.zoom_getter is not None:
+            percent = float(self.zoom_getter())
+            self._zoom_percent = percent
+        zoom_text = self._format_zoom_percent(percent)
+        prefix = f"{self._base_message}   " if self._base_message else ""
+        if hasattr(self, "message"):
+            self.message.set(f"{prefix}倍率={zoom_text}")
+
+    def home(self, *args):
+        result = super().home(*args)
+        self.after_idle(self.sync_zoom_display)
+        return result
+
+    def drag_pan(self, event):
+        """限制拖曳平移的更新頻率，避免每個滑鼠事件都重畫。"""
+        if not self._pan_interaction_active:
+            self._pan_interaction_active = True
+            if self.interaction_start_callback is not None:
+                self.interaction_start_callback()
+        self._pending_pan_event = event
+        if self._pan_after_id is None:
+            self._pan_after_id = self.after(
+                self.PAN_THROTTLE_MS,
+                self._flush_pending_pan,
+            )
+
+    def _flush_pending_pan(self):
+        self._pan_after_id = None
+        event = self._pending_pan_event
+        self._pending_pan_event = None
+        if event is None or self._pan_info is None:
+            return
+        super().drag_pan(event)
+
+    def release_pan(self, event):
+        """滑鼠放開前套用最後一個尚未處理的平移位置。"""
+        if self._pan_after_id is not None:
+            try:
+                self.after_cancel(self._pan_after_id)
+            except tk.TclError:
+                pass
+            self._pan_after_id = None
+
+        pending_event = self._pending_pan_event
+        self._pending_pan_event = None
+        try:
+            if pending_event is not None and self._pan_info is not None:
+                super().drag_pan(pending_event)
+            return super().release_pan(event)
+        finally:
+            if self._pan_interaction_active:
+                self._pan_interaction_active = False
+                if self.interaction_end_callback is not None:
+                    self.interaction_end_callback()
+
+    def save_figure(self, *args):
+        if self.export_callback is not None:
+            return self.export_callback()
+        return super().save_figure(*args)
+
+
+def point_on_line_by_station(start_x, start_y, end_x, end_y, station):
     """
-    跳出 GUI 視窗，讓使用者輸入總長度、支撐點與短/中/長段比例設定。
-
-    - total_length: 單件總長度
-    - support_points: 以逗號或空白分隔的支撐點位置
-    - 目標比例: 20%、50%、30%
+    根據起點、終點與沿線 station 距離，回傳該點的 X,Y 座標。
+    station 是從起點沿著線段方向量測的距離，單位 mm。
     """
-    result: Dict[str, object] = {}
+    dx = end_x - start_x
+    dy = end_y - start_y
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return None
+    ratio = station / length
+    x = start_x + ratio * dx
+    y = start_y + ratio * dy
+    return x, y
 
-    root = tk.Tk()
-    root.title("總長度與支撐點設定")
-    root.geometry("580x620")
 
-    tk.Label(root, text="請輸入總長度", font=("Arial", 12, "bold")).pack(pady=(12, 4))
-    total_length_entry = tk.Entry(root, width=20, font=("Arial", 12))
-    total_length_entry.insert(0, str(default_total_length))
-    total_length_entry.pack(pady=(0, 12))
+def load_ascii_art(code):
+    code = str(code or "").strip()
+    if not code:
+        return None
+    if code != Path(code).name or "/" in code or "\\" in code:
+        return None
 
-    tk.Label(root, text="請輸入支撐點位置（逗號、空白或換行分隔）", font=("Arial", 12, "bold")).pack(pady=(0, 4))
-    support_points_text = tk.Text(root, width=72, height=10, font=("Arial", 11))
-    support_points_text.insert("1.0", ", ".join(str(p) for p in default_support_points))
-    support_points_text.pack(padx=10, pady=(0, 12))
+    art_path = Path(__file__).resolve().parent / "picture" / f"{code}.txt"
+    if not art_path.is_file():
+        return None
 
-    tk.Label(root, text="短/中/長段目標比例（固定區間：短段 4000~6000，中段 6000~8000，長段 8000~10000）", font=("Arial", 12, "bold"), wraplength=560).pack(pady=(8, 4))
-    ratio_frame = tk.Frame(root)
-    ratio_frame.pack(padx=10, pady=(0, 12), fill="x")
+    for encoding in ("utf-8", "utf-8-sig", "cp950"):
+        try:
+            return art_path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return art_path.read_text(encoding="utf-8", errors="replace")
 
-    tk.Label(ratio_frame, text="短段", width=12, anchor="w").grid(row=0, column=0, padx=5, pady=3)
-    short_ratio_entry = tk.Entry(ratio_frame, width=12)
-    short_ratio_entry.insert(0, "20")
-    short_ratio_entry.grid(row=0, column=1, padx=5, pady=3)
 
-    tk.Label(ratio_frame, text="中段", width=12, anchor="w").grid(row=1, column=0, padx=5, pady=3)
-    mid_ratio_entry = tk.Entry(ratio_frame, width=12)
-    mid_ratio_entry.insert(0, "50")
-    mid_ratio_entry.grid(row=1, column=1, padx=5, pady=3)
+def calculate_ascii_art_font_size(line_count, max_width):
+    font_size = 10
+    if max_width > 800:
+        font_size = 3
+    elif max_width > 600:
+        font_size = 4
+    elif max_width > 450:
+        font_size = 5
+    elif max_width > 350:
+        font_size = 6
+    elif max_width > 250:
+        font_size = 7
+    elif max_width > 150:
+        font_size = 8
 
-    tk.Label(ratio_frame, text="長段", width=12, anchor="w").grid(row=2, column=0, padx=5, pady=3)
-    long_ratio_entry = tk.Entry(ratio_frame, width=12)
-    long_ratio_entry.insert(0, "30")
-    long_ratio_entry.grid(row=2, column=1, padx=5, pady=3)
+    if line_count > 150:
+        font_size -= 1
+    if line_count > 250:
+        font_size -= 1
 
-    message_label = tk.Label(root, text="", fg="red", font=("Arial", 10))
-    message_label.pack()
+    return max(3, font_size)
 
-    def on_confirm():
-        text_value = total_length_entry.get().strip()
-        if not text_value:
-            message_label.config(text="請輸入總長度")
+
+class SupportInputApp:
+    EXPORT_BASE_FIGSIZE = (16, 10)
+    EXPORT_DPI = 100
+    EXPORT_SCALE_OPTIONS = (100, 200, 400, 800)
+    PREVIEW_SCROLL_DEBOUNCE_MS = 60
+    STRUT_BRACE_LENGTH_FIELDS = (
+        ("FromBraceToWalerStartLen", "起點角撐長度(往圍令起點)"),
+        ("FromBraceToWalerEndLen", "起點角撐長度(往圍令終點)"),
+        ("ToBraceToWalerStartLen", "終點角撐長度(往圍令起點)"),
+        ("ToBraceToWalerEndLen", "終點角撐長度(往圍令終點)"),
+    )
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("開挖支撐系統幾何資料輸入介面")
+        self._set_window_size(1600, 900)
+
+        self.walers = []
+        self.struts = []
+        self.braces = []
+        self.result_items = {}
+        self.solver_memory = {}
+        self.support_candidate_cache = {}
+        self.data_dir = Path(__file__).resolve().parent / "data"
+        self.default_inventory_path = self.data_dir / "default_inventory.json"
+        self.test_cases_dir = Path(__file__).resolve().parent / "test_cases"
+        self.test_cases_dir.mkdir(exist_ok=True)
+        self.inventory = self._load_default_inventory()
+
+        self.table_columns = {
+            "walers": ["WalerID", "StartX", "StartY", "EndX", "EndY", "Remark"],
+            "struts": [
+                "StrutID",
+                "FromWaler",
+                "ToWaler",
+                "StartX",
+                "StartY",
+                "EndX",
+                "EndY",
+                "BeamPositions",
+                "ColumnPositions",
+                "FromBraceToWalerStartLen",
+                "FromBraceToWalerEndLen",
+                "ToBraceToWalerStartLen",
+                "ToBraceToWalerEndLen",
+                "TargetJackRegion",
+                "Zoning",
+            ],
+            "braces": ["BraceID", "FromWaler", "ToWaler", "StartX", "StartY", "EndX", "EndY"],
+            "inventory": ["Length", "Qty"],
+        }
+
+        self.table_tab_labels = {
+            "walers": "圍令",
+            "struts": "支撐",
+            "braces": "斜撐",
+            "inventory": "庫存",
+        }
+
+        self.table_column_labels = {
+            "walers": {
+                "No": "列號",
+                "WalerID": "圍令編號",
+                "StartX": "起點X",
+                "StartY": "起點Y",
+                "EndX": "終點X",
+                "EndY": "終點Y",
+                "Remark": "備註",
+            },
+            "struts": {
+                "No": "列號",
+                "StrutID": "支撐編號",
+                "FromWaler": "起點圍令",
+                "ToWaler": "終點圍令",
+                "StartX": "起點X",
+                "StartY": "起點Y",
+                "EndX": "終點X",
+                "EndY": "終點Y",
+                "BeamPositions": "托梁位置(mm)",
+                "ColumnPositions": "中間柱位置(mm)",
+                "FromBraceToWalerStartLen": "起點角撐長度(往圍令起點)",
+                "FromBraceToWalerEndLen": "起點角撐長度(往圍令終點)",
+                "ToBraceToWalerStartLen": "終點角撐長度(往圍令起點)",
+                "ToBraceToWalerEndLen": "終點角撐長度(往圍令終點)",
+                "TargetJackRegion": "目標千斤頂區域",
+                "Zoning": "分區",
+            },
+            "braces": {
+                "No": "列號",
+                "BraceID": "斜撐編號",
+                "FromWaler": "起點圍令",
+                "ToWaler": "終點圍令",
+                "StartX": "起點X",
+                "StartY": "起點Y",
+                "EndX": "終點X",
+                "EndY": "終點Y",
+            },
+            "inventory": {
+                "No": "列號",
+                "Length": "料長(mm)",
+                "Qty": "庫存數量",
+            },
+        }
+
+        self.numeric_columns = {
+            "walers": ["StartX", "StartY", "EndX", "EndY"],
+            "struts": [
+                "StartX",
+                "StartY",
+                "EndX",
+                "EndY",
+                "FromBraceToWalerStartLen",
+                "FromBraceToWalerEndLen",
+                "ToBraceToWalerStartLen",
+                "ToBraceToWalerEndLen",
+                "TargetJackRegion",
+            ],
+            "braces": ["StartX", "StartY", "EndX", "EndY"],
+            "inventory": ["Length", "Qty"],
+        }
+
+        self.treeviews = {}
+        self.current_table = "walers"
+        self.editing_entry = None
+
+        self._build_ui()
+        self._load_initial_data()
+        self.root.after(300, lambda: self.main_paned.sashpos(0, self.main_paned.winfo_width() // 2))
+        self.update_preview()
+
+    def _build_ui(self):
+        self.main_paned = ttk.PanedWindow(self.root, orient="horizontal")
+        self.main_paned.pack(fill="both", expand=True)
+
+        self.left_frame = ttk.Frame(self.main_paned, width=800)
+        self.right_frame = ttk.Frame(self.main_paned, width=800)
+        self.main_paned.add(self.left_frame, weight=1)
+        self.main_paned.add(self.right_frame, weight=1)
+
+        self.notebook = ttk.Notebook(self.left_frame)
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        self._create_table_tab("walers", self.table_tab_labels["walers"])
+        self._create_table_tab("struts", self.table_tab_labels["struts"])
+        self._create_table_tab("braces", self.table_tab_labels["braces"])
+        self._create_table_tab("inventory", self.table_tab_labels["inventory"])
+        self._create_test_cases_tab()
+        self._create_results_tab()
+
+        button_frame = ttk.Frame(self.root)
+        button_frame.pack(fill="x", padx=8, pady=4)
+
+        add_button = ttk.Button(button_frame, text="新增列", command=self.add_row)
+        delete_button = ttk.Button(button_frame, text="刪除選取列", command=self.delete_row)
+        move_up_button = ttk.Button(button_frame, text="上移", command=lambda: self._move_current_table_row(-1))
+        move_down_button = ttk.Button(button_frame, text="下移", command=lambda: self._move_current_table_row(1))
+        validate_button = ttk.Button(button_frame, text="驗證資料", command=self.validate_data)
+        redraw_button = ttk.Button(button_frame, text="更新圖面", command=self.update_preview)
+
+        add_button.pack(side="left", padx=6)
+        delete_button.pack(side="left", padx=6)
+        move_up_button.pack(side="left", padx=6)
+        move_down_button.pack(side="left", padx=6)
+        validate_button.pack(side="left", padx=6)
+        redraw_button.pack(side="left", padx=6)
+
+        run_waler_solver_button = ttk.Button(button_frame, text="執行圍令配置", command=self._open_waler_solver)
+        self.run_support_solver_button = ttk.Button(
+            button_frame,
+            text="支撐配置",
+            command=self._open_support_solver,
+        )
+        run_waler_solver_button.pack(side="left", padx=6)
+        self.run_support_solver_button.pack(side="left", padx=6)
+
+        result_frame = ttk.LabelFrame(self.root, text="求解結果")
+        result_frame.pack(fill="both", padx=8, pady=(0, 8))
+
+        self.ascii_art_code_var = tk.StringVar()
+        self.ascii_art_entry = tk.Entry(
+            result_frame,
+            textvariable=self.ascii_art_code_var,
+            width=7,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=0,
+            insertwidth=1,
+            bg="white",
+            fg="black",
+            insertbackground="black",
+            selectbackground="#d9e8ff",
+            selectforeground="black",
+        )
+        self.ascii_art_entry.place(relx=1.0, x=-42, y=14, anchor="ne")
+        self.ascii_art_entry.bind("<Return>", self._on_ascii_art_code_enter)
+        self.ascii_art_entry.bind("<FocusIn>", self._on_ascii_art_entry_focus_in)
+        self.ascii_art_entry.bind("<FocusOut>", self._on_ascii_art_entry_focus_out)
+
+        self.result_text = scrolledtext.ScrolledText(result_frame, height=14, wrap="none", state="disabled", font=("Consolas", 10))
+        self.result_text.pack(fill="both", expand=True, padx=4, pady=4)
+        self.ascii_art_entry.lift()
+
+        self._build_preview(self.right_frame)
+
+    def _create_table_tab(self, table_name, tab_text):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=tab_text)
+
+        container = ttk.Frame(frame)
+        container.pack(fill="both", expand=True, padx=4, pady=4)
+
+        columns = ("No", *self.table_columns[table_name])
+        tree = ttk.Treeview(container, columns=columns, show="headings", selectmode="browse")
+        tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
+        x_scroll = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        for col in columns:
+            tree.heading(col, text=self.table_column_labels.get(table_name, {}).get(col, col))
+            if col == "No":
+                tree.column(col, width=55, minwidth=50, anchor="center", stretch=False)
+            elif col in ("BeamPositions", "ColumnPositions"):
+                tree.column(col, width=150, minwidth=130, anchor="center")
+            else:
+                tree.column(col, width=90, anchor="center")
+
+        tree.tag_configure("error", background="#ffdddd")
+        tree.bind("<Double-1>", self._on_tree_double_click)
+        self.treeviews[table_name] = tree
+
+    def _create_test_cases_tab(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="測試案例")
+
+        container = ttk.Frame(frame)
+        container.pack(fill="both", expand=True, padx=8, pady=8)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        self.test_case_listbox = tk.Listbox(container, exportselection=False)
+        self.test_case_listbox.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(container, orient="vertical", command=self.test_case_listbox.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.test_case_listbox.configure(yscrollcommand=y_scroll.set)
+        self.test_case_listbox.bind("<Double-1>", lambda _event: self._load_selected_test_case())
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill="x", padx=8, pady=(0, 8))
+        ttk.Button(
+            button_frame,
+            text="載入案例",
+            command=self._load_selected_test_case,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            button_frame,
+            text="儲存目前資料為案例",
+            command=self._save_current_test_case_from_prompt,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            button_frame,
+            text="刪除案例",
+            command=self._delete_selected_test_case,
+        ).pack(side="left", padx=(0, 6))
+
+        self._refresh_test_case_list()
+
+    def _create_results_tab(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="結果")
+
+        container = ttk.Frame(frame)
+        container.pack(fill="both", expand=True, padx=4, pady=4)
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+        columns = ("Visible", "Type", "ID", "Description")
+        self.results_tree = ttk.Treeview(
+            container,
+            columns=columns,
+            show="tree headings",
+            selectmode="browse",
+        )
+        self.results_tree.grid(row=0, column=0, sticky="nsew")
+
+        y_scroll = ttk.Scrollbar(
+            container,
+            orient="vertical",
+            command=self.results_tree.yview,
+        )
+        x_scroll = ttk.Scrollbar(
+            container,
+            orient="horizontal",
+            command=self.results_tree.xview,
+        )
+        self.results_tree.configure(
+            yscrollcommand=y_scroll.set,
+            xscrollcommand=x_scroll.set,
+        )
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+
+        self.results_tree.heading("#0", text="項目")
+        self.results_tree.column("#0", width=130, minwidth=100, anchor="w", stretch=False)
+        result_column_labels = {
+            "Visible": "顯示",
+            "Type": "類型",
+            "ID": "編號",
+            "Description": "摘要",
+        }
+        for column in columns:
+            self.results_tree.heading(column, text=result_column_labels.get(column, column))
+        self.results_tree.column("Visible", width=70, minwidth=70, anchor="center", stretch=False)
+        self.results_tree.column("Type", width=90, minwidth=80, anchor="center", stretch=False)
+        self.results_tree.column("ID", width=110, minwidth=80, anchor="center", stretch=False)
+        self.results_tree.column("Description", width=430, minwidth=220, anchor="w")
+
+        self.results_tree.bind("<ButtonRelease-1>", self._on_results_tree_click)
+        self.results_tree.bind("<space>", self._on_results_tree_space)
+        self.results_tree.bind("<Double-1>", self._on_results_tree_double_click)
+
+        ttk.Label(
+            frame,
+            text=(
+                "點選「顯示」欄切換結果顯示；雙擊群組可展開/收合，雙擊方案可查看詳細配置。"
+                "可同時統計多筆圍令與支撐結果。"
+            ),
+        ).pack(fill="x", padx=6, pady=(0, 4))
+
+        result_action_frame = ttk.Frame(frame)
+        result_action_frame.pack(fill="x", padx=4, pady=(0, 6))
+        ttk.Button(
+            result_action_frame,
+            text="建立自訂方案",
+            command=self._create_custom_waler_plan_from_selection,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            result_action_frame,
+            text="刪除方案",
+            command=self._delete_selected_result_plan,
+        ).pack(side="left", padx=(0, 6))
+
+        material_frame = ttk.LabelFrame(frame, text="材料統計")
+        material_frame.pack(fill="both", padx=4, pady=(0, 6))
+        material_frame.rowconfigure(0, weight=1)
+        material_frame.columnconfigure(0, weight=1)
+
+        material_columns = (
+            "Length",
+            "Used Qty",
+            "Inventory Qty",
+            "Remaining Qty",
+        )
+        self.material_summary_tree = ttk.Treeview(
+            material_frame,
+            columns=material_columns,
+            show="headings",
+            height=7,
+        )
+        self.material_summary_tree.grid(row=0, column=0, sticky="nsew")
+        material_scroll = ttk.Scrollbar(
+            material_frame,
+            orient="vertical",
+            command=self.material_summary_tree.yview,
+        )
+        material_scroll.grid(row=0, column=1, sticky="ns")
+        self.material_summary_tree.configure(yscrollcommand=material_scroll.set)
+
+        material_column_labels = {
+            "Length": "料長(mm)",
+            "Used Qty": "使用數量",
+            "Inventory Qty": "庫存數量",
+            "Remaining Qty": "剩餘數量",
+        }
+        for column in material_columns:
+            self.material_summary_tree.heading(column, text=material_column_labels.get(column, column))
+            self.material_summary_tree.column(
+                column,
+                width=110,
+                minwidth=90,
+                anchor="center",
+            )
+        self.material_summary_tree.tag_configure(
+            "shortage",
+            foreground="#c62828",
+        )
+
+    def _on_ascii_art_entry_focus_in(self, event=None):
+        if hasattr(self, "ascii_art_entry"):
+            self.ascii_art_entry.configure(
+                bg="white",
+                fg="black",
+                insertbackground="black",
+                selectbackground="#d9e8ff",
+                selectforeground="black",
+            )
+
+    def _on_ascii_art_entry_focus_out(self, event=None):
+        if hasattr(self, "ascii_art_entry"):
+            self.ascii_art_entry.configure(
+                bg="white",
+                fg="black",
+                insertbackground="black",
+                selectbackground="#d9e8ff",
+                selectforeground="black",
+            )
+
+    def _on_ascii_art_code_enter(self, event=None):
+        code = self.ascii_art_code_var.get().strip()
+        art_text = load_ascii_art(code)
+        if art_text is None:
+            return "break"
+        self._show_ascii_art_window(code, art_text)
+        self.ascii_art_code_var.set("")
+        return "break"
+
+    def _show_ascii_art_window(self, code, art_text):
+        families = set(tkfont.families(self.root))
+        font_family = "Consolas" if "Consolas" in families else "Courier New"
+
+        lines = art_text.splitlines() or [""]
+        line_count = len(lines)
+        max_width = max(len(line) for line in lines)
+        font_size = calculate_ascii_art_font_size(line_count, max_width)
+        text_width = min(max(max_width, 40), 160)
+        text_height = min(max(line_count, 10), 45)
+
+        window = tk.Toplevel(self.root)
+        window.title(f"ASCII Art - {code}")
+        window.transient(self.root)
+        window.resizable(True, True)
+        window.state("zoomed")
+
+        frame = ttk.Frame(window)
+        frame.pack(fill="both", expand=True, padx=8, pady=8)
+        frame.rowconfigure(1, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            frame,
+            text=(
+                f"[ASCII]  File: {code}.txt   Lines: {line_count}   "
+                f"Max Width: {max_width}   Font Size: {font_size}"
+            ),
+            font=(font_family, 9),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+
+        text_widget = tk.Text(
+            frame,
+            width=text_width,
+            height=text_height,
+            wrap="none",
+            font=(font_family, font_size),
+            bg="black",
+            fg="white",
+            insertbackground="white",
+            padx=8,
+            pady=8,
+        )
+        y_scroll = ttk.Scrollbar(frame, orient="vertical", command=text_widget.yview)
+        x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=text_widget.xview)
+        text_widget.configure(
+            yscrollcommand=y_scroll.set,
+            xscrollcommand=x_scroll.set,
+        )
+        text_widget.grid(row=1, column=0, sticky="nsew")
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        x_scroll.grid(row=2, column=0, sticky="ew")
+
+        text_widget.insert("1.0", art_text)
+        text_widget.configure(state="disabled")
+
+    def _test_case_json_files(self):
+        self.test_cases_dir.mkdir(exist_ok=True)
+        return sorted(self.test_cases_dir.glob("*.json"), key=lambda path: path.stem)
+
+    @staticmethod
+    def _sanitize_test_case_name(case_name):
+        name = str(case_name or "").strip()
+        translation = str.maketrans({
+            "<": "＜",
+            ">": "＞",
+            ":": "：",
+            '"': "＂",
+            "/": "／",
+            "\\": "＼",
+            "|": "｜",
+            "?": "？",
+            "*": "＊",
+        })
+        return name.translate(translation).strip()
+
+    def _test_case_path(self, case_name):
+        safe_name = self._sanitize_test_case_name(case_name)
+        if not safe_name:
+            return None
+        if safe_name.lower().endswith(".json"):
+            safe_name = safe_name[:-5]
+        return self.test_cases_dir / f"{safe_name}.json"
+
+    def _refresh_test_case_list(self, selected_name=None, select_first=False):
+        if not hasattr(self, "test_case_listbox"):
+            return
+        self.test_case_listbox.delete(0, "end")
+        selected_index = None
+        for index, path in enumerate(self._test_case_json_files()):
+            self.test_case_listbox.insert("end", path.stem)
+            if selected_name is not None and path.stem == selected_name:
+                selected_index = index
+        if selected_index is None and select_first and self.test_case_listbox.size() > 0:
+            selected_index = 0
+        if selected_index is not None:
+            self.test_case_listbox.selection_set(selected_index)
+            self.test_case_listbox.see(selected_index)
+
+    def _selected_test_case_name(self):
+        if not hasattr(self, "test_case_listbox"):
+            return None
+        selection = self.test_case_listbox.curselection()
+        if not selection:
+            return None
+        return self.test_case_listbox.get(selection[0])
+
+    def _load_selected_test_case(self):
+        case_name = self._selected_test_case_name()
+        if not case_name:
+            messagebox.showwarning("載入案例", "請先選擇要載入的測試案例。")
+            return
+        try:
+            self.load_test_case(case_name)
+        except Exception as exc:
+            messagebox.showerror("載入案例失敗", str(exc))
+
+    def _delete_selected_test_case(self):
+        case_name = self._selected_test_case_name()
+        if not case_name:
+            messagebox.showwarning("刪除案例", "請先選擇要刪除的測試案例。")
+            return
+
+        path = self._test_case_path(case_name)
+        if path is None:
+            messagebox.showwarning("刪除案例", "請先選擇要刪除的測試案例。")
             return
 
         try:
-            total_length = int(text_value)
-            if total_length <= 0:
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("輸入錯誤", "總長度必須是大於 0 的整數")
+            test_cases_dir = self.test_cases_dir.resolve()
+            target_path = path.resolve(strict=False)
+        except Exception as exc:
+            messagebox.showerror(
+                "刪除案例",
+                f"無法刪除：\n{path}\n\n原因：\n{exc}",
+            )
             return
 
-        support_text = support_points_text.get("1.0", "end").strip()
-        if support_text == "":
-            support_points: List[int] = []
+        if target_path.parent != test_cases_dir or target_path.suffix.lower() != ".json":
+            messagebox.showerror(
+                "刪除案例",
+                f"無法刪除：\n{path}\n\n原因：\n只能刪除 test_cases 資料夾內的 JSON 檔案。",
+            )
+            return
+
+        if not target_path.is_file():
+            messagebox.showwarning("刪除案例", "找不到測試案例檔案。")
+            self._refresh_test_case_list(select_first=True)
+            return
+
+        confirmed = messagebox.askyesno(
+            "確認刪除",
+            f"確定要刪除測試案例：\n\n{case_name}\n\n此動作無法復原。",
+        )
+        if not confirmed:
+            return
+
+        try:
+            target_path.unlink()
+        except Exception as exc:
+            messagebox.showerror(
+                "刪除案例",
+                f"無法刪除：\n{target_path}\n\n原因：\n{exc}",
+            )
+            return
+
+        self._refresh_test_case_list(select_first=True)
+        messagebox.showinfo("刪除案例", f"已刪除測試案例：\n{case_name}")
+
+    def _save_current_test_case_from_prompt(self):
+        case_name = simpledialog.askstring(
+            "儲存測試案例",
+            "案例名稱：",
+            parent=self.root,
+        )
+        if case_name is None:
+            return
+        case_name = case_name.strip()
+        if not case_name:
+            messagebox.showwarning("儲存測試案例", "案例名稱不可空白。")
+            return
+
+        path = self._test_case_path(case_name)
+        if path is None:
+            messagebox.showwarning("儲存測試案例", "案例名稱不可空白。")
+            return
+        if path.exists():
+            confirmed = messagebox.askyesno(
+                "覆蓋測試案例",
+                f"測試案例「{path.stem}」已存在。\n是否覆蓋？",
+            )
+            if not confirmed:
+                return
+
+        try:
+            saved_path = self.save_test_case(case_name)
+        except Exception as exc:
+            messagebox.showerror("儲存案例失敗", str(exc))
+            return
+
+        self._refresh_test_case_list(selected_name=saved_path.stem)
+        messagebox.showinfo("儲存測試案例", f"已儲存：\n{saved_path}")
+
+    def _build_test_case_payload(self, case_name):
+        waler_inputs = self.build_waler_inputs()
+        return {
+            "schema_version": 1,
+            "case_name": case_name,
+            "data": {
+                "walers": copy.deepcopy(self.walers),
+                "struts": copy.deepcopy(self.struts),
+                "braces": copy.deepcopy([
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key != "Type"
+                    }
+                    for row in self.braces
+                ]),
+            },
+            "derived": {
+                "waler_inputs": copy.deepcopy(waler_inputs),
+            },
+            "solver_settings": {
+                "waler": {
+                    "generations": 10,
+                    "population_size": 120,
+                    "short_ratio": 20,
+                    "mid_ratio": 50,
+                    "long_ratio": 30,
+                    "min_piece_length": 1000,
+                    "max_piece_length": 10000,
+                    "joint_clearance": 300,
+                    "candidate_joint_step": 500,
+                    "top_n": 5,
+                },
+                "support": {
+                    "max_steel_combination_count": 100,
+                    "target_valid_candidate_count": 40,
+                    "beam_width": 100,
+                },
+                "export": {
+                    "base_figsize": list(self.EXPORT_BASE_FIGSIZE),
+                    "dpi": self.EXPORT_DPI,
+                    "scale_options": list(self.EXPORT_SCALE_OPTIONS),
+                    "default_scale": 400,
+                },
+            },
+            "parameters": {
+                "support_solver": {
+                    "steel_lengths": list(support.STEEL_LENGTHS),
+                    "jack_length": support.JACK_LENGTH,
+                    "shim_lengths": list(support.SHIM_LENGTHS),
+                    "max_gap": support.MAX_GAP,
+                    "target_gap": support.TARGET_GAP,
+                    "min_end_clear": support.MIN_END_CLEAR,
+                    "pile_forbidden_half": support.PILE_FORBIDDEN_HALF,
+                    "waler_forbidden_half": support.WALER_FORBIDDEN_HALF,
+                    "min_jack_distance_between_supports": support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS,
+                },
+            },
+        }
+
+    def _load_default_inventory(self):
+        path = getattr(self, "default_inventory_path", None)
+        if path is None or not path.is_file():
+            return []
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            inventory = payload.get("inventory", [])
         else:
-            normalized = support_text.replace(",", " ").replace("\n", " ")
-            parts = [p for p in normalized.split() if p]
-            support_points = []
-            for part in parts:
+            inventory = payload
+
+        if not isinstance(inventory, list):
+            return []
+        return copy.deepcopy(inventory)
+
+    def save_test_case(self, case_name):
+        path = self._test_case_path(case_name)
+        if path is None:
+            raise ValueError("案例名稱不可空白。")
+        payload = self._build_test_case_payload(path.stem)
+        self.test_cases_dir.mkdir(exist_ok=True)
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return path
+
+    def load_test_case(self, case_name, *, silent=False):
+        path = self._test_case_path(case_name)
+        if path is None or not path.is_file():
+            raise FileNotFoundError(f"找不到測試案例：{case_name}")
+
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        data = payload.get("data", payload)
+        self.walers = copy.deepcopy(data.get("walers", []))
+        self.struts = copy.deepcopy(data.get("struts", []))
+        self.braces = copy.deepcopy(data.get("braces", []))
+
+        for strut in self.struts:
+            strut.setdefault("TargetJackRegion", 2)
+            self._migrate_strut_position_fields(strut)
+        for brace in self.braces:
+            brace.pop("Type", None)
+
+        self.result_items.clear()
+        self.solver_memory.clear()
+        self.support_candidate_cache.clear()
+
+        for table_name in ("walers", "struts", "braces", "inventory"):
+            self._refresh_tree(table_name)
+        self._refresh_results_tree()
+        self._refresh_test_case_list(selected_name=path.stem)
+        self.update_preview()
+        if not silent:
+            self.show_result(f"已載入測試案例：{path.stem}")
+        return payload
+
+    def _on_results_tree_click(self, event):
+        if self.results_tree.identify_region(event.x, event.y) != "cell":
+            return
+        column_id = self.results_tree.identify_column(event.x)
+        if self._tree_column_key(self.results_tree, column_id) != "Visible":
+            return
+        item_id = self.results_tree.identify_row(event.y)
+        if not item_id:
+            return
+        self.results_tree.selection_set(item_id)
+        if self._is_result_group_iid(item_id):
+            self._toggle_result_group_visibility(item_id)
+        elif self._is_support_plan_iid(item_id):
+            zoning, support_id = self._parse_support_plan_iid(item_id)
+            self._toggle_support_plan_visibility(zoning, support_id)
+        else:
+            self._toggle_result_visibility(item_id)
+        return "break"
+
+    def _on_results_tree_space(self, event=None):
+        selected = self.results_tree.selection()
+        if selected:
+            selected_id = selected[0]
+            if self._is_result_group_iid(selected_id):
+                self._toggle_result_group_visibility(selected_id)
+            elif self._is_support_plan_iid(selected_id):
+                zoning, support_id = self._parse_support_plan_iid(selected_id)
+                self._toggle_support_plan_visibility(zoning, support_id)
+            else:
+                self._toggle_result_visibility(selected_id)
+        return "break"
+
+    def _on_results_tree_double_click(self, event):
+        if self.results_tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            return
+        result_id = self.results_tree.identify_row(event.y)
+        if not result_id:
+            return
+        self.results_tree.selection_set(result_id)
+        if self._is_result_group_iid(result_id):
+            is_open = bool(self.results_tree.item(result_id, "open"))
+            self.results_tree.item(result_id, open=not is_open)
+            return "break"
+        if self._is_support_plan_iid(result_id):
+            zoning, support_id = self._parse_support_plan_iid(result_id)
+            self._open_support_plan_editor(zoning, support_id)
+            return "break"
+        self._show_result_details(result_id)
+        return "break"
+
+    @staticmethod
+    def _tree_column_key(tree, column_id):
+        if column_id == "#0":
+            return None
+        try:
+            column_index = int(str(column_id).lstrip("#")) - 1
+        except ValueError:
+            return None
+        columns = list(tree["columns"])
+        if not 0 <= column_index < len(columns):
+            return None
+        return columns[column_index]
+
+    def _show_result_details(self, result_id):
+        item = self.result_items.get(result_id)
+        if item is None:
+            return
+
+        result_type = item.get("type", "")
+        type_name = "圍令" if result_type == "waler" else "支撐"
+        detail_window = tk.Toplevel(self.root)
+        detail_window.title(f"結果詳細資料 - {type_name} {result_id}")
+        detail_window.geometry("760x620")
+        detail_window.minsize(560, 420)
+        detail_window.transient(self.root)
+
+        detail_text = scrolledtext.ScrolledText(
+            detail_window,
+            wrap="word",
+            font=("Microsoft JhengHei", 10),
+            padx=12,
+            pady=12,
+        )
+        detail_text.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        detail_text.insert("1.0", self._format_result_details(result_id, item))
+        detail_text.configure(state="disabled")
+
+        ttk.Button(
+            detail_window,
+            text="關閉",
+            command=detail_window.destroy,
+        ).pack(anchor="e", padx=8, pady=(4, 8))
+
+    def _selected_result_id_for_custom_plan(self):
+        if not hasattr(self, "results_tree"):
+            return None
+        selected = self.results_tree.selection()
+        if not selected:
+            return None
+        selected_id = selected[0]
+        if self._is_result_group_iid(selected_id):
+            children = self.results_tree.get_children(selected_id)
+            return children[0] if children else None
+        return selected_id
+
+    def _selected_result_id_for_delete(self):
+        if not hasattr(self, "results_tree"):
+            return None
+        selected = self.results_tree.selection()
+        if not selected:
+            return None
+        selected_id = selected[0]
+        if self._is_result_group_iid(selected_id):
+            return None
+        return selected_id
+
+    @staticmethod
+    def _is_custom_result_item(item):
+        result = item.get("result") if isinstance(item, dict) else None
+        return isinstance(result, dict) and bool(result.get("custom"))
+
+    @staticmethod
+    def _delete_result_display_name(result_id, item):
+        result = item.get("result") if isinstance(item, dict) else None
+        if isinstance(result, dict) and item.get("type") == "waler":
+            waler_id = str(result.get("waler_id", "") or "").strip()
+            custom_label = str(result.get("custom_label", "") or "").strip()
+            if waler_id and custom_label:
+                return f"{waler_id}-{custom_label}"
+        return str(result_id)
+
+    def _remove_result_from_session_caches(self, result_id):
+        self.solver_memory.pop(result_id, None)
+        self.support_candidate_cache.pop(result_id, None)
+
+    def _delete_selected_result_plan(self):
+        result_id = self._selected_result_id_for_delete()
+        if not result_id:
+            messagebox.showwarning("刪除方案", "請先在結果頁中選擇要刪除的自訂方案。")
+            return
+
+        item = self.result_items.get(result_id)
+        if item is None:
+            return
+
+        if not self._is_custom_result_item(item):
+            messagebox.showwarning(
+                "刪除方案",
+                "系統產生方案不可刪除。\n請先建立自訂方案再進行編輯。",
+            )
+            return
+
+        display_name = self._delete_result_display_name(result_id, item)
+        confirmed = messagebox.askyesno(
+            "刪除方案",
+            f"確定要刪除：\n{display_name}\n嗎？",
+        )
+        if not confirmed:
+            return
+
+        group_iid = self._get_result_tree_info(result_id, item)["group_iid"]
+        self.result_items.pop(result_id, None)
+        self._remove_result_from_session_caches(result_id)
+
+        remaining_entries = self._get_result_group_entries(group_iid)
+        next_selected = remaining_entries[0][0] if remaining_entries else None
+        self._refresh_results_tree(selected_id=next_selected)
+        if next_selected and self.results_tree.exists(next_selected):
+            parent_id = self.results_tree.parent(next_selected)
+            if parent_id:
+                self.results_tree.item(parent_id, open=True)
+        self.update_preview(preserve_view=True)
+
+    def _support_config_by_id(self, support_id):
+        configs = self.build_support_inputs()
+        return {
+            str(config.support_id): config
+            for config in configs
+        }.get(str(support_id))
+
+    @staticmethod
+    def _support_plan_piece_rows(plan):
+        return [
+            (str(piece_type).lower(), int(round(length)))
+            for piece_type, length in list(getattr(plan, "pieces", []) or [])
+        ]
+
+    @staticmethod
+    def _support_kind_label(kind):
+        return {
+            "steel": "鋼材",
+            "shim": "調整塊",
+            "jack": "千斤頂",
+        }.get(str(kind).lower(), str(kind))
+
+    @staticmethod
+    def _support_kind_key(value):
+        text = str(value or "").strip().lower()
+        return {
+            "steel": "steel",
+            "鋼材": "steel",
+            "shim": "shim",
+            "墊片": "shim",
+            "調整塊": "shim",
+            "jack": "jack",
+            "千斤頂": "jack",
+        }.get(text, "")
+
+    def _replace_support_plan(self, zoning, support_id, new_plan):
+        item = self.result_items.get(zoning)
+        solution = item.get("result") if isinstance(item, dict) else None
+        plans = list(getattr(solution, "plans", []) or [])
+        for index, plan in enumerate(plans):
+            if str(getattr(plan, "support_id", "")) == str(support_id):
+                plans[index] = new_plan
+                solution.plans = plans
+                self._recalculate_support_global_solution(solution)
+                return True
+        return False
+
+    def _recalculate_support_global_solution(self, solution):
+        plans = list(getattr(solution, "plans", []) or [])
+        total_score = 0.0
+        group_penalty = 0.0
+        valid = True
+        reasons = []
+        for plan in plans:
+            total_score += float(getattr(plan, "score", 0.0) or 0.0)
+            if not (getattr(plan, "valid", False) and not getattr(plan, "reason", "")):
+                valid = False
+        for prev_plan, curr_plan in zip(plans, plans[1:]):
+            ok, penalty = support.pair_penalty(prev_plan, curr_plan)
+            if ok:
+                group_penalty += float(penalty)
+            else:
+                valid = False
+                group_penalty += float(penalty)
+                reasons.append(
+                    f"{getattr(prev_plan, 'support_id', '')} 與 {getattr(curr_plan, 'support_id', '')} 千斤頂距離不足"
+                )
+        solution.total_score = total_score + group_penalty
+        solution.valid = valid
+        solution.reason = "；".join(reasons)
+        solution.group_penalty = group_penalty
+        return group_penalty, reasons
+
+    def _find_support_forbidden_zone_hit(self, plan, config):
+        for joint in getattr(plan, "joints", []) or []:
+            for zone_start, zone_end, zone_type in support.forbidden_zones(config):
+                if zone_start <= joint <= zone_end:
+                    return joint, zone_start, zone_end, zone_type
+        return None
+
+    def _format_support_status(self, plan, config):
+        valid = bool(getattr(plan, "valid", False)) and not getattr(plan, "reason", "")
+        if valid:
+            return "狀態：✅ 合法\n✅ 所有檢查均符合規範"
+
+        lines = ["狀態：❌ 不合法"]
+        reason = str(getattr(plan, "reason", "") or "").strip()
+        if reason:
+            for part in reason.split(";"):
+                part = part.strip()
+                if part:
+                    lines.append(f"❌ {part}")
+
+        zone_hit = self._find_support_forbidden_zone_hit(plan, config)
+        if zone_hit:
+            joint, zone_start, zone_end, zone_type = zone_hit
+            lines.extend([
+                "",
+                "違規位置說明",
+                f"接頭位置：{self._format_result_value(joint)} mm",
+                f"禁止區：{self._format_result_value(zone_start)} ~ {self._format_result_value(zone_end)} mm",
+                f"類型：{zone_type}",
+            ])
+        return "\n".join(lines)
+
+    def _format_support_plan_breakdown(self, plan, config, neighbor_checks=None):
+        breakdown = dict(getattr(plan, "breakdown", {}) or {})
+        short_penalty = breakdown.get("short_penalty", 0.0)
+        joint_penalty = breakdown.get("joint_penalty", 0.0)
+        gap_penalty = breakdown.get("gap_penalty", 0.0)
+        jack_edge_penalty = breakdown.get("jack_edge_penalty", 0.0)
+        invalid_penalty = breakdown.get("invalid_penalty", 0.0)
+        steel_lengths = [length for kind, length in getattr(plan, "pieces", []) if kind == "steel"]
+        short_count = sum(1 for length in steel_lengths if length < 4000)
+        joint_count = len(getattr(plan, "joints", []) or [])
+        gap_delta = abs(getattr(plan, "gap", 0) - support.TARGET_GAP)
+        quality_score = (
+            float(short_penalty)
+            + float(joint_penalty)
+            + float(gap_penalty)
+            + float(jack_edge_penalty)
+        )
+        group_penalty = sum(float(item.get("penalty", 0.0) or 0.0) for item in neighbor_checks or [])
+        ranking_score = quality_score + float(invalid_penalty) + group_penalty
+        lines = [
+            f"支撐：{getattr(plan, 'support_id', '')}",
+            f"總長：{self._format_result_value(getattr(config, 'total_length', '無資料'))} mm",
+            f"目標千斤頂區域：{getattr(config, 'target_jack_region', '無資料')}",
+            "",
+            self._format_support_status(plan, config),
+            "",
+            f"千斤頂中心：{self._format_result_value(getattr(plan, 'jack_center', '無資料'))}",
+            f"千斤頂區域：{getattr(plan, 'jack_region_id', '無資料')}",
+            f"接頭位置：{self._format_result_list(getattr(plan, 'joints', []))}",
+            f"餘長(mm)：{self._format_result_value(getattr(plan, 'gap', '無資料'))}",
+            "",
+            "【品質評分】",
+            f"短鋼材：{short_count} × 8000 = {self._format_result_value(short_penalty)}",
+            f"接頭數：{joint_count} × 1200 = {self._format_result_value(joint_penalty)}",
+            f"餘長：|{self._format_result_value(getattr(plan, 'gap', 0))} - {support.TARGET_GAP}| × 20 = {self._format_result_value(gap_penalty)}",
+            f"千斤頂靠近端部：{self._format_result_value(jack_edge_penalty)}",
+            "-" * 50,
+            f"品質分數：{self._format_result_value(quality_score)}",
+            "",
+            "【群組檢查】",
+        ]
+        if neighbor_checks:
+            for item in neighbor_checks:
+                relation = item.get("relation", "相鄰支撐")
+                lines.extend([
+                    f"與{relation}：{item.get('support_id', '')}",
+                    f"千斤頂距離：{self._format_result_value(item.get('distance', '無資料'))} mm",
+                    "✅ 合法" if item.get("ok") else f"❌ 小於規定 {support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm",
+                    (
+                        f"區域差異：|{item.get('current_region')} - {item.get('neighbor_region')}| × 3000 "
+                        f"= {self._format_result_value(item.get('region_penalty', 0))}"
+                    ),
+                    "",
+                ])
+        else:
+            lines.append("無相鄰支撐")
+            lines.append("")
+        lines.extend([
+            "【求解器排序分數】",
+            f"品質分數：{self._format_result_value(quality_score)}",
+            f"不合法懲罰：{self._format_result_value(invalid_penalty)}",
+            f"群組懲罰：{self._format_result_value(group_penalty)}",
+            "-" * 50,
+            f"排序用總分：{self._format_result_value(ranking_score)}",
+        ])
+        return "\n".join(lines)
+
+    def _support_neighbor_penalty_for_plan(self, zoning, support_id):
+        item = self.result_items.get(zoning)
+        solution = item.get("result") if isinstance(item, dict) else None
+        plans = list(getattr(solution, "plans", []) or [])
+        index = next(
+            (idx for idx, plan in enumerate(plans) if str(getattr(plan, "support_id", "")) == str(support_id)),
+            None,
+        )
+        if index is None:
+            return 0.0, []
+        checks = []
+        current = plans[index]
+        if index > 0:
+            neighbor = plans[index - 1]
+            ok, penalty = support.pair_penalty(neighbor, current)
+            checks.append({
+                "relation": "前一支支撐",
+                "support_id": getattr(neighbor, "support_id", ""),
+                "distance": abs(getattr(neighbor, "jack_center", 0) - getattr(current, "jack_center", 0)),
+                "ok": ok,
+                "penalty": float(penalty),
+                "current_region": getattr(current, "jack_region_id", "無資料"),
+                "neighbor_region": getattr(neighbor, "jack_region_id", "無資料"),
+                "region_penalty": (
+                    3000 * abs(getattr(neighbor, "jack_region_id", 0) - getattr(current, "jack_region_id", 0))
+                    if ok and getattr(neighbor, "jack_region_id", None) != getattr(current, "jack_region_id", None)
+                    else 0
+                ),
+            })
+        if index + 1 < len(plans):
+            neighbor = plans[index + 1]
+            ok, penalty = support.pair_penalty(current, neighbor)
+            checks.append({
+                "relation": "下一支支撐",
+                "support_id": getattr(neighbor, "support_id", ""),
+                "distance": abs(getattr(neighbor, "jack_center", 0) - getattr(current, "jack_center", 0)),
+                "ok": ok,
+                "penalty": float(penalty),
+                "current_region": getattr(current, "jack_region_id", "無資料"),
+                "neighbor_region": getattr(neighbor, "jack_region_id", "無資料"),
+                "region_penalty": (
+                    3000 * abs(getattr(current, "jack_region_id", 0) - getattr(neighbor, "jack_region_id", 0))
+                    if ok and getattr(current, "jack_region_id", None) != getattr(neighbor, "jack_region_id", None)
+                    else 0
+                ),
+            })
+        return checks
+
+    def _open_support_plan_editor(self, zoning, support_id):
+        item = self.result_items.get(zoning)
+        solution = item.get("result") if isinstance(item, dict) else None
+        plan = next(
+            (
+                plan
+                for plan in list(getattr(solution, "plans", []) or [])
+                if str(getattr(plan, "support_id", "")) == str(support_id)
+            ),
+            None,
+        )
+        config = self._support_config_by_id(support_id)
+        if plan is None or config is None:
+            messagebox.showwarning("支撐編輯器", "找不到支撐方案或支撐設定資料。")
+            return
+
+        editor = tk.Toplevel(self.root)
+        editor.title(f"支撐配置編輯器 - {zoning} / {support_id}")
+        editor.geometry("780x760")
+        editor.minsize(680, 560)
+        editor.transient(self.root)
+
+        status_var = tk.StringVar(value="狀態：檢查中...")
+        ttk.Label(
+            editor,
+            text=(
+                f"支撐：{support_id}\n"
+                f"總長：{config.total_length} mm\n"
+                f"目標千斤頂區域：{config.target_jack_region}"
+            ),
+            font=("Microsoft JhengHei", 10, "bold"),
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(10, 4))
+
+        ttk.Label(
+            editor,
+            textvariable=status_var,
+            font=("Microsoft JhengHei", 11, "bold"),
+        ).pack(fill="x", padx=10, pady=(0, 6))
+
+        ttk.Label(
+            editor,
+            text=(
+                "雙擊「類型」可選鋼材／調整塊／千斤頂；雙擊「長度」可修改。"
+                "鋼材長度必須存在於可用鋼材長度；調整塊使用下拉選單；千斤頂長度固定。"
+            ),
+            wraplength=680,
+        ).pack(fill="x", padx=10, pady=(10, 6))
+
+        table_frame = ttk.Frame(editor)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+        columns = ("index", "type", "length")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        tree.heading("index", text="段次")
+        tree.heading("type", text="類型")
+        tree.heading("length", text="長度(mm)")
+        tree.column("index", width=70, anchor="center", stretch=False)
+        tree.column("type", width=130, anchor="center")
+        tree.column("length", width=130, anchor="center")
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=y_scroll.set)
+
+        button_frame = ttk.Frame(editor)
+        button_frame.pack(fill="x", padx=10, pady=(0, 6))
+
+        summary_text = scrolledtext.ScrolledText(
+            editor,
+            height=18,
+            wrap="word",
+            font=("Microsoft JhengHei", 10),
+            state="disabled",
+        )
+        summary_text.pack(fill="both", padx=10, pady=(0, 8))
+
+        editing_entry = {"widget": None}
+
+        def normalize_kind(value):
+            return self._support_kind_key(value)
+
+        def rows():
+            data = []
+            for child in tree.get_children(""):
+                kind = normalize_kind(tree.set(child, "type"))
+                raw_length = tree.set(child, "length")
                 try:
-                    value = int(part)
-                    support_points.append(value)
+                    length = int(round(float(raw_length)))
                 except ValueError:
+                    return None
+                if kind not in ("steel", "shim", "jack") or length <= 0:
+                    return None
+                if kind == "jack":
+                    length = support.JACK_LENGTH
+                    tree.set(child, "length", length)
+                data.append((kind, length))
+            return data
+
+        def refresh_rows(piece_rows):
+            tree.delete(*tree.get_children(""))
+            for index, (kind, length) in enumerate(piece_rows, start=1):
+                tree.insert("", "end", iid=f"piece_{index}", values=(index, self._support_kind_label(kind), length))
+
+        def renumber():
+            for index, child in enumerate(tree.get_children(""), start=1):
+                tree.set(child, "index", index)
+
+        def validate_piece_inputs(piece_rows):
+            if piece_rows is None:
+                return "❌ 類型或長度格式錯誤"
+            jack_count = sum(1 for kind, _length in piece_rows if kind == "jack")
+            if jack_count != 1:
+                return "❌ 千斤頂數量不是 1"
+            for kind, length in piece_rows:
+                if kind == "steel" and length not in support.STEEL_LENGTHS:
+                    return f"❌ 鋼材長度不合法：{length} mm"
+                if kind == "shim" and length not in support.SHIM_LENGTHS:
+                    return f"❌ 調整塊長度不合法：{length} mm"
+                if kind == "jack" and length != support.JACK_LENGTH:
+                    return f"❌ 千斤頂長度必須固定為 {support.JACK_LENGTH} mm"
+            return None
+
+        def evaluate_and_refresh():
+            piece_rows = rows()
+            if piece_rows is None:
+                status_var.set("狀態：❌ 類型或長度格式錯誤")
+                summary_text.configure(state="normal")
+                summary_text.delete("1.0", "end")
+                summary_text.insert("1.0", "❌ 類型或長度格式錯誤，請修正表格內容。")
+                summary_text.configure(state="disabled")
+                return
+            input_error = validate_piece_inputs(piece_rows)
+            new_plan = support.evaluate_single_support(config, piece_rows)
+            self._replace_support_plan(zoning, support_id, new_plan)
+            neighbor_checks = self._support_neighbor_penalty_for_plan(zoning, support_id)
+
+            valid = bool(getattr(new_plan, "valid", False)) and not getattr(new_plan, "reason", "") and not input_error
+            if valid:
+                status_var.set("狀態：✅ 合法")
+            else:
+                reason = input_error or getattr(new_plan, "reason", "") or "不合法"
+                status_var.set(f"狀態：❌ {reason}")
+
+            summary_text.configure(state="normal")
+            summary_text.delete("1.0", "end")
+            summary_text.insert("1.0", self._format_support_plan_breakdown(new_plan, config, neighbor_checks))
+            summary_text.configure(state="disabled")
+            self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
+            parent_id = self.results_tree.parent(self._support_plan_iid(zoning, support_id)) if self.results_tree.exists(self._support_plan_iid(zoning, support_id)) else ""
+            if parent_id:
+                self.results_tree.item(parent_id, open=True)
+            self.update_preview(preserve_view=True)
+
+        def add_piece(kind, length):
+            index = len(tree.get_children("")) + 1
+            if kind == "jack":
+                length = support.JACK_LENGTH
+            tree.insert("", "end", iid=f"piece_{index}", values=(index, self._support_kind_label(kind), length))
+            evaluate_and_refresh()
+
+        def delete_piece():
+            selected = tree.selection()
+            if not selected:
+                return
+            tree.delete(selected[0])
+            renumber()
+            evaluate_and_refresh()
+
+        def move_piece(delta):
+            selected = tree.selection()
+            if not selected:
+                return
+            child = selected[0]
+            children = list(tree.get_children(""))
+            index = children.index(child)
+            new_index = index + delta
+            if not 0 <= new_index < len(children):
+                return
+            tree.move(child, "", new_index)
+            renumber()
+            evaluate_and_refresh()
+
+        ttk.Button(button_frame, text="新增鋼材", command=lambda: add_piece("steel", 5000)).pack(side="left", padx=(0, 5))
+        ttk.Button(button_frame, text="新增調整塊", command=lambda: add_piece("shim", 150)).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="新增千斤頂", command=lambda: add_piece("jack", support.JACK_LENGTH)).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="刪除構件", command=delete_piece).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="上移", command=lambda: move_piece(-1)).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="下移", command=lambda: move_piece(1)).pack(side="left", padx=5)
+
+        def finish_edit(row_id, column, widget):
+            if not widget.winfo_exists():
+                return
+            value = widget.get().strip()
+            widget.destroy()
+            editing_entry["widget"] = None
+            if column == "type":
+                normalized = normalize_kind(value)
+                if normalized not in ("steel", "shim", "jack"):
+                    messagebox.showerror("輸入錯誤", "類型必須是鋼材、調整塊或千斤頂。", parent=editor)
+                    return
+                tree.set(row_id, "type", self._support_kind_label(normalized))
+                if normalized == "jack":
+                    tree.set(row_id, "length", support.JACK_LENGTH)
+                elif normalized == "shim":
+                    current_length = self._to_number(tree.set(row_id, "length"))
+                    if current_length not in support.SHIM_LENGTHS:
+                        tree.set(row_id, "length", support.SHIM_LENGTHS[0])
+            elif column == "length":
+                kind = normalize_kind(tree.set(row_id, "type"))
+                if kind == "jack":
+                    tree.set(row_id, "length", support.JACK_LENGTH)
+                    evaluate_and_refresh()
+                    return
+                try:
+                    length = int(round(float(value)))
+                except ValueError:
+                    messagebox.showerror("輸入錯誤", "長度(mm) 必須是數字。", parent=editor)
+                    return
+                if length <= 0:
+                    messagebox.showerror("輸入錯誤", "長度(mm) 必須大於 0。", parent=editor)
+                    return
+                if kind == "steel" and length not in support.STEEL_LENGTHS:
                     messagebox.showerror(
                         "輸入錯誤",
-                        f"支撐點 {part} 不是有效整數"
+                        f"鋼材長度必須存在於可用鋼材長度：{support.STEEL_LENGTHS}",
+                        parent=editor,
                     )
                     return
+                if kind == "shim" and length not in support.SHIM_LENGTHS:
+                    messagebox.showerror(
+                        "輸入錯誤",
+                        f"調整塊長度必須存在於可用調整塊長度：{support.SHIM_LENGTHS}",
+                        parent=editor,
+                    )
+                    return
+                tree.set(row_id, "length", length)
+            evaluate_and_refresh()
+
+        def start_edit(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return
+            row_id = tree.identify_row(event.y)
+            column_id = tree.identify_column(event.x)
+            column = self._tree_column_key(tree, column_id)
+            if not row_id or column not in ("type", "length"):
+                return
+            if column == "length" and normalize_kind(tree.set(row_id, "type")) == "jack":
+                messagebox.showinfo("千斤頂長度固定", f"千斤頂長度固定為 {support.JACK_LENGTH} mm，不可修改。", parent=editor)
+                return
+            bbox = tree.bbox(row_id, column_id)
+            if not bbox:
+                return
+            if editing_entry["widget"] is not None and editing_entry["widget"].winfo_exists():
+                editing_entry["widget"].destroy()
+            x, y, width, height = bbox
+            if column == "type":
+                widget = ttk.Combobox(tree, values=("鋼材", "調整塊", "千斤頂"), state="readonly")
+                widget.set(tree.set(row_id, column))
+            elif normalize_kind(tree.set(row_id, "type")) == "shim":
+                widget = ttk.Combobox(tree, values=[str(value) for value in support.SHIM_LENGTHS], state="readonly")
+                widget.set(tree.set(row_id, column))
+            else:
+                widget = tk.Entry(tree)
+                widget.insert(0, tree.set(row_id, column))
+            widget.place(x=x, y=y, width=width, height=height)
+            widget.focus_set()
+            widget.bind("<Return>", lambda _event: finish_edit(row_id, column, widget))
+            widget.bind("<FocusOut>", lambda _event: finish_edit(row_id, column, widget))
+            if isinstance(widget, ttk.Combobox):
+                widget.bind("<<ComboboxSelected>>", lambda _event: finish_edit(row_id, column, widget))
+            editing_entry["widget"] = widget
+
+        tree.bind("<Double-1>", start_edit)
+        refresh_rows(self._support_plan_piece_rows(plan))
+        evaluate_and_refresh()
+
+        def close_editor():
+            editor.destroy()
+
+        editor.protocol("WM_DELETE_WINDOW", close_editor)
+        ttk.Button(editor, text="關閉", command=close_editor).pack(anchor="e", padx=10, pady=(0, 10))
+
+    def _create_custom_waler_plan_from_selection(self):
+        source_id = self._selected_result_id_for_custom_plan()
+        if not source_id:
+            messagebox.showwarning("建立自訂方案", "請先在結果頁選擇一個圍令方案。")
+            return
+
+        source_item = self.result_items.get(source_id)
+        if not source_item or source_item.get("type") != "waler":
+            messagebox.showwarning("建立自訂方案", "自訂方案目前僅支援圍令方案。")
+            return
+
+        source_result = source_item.get("result") or {}
+        source_plan = copy.deepcopy(source_result.get("selected_plan") or {})
+        segments = list(source_plan.get("segments", []) or [])
+        if not segments:
+            messagebox.showwarning("建立自訂方案", "選取的圍令方案沒有分段資料。")
+            return
+
+        waler_id = str(source_result.get("waler_id", "")).strip()
+        if not waler_id:
+            messagebox.showwarning("建立自訂方案", "選取的方案缺少圍令編號。")
+            return
+
+        result_id, custom_label = self._next_custom_waler_result_id(waler_id)
+        ratio_targets = source_result.get("ratio_targets") or source_plan.get("ratio_targets")
+        custom_plan = self._recalculate_custom_waler_plan(
+            source_plan,
+            segments,
+            ratio_targets=ratio_targets,
+            waler_id=waler_id,
+            result_context=source_result,
+        )
+        custom_plan["custom"] = True
+
+        self.result_items[result_id] = {
+            "type": "waler",
+            "result": {
+                "waler_id": waler_id,
+                "custom": True,
+                "custom_label": custom_label,
+                "source_result_id": source_id,
+                "selected_plan": custom_plan,
+                "ratio_targets": ratio_targets,
+                "required_length": source_result.get("required_length"),
+                "forbidden_points": list(source_result.get("forbidden_points") or []),
+                "joint_clearance": source_result.get("joint_clearance", 300),
+                "min_piece_length": source_result.get("min_piece_length", 1000),
+                "max_piece_length": source_result.get("max_piece_length", 10000),
+            },
+            "visible": True,
+        }
+        self._refresh_results_tree(selected_id=result_id)
+        parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
+        if parent_id:
+            self.results_tree.item(parent_id, open=True)
+        self.update_preview(preserve_view=True)
+        self._open_custom_waler_plan_editor(result_id)
+
+    def _open_custom_waler_plan_editor(self, result_id):
+        item = self.result_items.get(result_id)
+        if not item or item.get("type") != "waler":
+            return
+
+        result = item.get("result") or {}
+        plan = result.get("selected_plan") or {}
+        waler_id = str(result.get("waler_id", "")).strip()
+        custom_label = result.get("custom_label") or result_id
+        ratio_targets = result.get("ratio_targets") or plan.get("ratio_targets")
+
+        editor = tk.Toplevel(self.root)
+        editor.title(f"建立自訂方案 - {waler_id}-{custom_label}")
+        editor.geometry("620x620")
+        editor.minsize(520, 480)
+        editor.transient(self.root)
+
+        ttk.Label(
+            editor,
+            text="直接雙擊「料長(mm)」欄即可修改；修改後會立即重新評分，不會重新執行基因演算法。",
+            wraplength=560,
+        ).pack(fill="x", padx=10, pady=(10, 6))
+
+        status_var = tk.StringVar(value="方案狀態：檢查中")
+        status_label = ttk.Label(
+            editor,
+            textvariable=status_var,
+            font=("Microsoft JhengHei", 11, "bold"),
+        )
+        status_label.pack(fill="x", padx=10, pady=(0, 8))
+
+        table_frame = ttk.Frame(editor)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        table_frame.rowconfigure(0, weight=1)
+        table_frame.columnconfigure(0, weight=1)
+
+        columns = ("segment_index", "length")
+        tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
+        tree.heading("segment_index", text="段次")
+        tree.heading("length", text="料長(mm)")
+        tree.column("segment_index", width=80, minwidth=60, anchor="center", stretch=False)
+        tree.column("length", width=160, minwidth=100, anchor="center")
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=y_scroll.set)
+
+        summary_text = scrolledtext.ScrolledText(
+            editor,
+            height=10,
+            wrap="word",
+            font=("Microsoft JhengHei", 10),
+            state="disabled",
+        )
+        summary_text.pack(fill="both", padx=10, pady=(0, 8))
+
+        editing_entry = {"widget": None}
+
+        def current_segments():
+            values = []
+            for child_id in tree.get_children(""):
+                raw_value = tree.set(child_id, "length")
+                try:
+                    value = int(round(float(raw_value)))
+                except ValueError:
+                    return None
+                if value <= 0:
+                    return None
+                values.append(value)
+            return values
+
+        def refresh_table(segments):
+            tree.delete(*tree.get_children(""))
+            for index, length in enumerate(segments, start=1):
+                tree.insert("", "end", iid=f"segment_{index}", values=(index, length))
+
+        def update_summary():
+            latest_plan = (self.result_items.get(result_id, {}).get("result") or {}).get("selected_plan") or {}
+            legality = latest_plan.get("legality") or {}
+            status_var.set(f"方案狀態：{legality.get('summary', '未檢查')}")
+            status_label.configure(foreground="#2e7d32" if legality.get("valid") else "#c62828")
+            waler_length_text = "無資料"
+            waler_row = next(
+                (row for row in self.walers if str(row.get("WalerID", "")).strip() == waler_id),
+                None,
+            )
+            if waler_row:
+                x1 = self._to_number(waler_row.get("StartX"))
+                y1 = self._to_number(waler_row.get("StartY"))
+                x2 = self._to_number(waler_row.get("EndX"))
+                y2 = self._to_number(waler_row.get("EndY"))
+                if None not in (x1, y1, x2, y2):
+                    waler_length_text = self._format_result_value(self._line_length(x1, y1, x2, y2))
+            total_length = sum(latest_plan.get("segments", []) or [])
+            lines = [
+                f"{waler_id}-{custom_label} [自訂]",
+                f"方案狀態：{legality.get('summary', '未檢查')}",
+                f"分段總長：{self._format_result_value(total_length)} mm；圍令長度：{waler_length_text} mm",
+                "",
+                self._format_waler_score_breakdown(
+                    latest_plan,
+                    option_index=custom_label,
+                    ratio_targets=ratio_targets,
+                    segment_counts=latest_plan.get("segment_counts"),
+                ),
+            ]
+            errors = list(latest_plan.get("errors", []) or [])
+            legality_details = list(legality.get("details", []) or [])
+            if legality_details:
+                lines.extend(["", "合法性檢查：", *legality_details])
+            legality_warnings = list(legality.get("warnings", []) or [])
+            if legality_warnings:
+                lines.extend(["", "庫存檢查：", *[f"- {warning}" for warning in legality_warnings]])
+            if errors:
+                lines.extend(["", "提醒：", *[f"- {error}" for error in errors]])
+            summary_text.configure(state="normal")
+            summary_text.delete("1.0", "end")
+            summary_text.insert("1.0", "\n".join(lines))
+            summary_text.configure(state="disabled")
+
+        def apply_segments(segments):
+            custom_plan = self._recalculate_custom_waler_plan(
+                self.result_items[result_id]["result"].get("selected_plan") or {},
+                segments,
+                ratio_targets=ratio_targets,
+                waler_id=waler_id,
+                result_context=self.result_items[result_id]["result"],
+            )
+            custom_plan["custom"] = True
+            self.result_items[result_id]["result"]["selected_plan"] = custom_plan
+            self.result_items[result_id]["result"]["ratio_targets"] = ratio_targets or custom_plan.get("ratio_targets")
+            self._refresh_results_tree(selected_id=result_id)
+            parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
+            if parent_id:
+                self.results_tree.item(parent_id, open=True)
+            self.update_preview(preserve_view=True)
+            update_summary()
+
+        def finish_edit(row_id, entry):
+            if not entry.winfo_exists():
+                return
+            new_value = entry.get().strip()
+            entry.destroy()
+            editing_entry["widget"] = None
+            try:
+                parsed = int(round(float(new_value)))
+            except ValueError:
+                messagebox.showerror("輸入錯誤", "料長(mm) 必須是大於 0 的數字", parent=editor)
+                return
+            if parsed <= 0:
+                messagebox.showerror("輸入錯誤", "料長(mm) 必須大於 0", parent=editor)
+                return
+            tree.set(row_id, "length", parsed)
+            segments = current_segments()
+            if segments is None:
+                return
+            apply_segments(segments)
+
+        def start_edit(event):
+            if tree.identify_region(event.x, event.y) != "cell":
+                return
+            row_id = tree.identify_row(event.y)
+            column_id = tree.identify_column(event.x)
+            if not row_id or column_id != "#2":
+                return
+            bbox = tree.bbox(row_id, column_id)
+            if not bbox:
+                return
+            if editing_entry["widget"] is not None and editing_entry["widget"].winfo_exists():
+                editing_entry["widget"].destroy()
+            x, y, width, height = bbox
+            entry = tk.Entry(tree)
+            entry.place(x=x, y=y, width=width, height=height)
+            entry.insert(0, tree.set(row_id, "length"))
+            entry.focus_set()
+            entry.bind("<Return>", lambda _event: finish_edit(row_id, entry))
+            entry.bind("<FocusOut>", lambda _event: finish_edit(row_id, entry))
+            editing_entry["widget"] = entry
+
+        tree.bind("<Double-1>", start_edit)
+        refresh_table(plan.get("segments", []) or [])
+        update_summary()
+
+        ttk.Button(editor, text="關閉", command=editor.destroy).pack(anchor="e", padx=10, pady=(0, 10))
+
+    @staticmethod
+    def _result_group_iid(result_type, group_id):
+        return f"__result_group__:{result_type}:{group_id}"
+
+    @staticmethod
+    def _is_result_group_iid(item_id):
+        return str(item_id).startswith("__result_group__:")
+
+    @staticmethod
+    def _support_plan_iid(zoning, support_id):
+        return f"__support_plan__:{zoning}:{support_id}"
+
+    @staticmethod
+    def _is_support_plan_iid(item_id):
+        return str(item_id).startswith("__support_plan__:")
+
+    @staticmethod
+    def _parse_support_plan_iid(item_id):
+        parts = str(item_id).split(":", 2)
+        if len(parts) != 3:
+            return "", ""
+        return parts[1], parts[2]
+
+    @staticmethod
+    def _custom_suffix_from_index(index):
+        index = max(0, int(index))
+        letters = []
+        while True:
+            index, remainder = divmod(index, 26)
+            letters.append(chr(ord("A") + remainder))
+            if index == 0:
+                break
+            index -= 1
+        return "".join(reversed(letters))
+
+    @staticmethod
+    def _custom_label_sort_value(label):
+        text = str(label or "")
+        if "自訂方案" not in text:
+            return 9999
+        suffix = text.split("自訂方案", 1)[1].split("[", 1)[0].strip()
+        value = 0
+        for char in suffix:
+            if not "A" <= char <= "Z":
+                continue
+            value = value * 26 + (ord(char) - ord("A") + 1)
+        return value or 9999
+
+    def _next_custom_waler_result_id(self, waler_id):
+        index = 0
+        while True:
+            label = f"自訂方案{self._custom_suffix_from_index(index)}"
+            result_id = f"{waler_id}-{label}"
+            if result_id not in self.result_items:
+                return result_id, label
+            index += 1
+
+    def _get_result_tree_info(self, result_id, item):
+        result_type = item.get("type", "")
+        result = item.get("result")
+
+        if result_type == "waler":
+            waler_id = ""
+            option_index = None
+            if isinstance(result, dict):
+                waler_id = str(result.get("waler_id", "")).strip()
+                option_index = result.get("option_index")
+            if not waler_id:
+                waler_id = str(result_id).split("-方案", 1)[0]
+            if isinstance(result, dict) and result.get("custom"):
+                child_label = result.get("custom_label") or str(result_id).replace(f"{waler_id}-", "")
+                plan = result.get("selected_plan") or {}
+                legality = plan.get("legality") or {}
+                status_icon = "✅" if legality.get("valid") else "❌"
+                child_label = f"{child_label} [自訂] {status_icon}"
+                option_sort = 10_000 + self._custom_label_sort_value(child_label)
+            else:
+                child_label = f"方案{option_index}" if option_index is not None else str(result_id).replace(f"{waler_id}-", "")
+                try:
+                    option_sort = int(option_index)
+                except (TypeError, ValueError):
+                    option_sort = 9999
+            return {
+                "group_iid": self._result_group_iid("waler", waler_id),
+                "group_id": waler_id,
+                "group_label": waler_id,
+                "child_label": child_label,
+                "type_label": "圍令",
+                "sort_key": (0, waler_id, option_sort, str(result_id)),
+            }
+
+        group_id = str(result_id).split("-方案", 1)[0]
+        child_label = str(result_id).replace(f"{group_id}-", "")
+        if child_label == str(result_id):
+            child_label = "配置"
+        return {
+            "group_iid": self._result_group_iid(result_type or "support", group_id),
+            "group_id": group_id,
+            "group_label": group_id,
+            "child_label": child_label,
+            "type_label": "支撐" if result_type == "support" else str(result_type),
+            "sort_key": (
+                {"waler": 0, "support": 1}.get(result_type, 2),
+                group_id,
+                str(result_id),
+            ),
+        }
+
+    def _get_result_group_entries(self, group_iid):
+        grouped_entries = []
+        for result_id, item in self.result_items.items():
+            info = self._get_result_tree_info(result_id, item)
+            if info["group_iid"] == group_iid:
+                grouped_entries.append((result_id, item, info))
+        grouped_entries.sort(key=lambda entry: entry[2]["sort_key"])
+        return grouped_entries
+
+    @staticmethod
+    def _result_group_visible_mark(items):
+        if not items:
+            return "☐"
+        visible_count = sum(1 for item in items if item.get("visible", True))
+        if visible_count == len(items):
+            return "☑"
+        if visible_count == 0:
+            return "☐"
+        return "▣"
+
+    @staticmethod
+    def _result_item_visible_mark(item):
+        return "☑" if item.get("visible", True) else "☐"
+
+    @staticmethod
+    def _support_plan_ids(item):
+        result = item.get("result") if isinstance(item, dict) else None
+        return [
+            str(getattr(plan, "support_id", "") or "").strip()
+            for plan in list(getattr(result, "plans", []) or [])
+            if str(getattr(plan, "support_id", "") or "").strip()
+        ]
+
+    def _support_plan_visible(self, item, support_id):
+        if not isinstance(item, dict):
+            return False
+        visibility = item.setdefault("support_visibility", {})
+        support_id = str(support_id)
+        if support_id not in visibility:
+            visibility[support_id] = item.get("visible", True)
+        return bool(visibility.get(support_id, True))
+
+    def _support_group_visible_mark(self, group_items):
+        visible_states = []
+        for item in group_items:
+            for support_id in self._support_plan_ids(item):
+                visible_states.append(self._support_plan_visible(item, support_id))
+        if not visible_states:
+            return "☐"
+        if all(visible_states):
+            return "☑"
+        if not any(visible_states):
+            return "☐"
+        return "▣"
+
+    def _toggle_result_group_visibility(self, group_iid):
+        grouped_entries = self._get_result_group_entries(group_iid)
+        if not grouped_entries:
+            return
+
+        if all(item.get("type") == "support" for _result_id, item, _info in grouped_entries):
+            all_support_ids = [
+                (item, support_id)
+                for _result_id, item, _info in grouped_entries
+                for support_id in self._support_plan_ids(item)
+            ]
+            make_visible = not all(
+                self._support_plan_visible(item, support_id)
+                for item, support_id in all_support_ids
+            )
+            for item, support_id in all_support_ids:
+                item.setdefault("support_visibility", {})[support_id] = make_visible
+            for _result_id, item, _info in grouped_entries:
+                item["visible"] = make_visible
+            self._refresh_results_tree(selected_id=group_iid)
+            self.update_preview(preserve_view=True)
+            return
+
+        make_visible = not all(item.get("visible", True) for _result_id, item, _info in grouped_entries)
+        for _result_id, item, _info in grouped_entries:
+            item["visible"] = make_visible
+
+        self._refresh_results_tree(selected_id=group_iid)
+        self.update_preview(preserve_view=True)
+
+    def _toggle_result_visibility(self, result_id):
+        item = self.result_items.get(result_id)
+        if item is None:
+            return
+
+        item["visible"] = not item.get("visible", True)
+        self._refresh_results_tree(selected_id=result_id)
+        self.update_preview(preserve_view=True)
+
+    def _toggle_support_plan_visibility(self, zoning, support_id):
+        item = self.result_items.get(zoning)
+        if not item or item.get("type") != "support":
+            return
+        visibility = item.setdefault("support_visibility", {})
+        support_id = str(support_id)
+        visibility[support_id] = not self._support_plan_visible(item, support_id)
+        item["visible"] = any(
+            self._support_plan_visible(item, plan_id)
+            for plan_id in self._support_plan_ids(item)
+        )
+        self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
+        parent_id = self.results_tree.parent(self._support_plan_iid(zoning, support_id)) if self.results_tree.exists(self._support_plan_iid(zoning, support_id)) else ""
+        if parent_id:
+            self.results_tree.item(parent_id, open=True)
+        self.update_preview(preserve_view=True)
+
+    @staticmethod
+    def _format_result_value(value, decimals=1):
+        if value == "N/A":
+            return "無資料"
+        if isinstance(value, (int, float)):
+            if float(value).is_integer():
+                return str(int(value))
+            return f"{value:.{decimals}f}"
+        return str(value)
+
+    @classmethod
+    def _format_result_list(cls, values):
+        values = list(values or [])
+        if not values:
+            return "無"
+        return ", ".join(cls._format_result_value(value) for value in values)
+
+    @classmethod
+    def _format_waler_score_breakdown(
+        cls,
+        plan,
+        option_index=None,
+        ratio_targets=None,
+        segment_counts=None,
+    ):
+        plan = plan or {}
+        segments = list(plan.get("segments", []) or [])
+        joints = list(plan.get("joints", []) or [])
+        total_segments = len(segments)
+
+        def finite_number(value, default=0.0):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return default
+            return number if math.isfinite(number) else default
+
+        def count_value(value, default=0):
+            try:
+                return int(round(float(value)))
+            except (TypeError, ValueError):
+                return default
+
+        def score_text(value):
+            return cls._format_result_value(value, decimals=2)
+
+        targets_source = ratio_targets or plan.get("ratio_targets") or {}
+        target_defaults = {"short": 0.2, "mid": 0.5, "long": 0.3}
+        targets = {
+            key: finite_number(
+                targets_source.get(key, targets_source.get(f"{key}_segment_ratio_target")),
+                target_defaults[key],
+            )
+            for key in ("short", "mid", "long")
+        }
+
+        counts_source = segment_counts or plan.get("segment_counts") or {}
+        ratios_source = plan.get("segment_ratios") or {}
+        counts = {}
+        for key in ("short", "mid", "long"):
+            if key in counts_source and counts_source.get(key) is not None:
+                counts[key] = count_value(counts_source.get(key))
+            else:
+                counts[key] = count_value(
+                    finite_number(ratios_source.get(key), 0.0) * total_segments
+                )
+
+        actual_ratios = {
+            key: (counts[key] / total_segments if total_segments else 0.0)
+            for key in ("short", "mid", "long")
+        }
+        ratio_deviation = sum(
+            abs(actual_ratios[key] - targets[key])
+            for key in ("short", "mid", "long")
+        )
+
+        buy_count = count_value(plan.get("buy_count"), 0)
+        under_4000_count = count_value(
+            plan.get("under_4000_segment_count"),
+            sum(1 for segment in segments if segment < 4000),
+        )
+        distinct_groups = count_value(
+            plan.get("distinct_groups"),
+            len({segment for segment in segments}),
+        )
+        joint_count = count_value(plan.get("joint_count"), len(joints))
+        max_length = max(segments) if segments else 0
+        min_length = min(segments) if segments else 0
+        length_variation = finite_number(
+            plan.get("length_variation"),
+            max_length - min_length if segments else 0,
+        )
+
+        buy_score = buy_count * 100_000
+        ratio_score = finite_number(
+            plan.get("ratio_penalty"),
+            ratio_deviation * 100_000,
+        )
+        ratio_deviation_for_score = ratio_score / 100_000
+        under_4000_score = under_4000_count * 100_000
+        distinct_score = distinct_groups * 5_000
+        joint_score = joint_count * 1_000
+        total_check = (
+            buy_score
+            + ratio_score
+            + under_4000_score
+            + distinct_score
+            + length_variation
+            + joint_score
+        )
+        total_score = finite_number(plan.get("score"), total_check)
+
+        def pct(value):
+            return f"{value * 100:.2f}%"
+
+        def compact_score_line(label, expression, value):
+            return f"{label:<12} {expression:<16} = {score_text(value):>10}"
+
+        def compact_ratio_line(label, key):
+            return (
+                f"{label} {pct(actual_ratios[key])}"
+                f"({counts[key]}/{total_segments}) → {pct(targets[key])}"
+            )
+
+        ratio_formula_lines = [
+            f"|{pct(actual_ratios['short'])}-{pct(targets['short'])}|",
+            f"+|{pct(actual_ratios['mid'])}-{pct(targets['mid'])}|",
+            f"+|{pct(actual_ratios['long'])}-{pct(targets['long'])}|",
+            f"={ratio_deviation_for_score:.4f}",
+        ]
+        total_check_text = " + ".join([
+            score_text(buy_score),
+            score_text(ratio_score),
+            score_text(under_4000_score),
+            score_text(distinct_score),
+            score_text(length_variation),
+            score_text(joint_score),
+        ])
+
+        if isinstance(option_index, str) and option_index.startswith("自訂方案"):
+            option_title = option_index
+        else:
+            option_title = f"方案 {option_index}" if option_index is not None else "方案"
+        return "\n".join([
+            option_title,
+            f"總分：{score_text(total_score)}",
+            f"分段長度：{segments}",
+            "評分拆解",
+            compact_score_line("購買數", f"{buy_count} ×100000", buy_score),
+            compact_score_line("比例偏差", f"{ratio_deviation_for_score:.4f}×100000", ratio_score),
+            compact_score_line("小於4000mm", f"{under_4000_count} ×100000", under_4000_score),
+            compact_score_line("材料種類", f"{distinct_groups} ×5000", distinct_score),
+            compact_score_line("料長差", f"{score_text(max_length)}-{score_text(min_length)}", length_variation),
+            compact_score_line("接頭數", f"{joint_count} ×1000", joint_score),
+            "比例偏差詳細",
+            compact_ratio_line("短段", "short"),
+            compact_ratio_line("中段", "mid"),
+            compact_ratio_line("長段", "long"),
+            *ratio_formula_lines,
+            f"總分驗算：{total_check_text} = {score_text(total_check)}",
+        ])
+
+    def _recalculate_custom_waler_plan(
+        self,
+        base_plan,
+        segments,
+        ratio_targets=None,
+        *,
+        waler_id=None,
+        result_context=None,
+    ):
+        base_plan = base_plan or {}
+        segments = [int(round(value)) for value in segments]
+        joints = []
+        position = 0
+        for segment in segments[:-1]:
+            position += segment
+            joints.append(position)
+
+        targets_source = ratio_targets or base_plan.get("ratio_targets") or {}
+        def target_value(key, legacy_key, default):
+            try:
+                value = targets_source.get(key, targets_source.get(legacy_key, default))
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+        targets = {
+            "short": target_value("short", "short_segment_ratio_target", 0.2),
+            "mid": target_value("mid", "mid_segment_ratio_target", 0.5),
+            "long": target_value("long", "long_segment_ratio_target", 0.3),
+        }
+        purchasable_lengths = self._get_purchasable_lengths()
+        cfg = wales.Config(
+            total_length=sum(segments),
+            support_points=[],
+            purchasable_lengths=purchasable_lengths,
+            short_segment_ratio_target=targets["short"],
+            mid_segment_ratio_target=targets["mid"],
+            long_segment_ratio_target=targets["long"],
+        )
+        segment_counts, segment_ratios = wales.segment_ratio_summary(segments, cfg)
+        ratio_penalty, segment_ratios = wales.calculate_ratio_penalty(segments, cfg)
+        allocation = wales.allocate_stock_best_fit(
+            segments,
+            self._get_inventory_items(),
+            purchasable_lengths,
+        )
+
+        if allocation is None:
+            assignments = []
+            buy_count = len(segments)
+            distinct_groups = len(set(segments))
+            length_variation = max(segments) - min(segments) if segments else 0
+            under_4000_segment_count = sum(1 for segment in segments if segment < 4000)
+            total_waste = 0
+            errors = ["部分料長不在庫存可購買長度內，材料配置未完成。"]
+        else:
+            assignments = allocation["assignments"]
+            buy_count = allocation["total_bought"]
+            distinct_groups = allocation["distinct_groups"]
+            length_variation = allocation["length_variation"]
+            under_4000_segment_count = allocation["under_4000_segment_count"]
+            total_waste = allocation["total_waste"]
+            errors = []
+
+        joint_count = len(joints)
+        score = (
+            buy_count * 100_000
+            + ratio_penalty
+            + under_4000_segment_count * 100_000
+            + distinct_groups * 5_000
+            + length_variation
+            + joint_count * 1_000
+        )
+
+        plan = copy.deepcopy(base_plan or {})
+        plan.update({
+            "joints": joints,
+            "segments": segments,
+            "assignments": assignments,
+            "total_waste": total_waste,
+            "buy_count": buy_count,
+            "distinct_groups": distinct_groups,
+            "length_variation": length_variation,
+            "under_4000_segment_count": under_4000_segment_count,
+            "segment_counts": segment_counts,
+            "segment_ratios": segment_ratios,
+            "ratio_targets": targets,
+            "ratio_penalty": ratio_penalty,
+            "joint_count": joint_count,
+            "score": score,
+            "valid": not errors,
+            "errors": errors,
+            "custom": True,
+        })
+        if waler_id:
+            legality = self._validate_custom_waler_plan(
+                waler_id=waler_id,
+                segments=segments,
+                joints=joints,
+                result=result_context or {},
+            )
+            plan["legality"] = legality
+            plan["valid"] = bool(legality.get("valid")) and not errors
+        return plan
+
+    def _get_waler_required_length(self, waler_id, result=None):
+        result = result or {}
+        required_length = result.get("required_length") if isinstance(result, dict) else None
+        if required_length is not None:
+            try:
+                return int(round(float(required_length)))
+            except (TypeError, ValueError):
+                pass
+
+        waler_row = next(
+            (row for row in self.walers if str(row.get("WalerID", "")).strip() == str(waler_id).strip()),
+            None,
+        )
+        if not waler_row:
+            return None
+        x1 = self._to_number(waler_row.get("StartX"))
+        y1 = self._to_number(waler_row.get("StartY"))
+        x2 = self._to_number(waler_row.get("EndX"))
+        y2 = self._to_number(waler_row.get("EndY"))
+        if None in (x1, y1, x2, y2):
+            return None
+        return int(round(self._line_length(x1, y1, x2, y2)))
+
+    def _validate_custom_waler_plan(
+        self,
+        *,
+        waler_id,
+        segments,
+        joints,
+        result=None,
+    ):
+        result = result or {}
+        required_length = self._get_waler_required_length(waler_id, result)
+        current_length = sum(segments)
+        forbidden_points = [
+            int(round(point))
+            for point in (result.get("forbidden_points") or [])
+        ]
+        joint_clearance = int(round(float(result.get("joint_clearance", 300) or 300)))
+        min_piece_length = int(round(float(result.get("min_piece_length", 1000) or 1000)))
+        max_piece_length = int(round(float(result.get("max_piece_length", 10000) or 10000)))
+        purchasable_lengths = self._get_purchasable_lengths()
+
+        cfg = wales.Config(
+            total_length=required_length or current_length,
+            support_points=forbidden_points,
+            min_piece_length=min_piece_length,
+            max_piece_length=max_piece_length,
+            joint_clearance_to_support=joint_clearance,
+            purchasable_lengths=purchasable_lengths,
+        )
+        solver_valid, solver_errors = wales.validate_segments(joints, segments, cfg)
+
+        violations = []
+        details = []
+        if required_length is not None and current_length != required_length:
+            diff = current_length - required_length
+            violations.append("長度不符")
+            details.extend([
+                "❌ 長度不符",
+                f"需求長度：{required_length} mm",
+                f"目前長度：{current_length} mm",
+                f"長度差異：{diff:+d} mm",
+            ])
+
+        forbidden_joint = None
+        forbidden_center = None
+        for joint in joints:
+            for center in forbidden_points:
+                if abs(joint - center) < joint_clearance:
+                    forbidden_joint = joint
+                    forbidden_center = center
+                    break
+            if forbidden_joint is not None:
+                break
+        if forbidden_joint is not None:
+            violations.append("接頭落入禁止區")
+            details.extend([
+                "❌ 接頭落入禁止區",
+                f"接頭位置：{forbidden_joint} mm",
+                f"禁止區：{forbidden_center - joint_clearance} ~ {forbidden_center + joint_clearance} mm",
+            ])
+
+        allowed_lengths = set(purchasable_lengths)
+        missing_length = next((segment for segment in segments if segment not in allowed_lengths), None)
+        if missing_length is not None:
+            violations.append("無此料長")
+            details.extend([
+                "❌ 無此料長",
+                f"料長：{missing_length} mm",
+            ])
+
+        other_errors = [
+            error
+            for error in solver_errors
+            if (
+                "距支撐過近" not in error
+                and "不在可用材料長度清單" not in error
+            )
+        ]
+        for error in other_errors:
+            violations.append(error)
+            details.append(f"❌ {error}")
+
+        inventory_quantities = self._collect_inventory_quantities()
+        required_quantities = Counter(segments)
+        warnings = []
+        for length, required_quantity in sorted(required_quantities.items()):
+            inventory_quantity = inventory_quantities.get(length, 0)
+            if required_quantity > inventory_quantity and length in allowed_lengths:
+                warnings.extend([
+                    "庫存不足（會以購買數計入分數）",
+                    f"{length} mm：需要 {required_quantity} 根，庫存 {self._format_result_value(inventory_quantity)} 根，不足 {self._format_result_value(required_quantity - inventory_quantity)} 根",
+                ])
+
+        valid = (
+            required_length is not None
+            and current_length == required_length
+            and solver_valid
+            and not violations
+        )
+        if valid:
+            summary = "✅ 合法"
+            details = [
+                "✅ 合法",
+                f"需求長度：{required_length} mm",
+                f"目前長度：{current_length} mm",
+                "✅ 所有接頭均符合規範",
+            ]
+        elif len(violations) == 1:
+            summary = f"❌ {violations[0]}"
+        else:
+            summary = f"❌ 共 {len(violations)} 項違規"
+            details = [summary] + [f"- {violation}" for violation in violations] + details
+
+        return {
+            "valid": valid,
+            "summary": summary,
+            "violations": violations,
+            "details": details,
+            "warnings": warnings,
+            "required_length": required_length,
+            "current_length": current_length,
+        }
+
+    @classmethod
+    def _format_result_details(cls, result_id, item):
+        result = item.get("result")
+        if item.get("type") == "waler":
+            plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
+            option_index = result.get("option_index") if isinstance(result, dict) else None
+            if isinstance(result, dict) and result.get("custom"):
+                option_index = result.get("custom_label") or option_index
+            ratio_targets = result.get("ratio_targets") if isinstance(result, dict) else None
+            segment_counts = plan.get("segment_counts") if isinstance(plan, dict) else None
+            lines = [
+                f"圍令：{result.get('waler_id', result_id) if isinstance(result, dict) else result_id}",
+            ]
+            if isinstance(result, dict) and result.get("custom"):
+                lines.append("[自訂]")
+                legality = plan.get("legality") or {}
+                lines.append(f"方案狀態：{legality.get('summary', '未檢查')}")
+                legality_details = list(legality.get("details", []) or [])
+                if legality_details:
+                    lines.extend(["合法性檢查：", *legality_details])
+                legality_warnings = list(legality.get("warnings", []) or [])
+                if legality_warnings:
+                    lines.extend(["庫存檢查：", *[f"- {warning}" for warning in legality_warnings]])
+            lines.extend([
+                "",
+                cls._format_waler_score_breakdown(
+                    plan,
+                    option_index=option_index,
+                    ratio_targets=ratio_targets,
+                    segment_counts=segment_counts,
+                ),
+                "",
+                f"接頭位置 (mm)：{cls._format_result_list(plan.get('joints', []))}",
+            ])
+            return "\n".join(lines)
+
+        plans = list(getattr(result, "plans", []) or [])
+        lines = [
+            f"分區：{result_id}",
+            f"支撐數量：{len(plans)}",
+            f"總分：{cls._format_result_value(getattr(result, 'total_score', '無資料'), decimals=2)}",
+            f"整體是否合法：{'是' if getattr(result, 'valid', False) else '否'}",
+        ]
+        reason = str(getattr(result, "reason", "") or "").strip()
+        if reason:
+            lines.append(f"說明：{reason}")
+
+        piece_names = {"steel": "鋼材", "shim": "調整塊", "jack": "千斤頂"}
+        for index, plan in enumerate(plans, start=1):
+            pieces = list(getattr(plan, "pieces", []) or [])
+            arrangement = " → ".join(
+                f"{piece_names.get(piece_type, piece_type)}:{cls._format_result_value(length)}"
+                for piece_type, length in pieces
+            ) or "無"
+            steel_lengths = [length for piece_type, length in pieces if piece_type == "steel"]
+            shim_lengths = [length for piece_type, length in pieces if piece_type == "shim"]
+            jack_lengths = [length for piece_type, length in pieces if piece_type == "jack"]
+            plan_valid = bool(getattr(plan, "valid", False)) and not getattr(plan, "reason", "")
+
+            lines.extend([
+                "",
+                "-" * 56,
+                f"支撐 {index}：{getattr(plan, 'support_id', '')}",
+                f"鋼材排列：{arrangement}",
+                f"鋼材 (mm)：{cls._format_result_list(steel_lengths)}",
+                f"調整塊 (mm)：{cls._format_result_list(shim_lengths)}",
+                f"千斤頂 (mm)：{cls._format_result_list(jack_lengths)}",
+                f"接頭位置 (mm)：{cls._format_result_list(getattr(plan, 'joints', []))}",
+                f"分數：{cls._format_result_value(getattr(plan, 'score', '無資料'), decimals=2)}",
+                f"是否合法：{'是' if plan_valid else '否'}",
+                f"千斤頂區域：{getattr(plan, 'jack_region_id', '無資料')}",
+            ])
+            plan_reason = str(getattr(plan, "reason", "") or "").strip()
+            if plan_reason:
+                lines.append(f"不合法原因：{plan_reason}")
+        return "\n".join(lines)
+
+    def _refresh_results_tree(self, selected_id=None):
+        if not hasattr(self, "results_tree"):
+            return
+
+        open_groups = {
+            child_id
+            for child_id in self.results_tree.get_children("")
+            if self._is_result_group_iid(child_id)
+            and bool(self.results_tree.item(child_id, "open"))
+        }
+        if selected_id is None:
+            selected = self.results_tree.selection()
+            selected_id = selected[0] if selected else None
+
+        children = self.results_tree.get_children()
+        if children:
+            self.results_tree.delete(*children)
+
+        groups = {}
+        for result_id, item in self.result_items.items():
+            info = self._get_result_tree_info(result_id, item)
+            group = groups.setdefault(
+                info["group_iid"],
+                {
+                    "group_id": info["group_id"],
+                    "group_label": info["group_label"],
+                    "type_label": info["type_label"],
+                    "sort_key": info["sort_key"][:2],
+                    "items": [],
+                },
+            )
+            group["items"].append((result_id, item, info))
+
+        for group_iid, group in sorted(
+            groups.items(),
+            key=lambda pair: pair[1]["sort_key"],
+        ):
+            group_items = [item for _result_id, item, _info in group["items"]]
+            item_count = len(group_items)
+            description = "1 個結果" if item_count == 1 else f"{item_count} 個方案"
+            if group_items and all(item.get("type") == "support" for item in group_items):
+                support_count = sum(
+                    len(list(getattr(item.get("result"), "plans", []) or []))
+                    for item in group_items
+                )
+                description = f"{support_count} 支支撐"
+                visible_mark = self._support_group_visible_mark(group_items)
+            else:
+                visible_mark = self._result_group_visible_mark(group_items)
+            self.results_tree.insert(
+                "",
+                "end",
+                iid=group_iid,
+                text=group["group_label"],
+                open=group_iid in open_groups,
+                values=(
+                    visible_mark,
+                    group["type_label"],
+                    group["group_id"],
+                    description,
+                ),
+            )
+
+            for result_id, item, info in sorted(
+                group["items"],
+                key=lambda entry: entry[2]["sort_key"],
+            ):
+                if item.get("type") == "support":
+                    solution = item.get("result")
+                    for plan in list(getattr(solution, "plans", []) or []):
+                        support_id = str(getattr(plan, "support_id", "") or "").strip()
+                        if not support_id:
+                            continue
+                        plan_valid = bool(getattr(plan, "valid", False)) and not getattr(plan, "reason", "")
+                        self.results_tree.insert(
+                            group_iid,
+                            "end",
+                            iid=self._support_plan_iid(result_id, support_id),
+                            text=support_id,
+                            values=(
+                                "☑" if self._support_plan_visible(item, support_id) else "☐",
+                                info["type_label"],
+                                support_id,
+                                (
+                                    f"單體分數：{self._format_result_value(getattr(plan, 'score', '無資料'), decimals=2)}；"
+                                    f"千斤頂：{self._format_result_value(getattr(plan, 'jack_center', '無資料'))}；"
+                                    f"合法：{'是' if plan_valid else '否'}"
+                                ),
+                            ),
+                        )
+                    continue
+
+                item_result = item.get("result")
+                is_custom_result = isinstance(item_result, dict) and item_result.get("custom")
+                custom_status = ""
+                if is_custom_result:
+                    plan = item_result.get("selected_plan") or {}
+                    legality = plan.get("legality") or {}
+                    custom_status = " ✅" if legality.get("valid") else " ❌"
+                self.results_tree.insert(
+                    group_iid,
+                    "end",
+                    iid=result_id,
+                    text=info["child_label"],
+                    values=(
+                        self._result_item_visible_mark(item),
+                        info["type_label"],
+                        f"{result_id} [自訂]{custom_status}" if is_custom_result else result_id,
+                        self._describe_result_item(item),
+                    ),
+                )
+
+        if selected_id and self.results_tree.exists(selected_id):
+            self.results_tree.selection_set(selected_id)
+            self.results_tree.focus(selected_id)
+            parent_id = self.results_tree.parent(selected_id)
+            if parent_id and parent_id in open_groups:
+                self.results_tree.item(parent_id, open=True)
+
+        self._update_material_summary()
+
+    def _describe_result_item(self, item):
+        result = item.get("result")
+        if item.get("type") == "waler":
+            plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
+            score = self._format_result_value(plan.get("score", "無資料"), decimals=2)
+            joint_count = plan.get("joint_count")
+            if joint_count is None:
+                joint_count = len(plan.get("joints", []) or [])
+            distinct_groups = plan.get("distinct_groups", "無資料")
+            buy_count = plan.get("buy_count", "無資料")
+            custom_text = ""
+            if isinstance(result, dict) and result.get("custom"):
+                legality = plan.get("legality") or {}
+                status_icon = "✅" if legality.get("valid") else "❌"
+                custom_text = f"[自訂] {status_icon}；"
+            return (
+                f"{custom_text}總分：{score}；接頭：{joint_count}；"
+                f"材料種類：{distinct_groups}；購買數：{buy_count}"
+            )
+
+        plans = getattr(result, "plans", [])
+        total_score = getattr(result, "total_score", 0.0)
+        valid = getattr(result, "valid", False)
+        return (
+            f"支撐數量={len(plans)}；總分={total_score:.1f}；"
+            f"合法={'是' if valid else '否'}"
+        )
+
+    @staticmethod
+    def _material_length_key(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number <= 0:
+            return None
+        return int(number) if number.is_integer() else number
+
+    def _collect_visible_material_usage(self):
+        usage = Counter()
+        for item in self.result_items.values():
+            if not item.get("visible", True):
+                continue
+
+            result = item.get("result")
+            if item.get("type") == "waler":
+                plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
+                assignments = list(plan.get("assignments", []) or [])
+                material_lengths = [
+                    assignment.get("stock_length")
+                    for assignment in assignments
+                    if isinstance(assignment, dict)
+                ]
+                if not any(self._material_length_key(value) is not None for value in material_lengths):
+                    material_lengths = list(plan.get("segments", []) or [])
+                for value in material_lengths:
+                    length = self._material_length_key(value)
+                    if length is not None:
+                        usage[length] += 1
+                continue
+
+            if item.get("type") == "support":
+                for plan in getattr(result, "plans", []) or []:
+                    support_id = str(getattr(plan, "support_id", "") or "").strip()
+                    if not self._support_plan_visible(item, support_id):
+                        continue
+                    for _piece_type, value in getattr(plan, "pieces", []) or []:
+                        length = self._material_length_key(value)
+                        if length is not None:
+                            usage[length] += 1
+        return usage
+
+    def _collect_inventory_quantities(self):
+        inventory_quantities = Counter()
+        for row in self.inventory:
+            length = self._material_length_key(row.get("Length"))
+            quantity = self._to_number(row.get("Qty"))
+            if length is None or quantity is None or quantity < 0:
+                continue
+            inventory_quantities[length] += quantity
+        return inventory_quantities
+
+    def _update_material_summary(self):
+        if not hasattr(self, "material_summary_tree"):
+            return
+
+        children = self.material_summary_tree.get_children()
+        if children:
+            self.material_summary_tree.delete(*children)
+
+        usage = self._collect_visible_material_usage()
+        inventory_quantities = self._collect_inventory_quantities()
+        for length in sorted(usage):
+            used_quantity = usage[length]
+            inventory_quantity = inventory_quantities.get(length, 0)
+            remaining_quantity = inventory_quantity - used_quantity
+            tags = ("shortage",) if remaining_quantity < 0 else ()
+            self.material_summary_tree.insert(
+                "",
+                "end",
+                values=(
+                    self._format_result_value(length),
+                    self._format_result_value(used_quantity),
+                    self._format_result_value(inventory_quantity),
+                    self._format_result_value(remaining_quantity),
+                ),
+                tags=tags,
+            )
+
+    def _store_result_item(self, result_id, result_type, result):
+        result_id = str(result_id).strip()
+        if not result_id:
+            return
+        self.result_items[result_id] = {
+            "type": result_type,
+            "result": result,
+            "visible": True,
+        }
+        group_iid = self._get_result_tree_info(result_id, self.result_items[result_id])["group_iid"]
+        self._refresh_results_tree(selected_id=group_iid)
+        self.update_preview()
+
+    def _build_preview(self, parent):
+        self._preview_scroll_after_id = None
+        self._preview_interaction_artist_states = None
+        self.figure = Figure(figsize=(7, 6), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_title("開挖支撐系統輸入預覽")
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+        self.ax.grid(True)
+        self.ax.set_aspect("equal", adjustable="datalim")
+        self.ax.format_coord = self._format_preview_coordinates
+
+        self.preview_counts_text = self.ax.text(
+            0.01,
+            0.99,
+            "",
+            transform=self.ax.transAxes,
+            verticalalignment="top",
+            horizontalalignment="left",
+            fontsize=10,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "black"},
+        )
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=parent)
+        self.ax.plot([0, 100], [0, 100], color="red")
+        self.canvas.draw()
+        self._capture_preview_home_view()
+        self.preview_toolbar = PreviewNavigationToolbar(
+            self.canvas,
+            parent,
+            pack_toolbar=False,
+            export_callback=self._export_preview_image,
+            zoom_getter=self._get_preview_zoom_percent,
+            interaction_start_callback=self._begin_preview_pan_interaction,
+            interaction_end_callback=self._end_preview_interaction,
+        )
+        self.preview_toolbar.update()
+        self.preview_toolbar.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
+        self.canvas.get_tk_widget().pack(
+            side="top",
+            fill="both",
+            expand=True,
+            padx=8,
+            pady=(8, 4),
+        )
+        self.canvas.mpl_connect("scroll_event", self._on_preview_scroll)
+        self.canvas.mpl_connect(
+            "button_release_event",
+            lambda _event: self.preview_toolbar.sync_zoom_display(),
+        )
+        self.preview_toolbar.push_current()
+
+    @staticmethod
+    def _format_preview_coordinates(x, y):
+        return f"X={x:.0f}  Y={y:.0f}"
+
+    def _capture_preview_home_view(self):
+        self._preview_home_xlim = tuple(self.ax.get_xlim())
+        self._preview_home_ylim = tuple(self.ax.get_ylim())
+
+    def _get_preview_zoom_percent(self):
+        home_xlim = getattr(self, "_preview_home_xlim", self.ax.get_xlim())
+        home_ylim = getattr(self, "_preview_home_ylim", self.ax.get_ylim())
+        current_xlim = self.ax.get_xlim()
+        current_ylim = self.ax.get_ylim()
+
+        home_width = abs(home_xlim[1] - home_xlim[0])
+        home_height = abs(home_ylim[1] - home_ylim[0])
+        current_width = abs(current_xlim[1] - current_xlim[0])
+        current_height = abs(current_ylim[1] - current_ylim[0])
+        if min(home_width, home_height, current_width, current_height) <= 0:
+            return 100.0
+        return math.sqrt(
+            (home_width / current_width) * (home_height / current_height)
+        ) * 100.0
+
+    def _begin_preview_interaction(self):
+        """互動期間暫時隱藏文字、標註框與圖例以降低重畫成本。"""
+        if self._preview_interaction_artist_states is not None:
+            return
+
+        artists = list(self.ax.texts)
+        artists.extend([
+            self.ax.title,
+            self.ax.xaxis.label,
+            self.ax.yaxis.label,
+            self.ax.xaxis.get_offset_text(),
+            self.ax.yaxis.get_offset_text(),
+        ])
+        artists.extend(self.ax.get_xticklabels())
+        artists.extend(self.ax.get_yticklabels())
+        legend = self.ax.get_legend()
+        if legend is not None:
+            artists.append(legend)
+
+        states = []
+        seen = set()
+        for artist in artists:
+            artist_id = id(artist)
+            if artist_id in seen:
+                continue
+            seen.add(artist_id)
+            states.append((artist, artist.get_visible()))
+            artist.set_visible(False)
+        self._preview_interaction_artist_states = states
+
+    def _begin_preview_pan_interaction(self):
+        """開始平移時接管尚未結束的滾輪互動，避免計時器提早恢復標註。"""
+        self._cancel_preview_scroll_redraw()
+        self._begin_preview_interaction()
+
+    def _end_preview_interaction(self, redraw=True):
+        states = self._preview_interaction_artist_states
+        if states is None:
+            return
+        self._preview_interaction_artist_states = None
+        for artist, was_visible in states:
+            artist.set_visible(was_visible)
+        if redraw:
+            self.canvas.draw_idle()
+
+    def _ask_export_scale(self):
+        selected = {"scale": None}
+        dialog = tk.Toplevel(self.root)
+        dialog.title("匯出圖片")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+
+        content = ttk.Frame(dialog, padding=14)
+        content.pack(fill="both", expand=True)
+        ttk.Label(content, text="匯出倍率").grid(
+            row=0,
+            column=0,
+            padx=(0, 10),
+            pady=(0, 12),
+            sticky="w",
+        )
+        scale_var = tk.StringVar(value="400%")
+        scale_combo = ttk.Combobox(
+            content,
+            textvariable=scale_var,
+            values=[f"{scale}%" for scale in self.EXPORT_SCALE_OPTIONS],
+            state="readonly",
+            width=10,
+        )
+        scale_combo.grid(row=0, column=1, pady=(0, 12), sticky="ew")
+        scale_combo.focus_set()
+
+        base_width, base_height = self.EXPORT_BASE_FIGSIZE
+        ttk.Label(
+            content,
+            text=(
+                f"100% = {base_width * self.EXPORT_DPI} × "
+                f"{base_height * self.EXPORT_DPI} px"
+            ),
+            foreground="#555555",
+        ).grid(row=1, column=0, columnspan=2, pady=(0, 12), sticky="w")
+
+        button_frame = ttk.Frame(content)
+        button_frame.grid(row=2, column=0, columnspan=2, sticky="e")
+
+        def confirm():
+            selected["scale"] = int(scale_var.get().rstrip("%"))
+            dialog.destroy()
+
+        ttk.Button(button_frame, text="取消", command=dialog.destroy).pack(
+            side="right",
+            padx=(6, 0),
+        )
+        ttk.Button(button_frame, text="選擇儲存位置", command=confirm).pack(
+            side="right",
+        )
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Return>", lambda _event: confirm())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        dialog.wait_window()
+        return selected["scale"]
+
+    def _export_preview_image(self):
+        scale_percent = self._ask_export_scale()
+        if scale_percent is None:
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="匯出完整配置圖",
+            defaultextension=".png",
+            filetypes=[
+                ("PNG 圖片", "*.png"),
+                ("JPEG 圖片", "*.jpg *.jpeg"),
+                ("所有檔案", "*.*"),
+            ],
+        )
+        if not file_path:
+            return
+
+        original_size = tuple(self.figure.get_size_inches())
+        original_xlim = self.ax.get_xlim()
+        original_ylim = self.ax.get_ylim()
+        scale = scale_percent / 100.0
+        base_width, base_height = self.EXPORT_BASE_FIGSIZE
+        export_size = (base_width * scale, base_height * scale)
 
         try:
-            short_ratio = float(short_ratio_entry.get().strip())
-            mid_ratio = float(mid_ratio_entry.get().strip())
-            long_ratio = float(long_ratio_entry.get().strip())
+            # 先重建完整圖面，確保匯出不受目前 Pan／Zoom 視窗影響。
+            self.update_preview()
+            self.figure.set_size_inches(*export_size, forward=False)
+            self.figure.savefig(
+                file_path,
+                dpi=self.EXPORT_DPI,
+                bbox_inches=None,
+                facecolor=self.figure.get_facecolor(),
+            )
+        except Exception as exc:
+            messagebox.showerror("匯出失敗", f"無法匯出圖片：\n{exc}")
+            return
+        finally:
+            self.figure.set_size_inches(*original_size, forward=False)
+            self.ax.set_xlim(original_xlim)
+            self.ax.set_ylim(original_ylim)
+            self.canvas.draw_idle()
+            self.preview_toolbar.push_current()
+            self.preview_toolbar.set_zoom_percent(self._get_preview_zoom_percent())
+
+        pixel_width = int(round(export_size[0] * self.EXPORT_DPI))
+        pixel_height = int(round(export_size[1] * self.EXPORT_DPI))
+        messagebox.showinfo(
+            "匯出完成",
+            f"已匯出完整配置圖。\n倍率：{scale_percent}%\n尺寸："
+            f"{pixel_width} × {pixel_height} px",
+        )
+
+    def _on_preview_scroll(self, event):
+        if event.inaxes is not self.ax:
+            return
+        if event.xdata is None or event.ydata is None:
+            return
+
+        if event.button == "up" or getattr(event, "step", 0) > 0:
+            scale_factor = 0.8
+        elif event.button == "down" or getattr(event, "step", 0) < 0:
+            scale_factor = 1.25
+        else:
+            return
+
+        self._begin_preview_interaction()
+
+        x_min, x_max = self.ax.get_xlim()
+        y_min, y_max = self.ax.get_ylim()
+        mouse_x = event.xdata
+        mouse_y = event.ydata
+
+        new_x_min = mouse_x - (mouse_x - x_min) * scale_factor
+        new_x_max = mouse_x + (x_max - mouse_x) * scale_factor
+        new_y_min = mouse_y - (mouse_y - y_min) * scale_factor
+        new_y_max = mouse_y + (y_max - mouse_y) * scale_factor
+
+        self.ax.set_xlim(new_x_min, new_x_max)
+        self.ax.set_ylim(new_y_min, new_y_max)
+        self.canvas.draw_idle()
+        self._schedule_preview_scroll_redraw()
+
+    def _schedule_preview_scroll_redraw(self):
+        if self._preview_scroll_after_id is not None:
+            try:
+                self.root.after_cancel(self._preview_scroll_after_id)
+            except tk.TclError:
+                pass
+        self._preview_scroll_after_id = self.root.after(
+            self.PREVIEW_SCROLL_DEBOUNCE_MS,
+            self._flush_preview_scroll_redraw,
+        )
+
+    def _flush_preview_scroll_redraw(self):
+        self._preview_scroll_after_id = None
+        self._end_preview_interaction(redraw=False)
+        self.canvas.draw_idle()
+        self.preview_toolbar.push_current()
+        self.preview_toolbar.set_zoom_percent(self._get_preview_zoom_percent())
+
+    def _cancel_preview_scroll_redraw(self):
+        if self._preview_scroll_after_id is None:
+            return
+        try:
+            self.root.after_cancel(self._preview_scroll_after_id)
+        except tk.TclError:
+            pass
+        self._preview_scroll_after_id = None
+
+    def _on_tab_changed(self, event):
+        selected = self.notebook.tab(self.notebook.select(), "text")
+        for table_name, tab_label in self.table_tab_labels.items():
+            if selected == tab_label:
+                self.current_table = table_name
+                break
+
+    def _load_initial_data(self):
+        for table_name in ("walers", "struts", "braces", "inventory"):
+            self._refresh_tree(table_name)
+        self._refresh_results_tree()
+        self._refresh_test_case_list()
+
+    def _refresh_tree(self, table_name):
+        tree = self.treeviews[table_name]
+        tree.delete(*tree.get_children())
+        data = getattr(self, table_name)
+        for index, row in enumerate(data):
+            if table_name == "struts":
+                self._migrate_strut_position_fields(row)
+            values = [index + 1] + [
+                self._format_display_value(row.get(col, ""))
+                for col in self.table_columns[table_name]
+            ]
+            tree.insert("", "end", iid=f"{table_name}_{index}", values=values)
+        if table_name == "inventory":
+            self._update_material_summary()
+
+    @staticmethod
+    def _format_display_value(value):
+        if value is None:
+            return ""
+        return str(value)
+
+    @staticmethod
+    def _format_position_value(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value).strip()
+        if number.is_integer():
+            return str(int(number))
+        return str(number)
+
+    def _format_position_list(self, values):
+        return ",".join(
+            self._format_position_value(value)
+            for value in values
+            if value not in (None, "")
+        )
+
+    def _migrate_strut_position_fields(self, row):
+        if not isinstance(row, dict):
+            return row
+
+        if str(row.get("BeamPositions", "") or "").strip() == "":
+            beam_values = [
+                row.get("Beam1"),
+                row.get("Beam2"),
+            ]
+            migrated = self._format_position_list(beam_values)
+            if migrated:
+                row["BeamPositions"] = migrated
+
+        if str(row.get("ColumnPositions", "") or "").strip() == "":
+            column_values = [
+                row.get("Column1"),
+                row.get("Column2"),
+            ]
+            migrated = self._format_position_list(column_values)
+            if migrated:
+                row["ColumnPositions"] = migrated
+
+        for old_key in ("Beam1", "Beam2", "Column1", "Column2"):
+            row.pop(old_key, None)
+
+        return row
+
+    def _parse_position_list(self, value):
+        if value is None:
+            return [], None
+
+        text = str(value).strip().replace("，", ",")
+        if text == "":
+            return [], None
+
+        parts = text.split(",")
+        if any(part.strip() == "" for part in parts):
+            return [], "位置格式錯誤"
+
+        positions = []
+        for part in parts:
+            token = part.strip()
+            try:
+                number = float(token)
+            except ValueError:
+                return [], f"{token} 不是有效數字"
+            if not math.isfinite(number):
+                return [], f"{token} 不是有效數字"
+            positions.append(int(number) if number.is_integer() else number)
+
+        return positions, None
+
+    def _table_label(self, table_name):
+        return self.table_tab_labels.get(table_name, table_name)
+
+    def _field_label(self, table_name, field_name):
+        return self.table_column_labels.get(table_name, {}).get(field_name, field_name)
+
+    def _on_tree_double_click(self, event):
+        tree = event.widget
+        row_id = tree.identify_row(event.y)
+        column_id = tree.identify_column(event.x)
+        if not row_id or not column_id:
+            return
+
+        column = self._tree_column_key(tree, column_id)
+        if column in (None, "No"):
+            return
+        bbox = tree.bbox(row_id, column_id)
+        if not bbox:
+            return
+
+        x, y, width, height = bbox
+        current_value = tree.set(row_id, column)
+
+        if self.editing_entry is not None:
+            self.editing_entry.destroy()
+
+        entry = tk.Entry(tree)
+        entry.place(x=x, y=y, width=width, height=height)
+        entry.insert(0, current_value)
+        entry.focus_set()
+
+        def save_edit(event=None):
+            self._finish_edit(tree, row_id, column, entry)
+
+        entry.bind("<Return>", save_edit)
+        entry.bind("<FocusOut>", save_edit)
+        self.editing_entry = entry
+
+    def _finish_edit(self, tree, row_id, column, entry_widget):
+        if not entry_widget.winfo_exists():
+            return
+        new_value = entry_widget.get().strip()
+        entry_widget.destroy()
+        self.editing_entry = None
+
+        table_name = self._get_table_name_by_tree(tree)
+        if table_name is None:
+            return
+
+        index = self._item_id_to_index(row_id)
+        if index is None:
+            return
+
+        value = self._parse_cell_value(table_name, column, new_value)
+        getattr(self, table_name)[index][column] = value
+        tree.set(row_id, column, self._format_display_value(value))
+        if table_name == "inventory":
+            self._update_material_summary()
+
+    def _item_id_to_index(self, item_id):
+        try:
+            return int(item_id.split("_")[1])
+        except (IndexError, ValueError):
+            return None
+
+    def _get_table_name_by_tree(self, tree_widget):
+        for name, tree in self.treeviews.items():
+            if tree is tree_widget:
+                return name
+        return None
+
+    def _parse_cell_value(self, table_name, column, value):
+        if value == "":
+            return ""
+
+        if table_name == "struts" and column in ("BeamPositions", "ColumnPositions"):
+            return value.replace("，", ",")
+
+        if column in self.numeric_columns.get(table_name, []):
+            try:
+                number = float(value)
+                if number.is_integer():
+                    return int(number)
+                return number
+            except ValueError:
+                return value
+
+        return value
+
+    def add_row(self):
+        table_name = self.current_table
+        new_row = {col: "" for col in self.table_columns[table_name]}
+        if table_name == "struts":
+            new_row["TargetJackRegion"] = 2
+        getattr(self, table_name).append(new_row)
+        self._refresh_tree(table_name)
+
+    def delete_row(self):
+        table_name = self.current_table
+        tree = self.treeviews[table_name]
+        selection = tree.selection()
+        if not selection:
+            messagebox.showwarning("刪除列", "請先選取要刪除的列。")
+            return
+
+        index = self._item_id_to_index(selection[0])
+        if index is None:
+            return
+
+        getattr(self, table_name).pop(index)
+        self._refresh_tree(table_name)
+
+    def _move_current_table_row(self, direction):
+        if self.current_table not in ("walers", "struts", "braces"):
+            return
+
+        tree = self.treeviews.get(self.current_table)
+        if tree is None:
+            return
+        data_list = getattr(self, self.current_table, None)
+        if data_list is None:
+            return
+
+        moved_index = self.move_selected_row(tree, data_list, direction)
+        if moved_index is None:
+            return
+
+        self._refresh_tree(self.current_table)
+
+        moved_item_id = f"{self.current_table}_{moved_index}"
+        if moved_item_id in tree.get_children():
+            tree.selection_set(moved_item_id)
+            tree.focus(moved_item_id)
+            tree.see(moved_item_id)
+
+        self.update_preview(preserve_view=True)
+
+    def move_selected_row(self, tree, data_list, direction):
+        selection = tree.selection()
+        if not selection:
+            return None
+
+        index = self._item_id_to_index(selection[0])
+        if index is None:
+            return None
+
+        target_index = index + direction
+        if target_index < 0 or target_index >= len(data_list):
+            return None
+
+        data_list[index], data_list[target_index] = data_list[target_index], data_list[index]
+        return target_index
+
+    def validate_data(self):
+        self._clear_error_tags()
+        errors = []
+        warnings = []
+        waler_ids = set()
+        for row_index, row in enumerate(self.walers, start=1):
+            row_errors = []
+            row_warnings = []
+            waler_id = str(row.get("WalerID", "")).strip()
+            if not waler_id:
+                row_errors.append(f"{self._field_label('walers', 'WalerID')} 不可空白")
+            elif waler_id in waler_ids:
+                row_errors.append(f"{self._field_label('walers', 'WalerID')} 不可重複")
+            else:
+                waler_ids.add(waler_id)
+
+            coords = []
+            for coord in ["StartX", "StartY", "EndX", "EndY"]:
+                value = row.get(coord, "")
+                number = self._to_number(value)
+                if number is None:
+                    row_errors.append(f"{self._field_label('walers', coord)} 必須是數字")
+                else:
+                    coords.append(number)
+
+            if len(coords) == 4:
+                length = self._line_length(coords[0], coords[1], coords[2], coords[3])
+                if length <= 0:
+                    row_errors.append("圍令長度必須大於 0")
+                else:
+                    rounded_length = int(round(length))
+                    remainder = rounded_length % 500
+                    if remainder != 0:
+                        difference = min(remainder, 500 - remainder)
+                        row_warnings.append(
+                            f"⚠ 圍令 {waler_id or row_index} 長度 {rounded_length} mm，差距：{difference} mm"
+                        )
+
+            if row_errors:
+                errors.append(("walers", row_index, row_errors))
+                self._tag_error_row("walers", row_index - 1)
+            elif row_warnings:
+                warnings.append(("walers", row_index, row_warnings))
+
+        waler_id_set = {row.get("WalerID") for row in self.walers if row.get("WalerID")}
+        waler_by_id = {
+            str(row.get("WalerID", "")).strip(): row
+            for row in self.walers
+            if str(row.get("WalerID", "") or "").strip()
+        }
+        strut_ids = set()
+        for row_index, row in enumerate(self.struts, start=1):
+            row_errors = []
+            row_warnings = []
+            strut_id = str(row.get("StrutID", "")).strip()
+            if not strut_id:
+                row_errors.append(f"{self._field_label('struts', 'StrutID')} 不可空白")
+            elif strut_id in strut_ids:
+                row_errors.append(f"{self._field_label('struts', 'StrutID')} 不可重複")
+            else:
+                strut_ids.add(strut_id)
+
+            for endpoint in ["FromWaler", "ToWaler"]:
+                value = str(row.get(endpoint, "")).strip()
+                if value and value not in waler_id_set:
+                    row_errors.append(f"{self._field_label('struts', endpoint)} 必須存在於圍令表")
+
+            from_waler = str(row.get("FromWaler", "") or "").strip()
+            to_waler = str(row.get("ToWaler", "") or "").strip()
+            if from_waler and to_waler and from_waler == to_waler:
+                row_errors.append(f"❌ 支撐 {strut_id or row_index} 起點圍令與終點圍令不可相同")
+
+            coords = []
+            for coord in ["StartX", "StartY", "EndX", "EndY"]:
+                value = row.get(coord, "")
+                number = self._to_number(value)
+                if number is None:
+                    row_errors.append(f"{self._field_label('struts', coord)} 必須是數字")
+                else:
+                    coords.append(number)
+
+            if len(coords) == 4:
+                if not self._line_length_positive(coords[0], coords[1], coords[2], coords[3]):
+                    row_errors.append("支撐長度必須大於 0")
+                length = self._line_length(coords[0], coords[1], coords[2], coords[3])
+                sx, sy, ex, ey = coords
+            else:
+                length = None
+                sx = sy = ex = ey = None
+
+            if len(coords) == 4:
+                if from_waler and from_waler in waler_by_id:
+                    if not self._point_on_waler_segment_with_tolerance(
+                        waler_by_id[from_waler],
+                        sx,
+                        sy,
+                        tolerance=50,
+                    ):
+                        row_errors.append(f"❌ 支撐 {strut_id or row_index} 起點未落於圍令 {from_waler} 上")
+                if to_waler and to_waler in waler_by_id:
+                    if not self._point_on_waler_segment_with_tolerance(
+                        waler_by_id[to_waler],
+                        ex,
+                        ey,
+                        tolerance=50,
+                    ):
+                        row_errors.append(f"❌ 支撐 {strut_id or row_index} 終點未落於圍令 {to_waler} 上")
+                if (
+                    from_waler
+                    and to_waler
+                    and from_waler in waler_by_id
+                    and to_waler in waler_by_id
+                    and from_waler != to_waler
+                    and self._walers_are_nearly_parallel(waler_by_id[from_waler], waler_by_id[to_waler])
+                    and not self._line_is_nearly_perpendicular_to_waler(
+                        sx,
+                        sy,
+                        ex,
+                        ey,
+                        waler_by_id[from_waler],
+                    )
+                ):
+                    row_warnings.append(f"⚠ 支撐 {strut_id or row_index} 與所選圍令方向可能不一致")
+
+            self._migrate_strut_position_fields(row)
+            for field in ["BeamPositions", "ColumnPositions"]:
+                raw_value = row.get(field, "")
+                positions, position_error = self._parse_position_list(raw_value)
+                if position_error:
+                    position_label = "托梁位置" if field == "BeamPositions" else "中間柱位置"
+                    row_errors.append(f"❌ {position_label}格式錯誤：{position_error}")
+                    continue
+                if self._has_duplicate_numbers(positions):
+                    position_label = "托梁位置" if field == "BeamPositions" else "中間柱位置"
+                    row_warnings.append(f"⚠ 支撐 {strut_id or row_index} {position_label}重複")
+                for number in positions:
+                    if length is not None and not (0 <= number <= length):
+                        row_errors.append(
+                            f"{self._field_label('struts', field)} {self._format_position_value(number)} "
+                            f"不在 0 ~ {self._format_position_value(length)} mm 範圍內"
+                        )
+
+            for field, field_label in self.STRUT_BRACE_LENGTH_FIELDS:
+                raw_value = row.get(field, "")
+                number = self._to_number(raw_value)
+                if number is None:
+                    row_errors.append(f"{field_label} 必須是數字且不可為負數")
+                elif number < 0:
+                    row_errors.append(f"❌ {strut_id or row_index} {field_label}不可為負數")
+
+            target_jack_region = self._to_number(
+                row.get("TargetJackRegion", "")
+            )
+            if target_jack_region is None:
+                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須是大於 0 的整數")
+            elif not float(target_jack_region).is_integer():
+                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須是整數")
+            elif target_jack_region <= 0:
+                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須大於 0")
+
+            if row_errors:
+                errors.append(("struts", row_index, row_errors))
+                self._tag_error_row("struts", row_index - 1)
+            if row_warnings:
+                warnings.append(("struts", row_index, row_warnings))
+
+        brace_ids = set()
+        for row_index, row in enumerate(self.braces, start=1):
+            row_errors = []
+            brace_id = str(row.get("BraceID", "")).strip()
+            if not brace_id:
+                row_errors.append(f"{self._field_label('braces', 'BraceID')} 不可空白")
+            elif brace_id in brace_ids:
+                row_errors.append(f"{self._field_label('braces', 'BraceID')} 不可重複")
+            else:
+                brace_ids.add(brace_id)
+
+            for endpoint in ["FromWaler", "ToWaler"]:
+                value = str(row.get(endpoint, "")).strip()
+                if value and value not in waler_id_set:
+                    row_errors.append(f"{self._field_label('braces', endpoint)} 若有填值，應存在於圍令表")
+
+            from_waler = str(row.get("FromWaler", "") or "").strip()
+            to_waler = str(row.get("ToWaler", "") or "").strip()
+            if from_waler and to_waler and from_waler == to_waler:
+                row_errors.append(f"❌ 斜撐 {brace_id or row_index} 起點圍令與終點圍令不可相同")
+
+            coords = []
+            for coord in ["StartX", "StartY", "EndX", "EndY"]:
+                value = row.get(coord, "")
+                number = self._to_number(value)
+                if number is None:
+                    row_errors.append(f"{self._field_label('braces', coord)} 必須是數字")
+                else:
+                    coords.append(number)
+
+            if len(coords) == 4 and not self._line_length_positive(coords[0], coords[1], coords[2], coords[3]):
+                row_errors.append("斜撐長度必須大於 0")
+
+            if len(coords) == 4:
+                sx, sy, ex, ey = coords
+                if from_waler and from_waler in waler_by_id:
+                    if not self._point_on_waler_segment_with_tolerance(
+                        waler_by_id[from_waler],
+                        sx,
+                        sy,
+                        tolerance=50,
+                    ):
+                        row_errors.append(f"❌ 斜撐 {brace_id or row_index} 起點未落於圍令 {from_waler} 上")
+                if to_waler and to_waler in waler_by_id:
+                    if not self._point_on_waler_segment_with_tolerance(
+                        waler_by_id[to_waler],
+                        ex,
+                        ey,
+                        tolerance=50,
+                    ):
+                        row_errors.append(f"❌ 斜撐 {brace_id or row_index} 終點未落於圍令 {to_waler} 上")
+
+            if row_errors:
+                errors.append(("braces", row_index, row_errors))
+                self._tag_error_row("braces", row_index - 1)
+
+        for row_index, row in enumerate(self.inventory, start=1):
+            row_errors = []
+            for field in ["Length", "Qty"]:
+                value = row.get(field, "")
+                number = self._to_number(value)
+                if number is None:
+                    row_errors.append(f"{self._field_label('inventory', field)} 必須是數字")
+                    continue
+                if field == "Length" and number <= 0:
+                    row_errors.append(f"{self._field_label('inventory', field)} 必須大於 0")
+                if field == "Qty" and number < 0:
+                    row_errors.append(f"{self._field_label('inventory', field)} 不可為負數")
+            if row_errors:
+                errors.append(("inventory", row_index, row_errors))
+                self._tag_error_row("inventory", row_index - 1)
+
+        if errors:
+            error_messages = ["【錯誤】"]
+            for table_name, row_index, row_errors in errors:
+                for message in row_errors:
+                    error_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
+            if warnings:
+                error_messages.extend(["", "【警告】"])
+                for table_name, row_index, row_warnings in warnings:
+                    for message in row_warnings:
+                        error_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
+            messagebox.showerror("驗證失敗", "\n".join(error_messages))
+            return False
+
+        if warnings:
+            warning_messages = ["【警告】"]
+            for table_name, row_index, row_warnings in warnings:
+                for message in row_warnings:
+                    warning_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
+            messagebox.showwarning("驗證完成", "\n".join(warning_messages))
+            return True
+
+        messagebox.showinfo("驗證成功", "所有資料皆通過驗證。")
+        return True
+
+    def _clear_error_tags(self):
+        for tree in self.treeviews.values():
+            for item in tree.get_children():
+                tree.item(item, tags=())
+
+    def _tag_error_row(self, table_name, index):
+        tree = self.treeviews[table_name]
+        item_id = f"{table_name}_{index}"
+        if item_id in tree.get_children():
+            tree.item(item_id, tags=("error",))
+
+    @staticmethod
+    def _has_duplicate_numbers(values):
+        normalized = []
+        for value in values:
+            try:
+                normalized.append(round(float(value), 6))
+            except (TypeError, ValueError):
+                continue
+        return len(normalized) != len(set(normalized))
+
+    def _waler_coords(self, waler_row):
+        x1 = self._to_number(waler_row.get("StartX"))
+        y1 = self._to_number(waler_row.get("StartY"))
+        x2 = self._to_number(waler_row.get("EndX"))
+        y2 = self._to_number(waler_row.get("EndY"))
+        if None in (x1, y1, x2, y2):
+            return None
+        if not self._line_length_positive(x1, y1, x2, y2):
+            return None
+        return x1, y1, x2, y2
+
+    def _point_on_waler_segment_with_tolerance(self, waler_row, px, py, tolerance=50):
+        coords = self._waler_coords(waler_row)
+        if coords is None or px is None or py is None:
+            return True
+
+        x1, y1, x2, y2 = coords
+        dx = x2 - x1
+        dy = y2 - y1
+        length_squared = dx * dx + dy * dy
+        if length_squared <= 0:
+            return True
+
+        projection_ratio = ((px - x1) * dx + (py - y1) * dy) / length_squared
+        clamped_ratio = min(max(projection_ratio, 0.0), 1.0)
+        closest_x = x1 + clamped_ratio * dx
+        closest_y = y1 + clamped_ratio * dy
+        distance = math.hypot(px - closest_x, py - closest_y)
+        return distance <= tolerance
+
+    def _walers_are_nearly_parallel(self, first_waler_row, second_waler_row, tolerance_degrees=15):
+        first = self._waler_coords(first_waler_row)
+        second = self._waler_coords(second_waler_row)
+        if first is None or second is None:
+            return False
+
+        x1, y1, x2, y2 = first
+        x3, y3, x4, y4 = second
+        first_angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
+        second_angle = math.degrees(math.atan2(y4 - y3, x4 - x3))
+        diff = abs((first_angle - second_angle + 180) % 360 - 180)
+        diff = min(diff, 180 - diff)
+        return diff <= tolerance_degrees
+
+    def _line_is_nearly_perpendicular_to_waler(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        waler_row,
+        tolerance_degrees=30,
+    ):
+        coords = self._waler_coords(waler_row)
+        if coords is None or None in (start_x, start_y, end_x, end_y):
+            return True
+
+        wx1, wy1, wx2, wy2 = coords
+        line_dx = end_x - start_x
+        line_dy = end_y - start_y
+        waler_dx = wx2 - wx1
+        waler_dy = wy2 - wy1
+        line_length = math.hypot(line_dx, line_dy)
+        waler_length = math.hypot(waler_dx, waler_dy)
+        if line_length <= 0 or waler_length <= 0:
+            return True
+
+        dot_ratio = abs((line_dx * waler_dx + line_dy * waler_dy) / (line_length * waler_length))
+        return dot_ratio <= math.sin(math.radians(tolerance_degrees))
+
+    def _to_number(self, value):
+        if isinstance(value, (int, float)):
+            return value
+        if value is None:
+            return None
+        text = str(value).strip()
+        if text == "":
+            return None
+        try:
+            number = float(text)
+            return int(number) if number.is_integer() else number
         except ValueError:
-            messagebox.showerror("輸入錯誤", "段長目標比例必須為數字")
+            return None
+
+    @staticmethod
+    def _line_length(x1, y1, x2, y2):
+        return math.hypot(x2 - x1, y2 - y1)
+
+    @staticmethod
+    def _line_length_positive(x1, y1, x2, y2):
+        return math.hypot(x2 - x1, y2 - y1) > 0
+
+    @staticmethod
+    def _readable_line_angle(start_x, start_y, end_x, end_y):
+        angle = math.degrees(math.atan2(end_y - start_y, end_x - start_x))
+        if angle > 90:
+            angle -= 180
+        elif angle < -90:
+            angle += 180
+        return angle
+
+    def _draw_segment_length_label(
+        self,
+        start_x,
+        start_y,
+        end_x,
+        end_y,
+        length,
+        color,
+        fontsize=8,
+        zorder=11,
+    ):
+        center_x = (start_x + end_x) / 2
+        center_y = (start_y + end_y) / 2
+        angle = self._readable_line_angle(start_x, start_y, end_x, end_y)
+        return self.ax.annotate(
+            f"{length:g}",
+            (center_x, center_y),
+            xytext=(0, -14),
+            textcoords="offset points",
+            color=color,
+            fontsize=fontsize,
+            fontweight="bold",
+            horizontalalignment="center",
+            verticalalignment="top",
+            rotation=angle,
+            rotation_mode="anchor",
+            bbox={
+                "facecolor": "white",
+                "alpha": 0.78,
+                "edgecolor": "none",
+                "pad": 1.2,
+            },
+            zorder=zorder,
+        )
+
+    def _waler_direction_unit(self, waler_row):
+        coords = self._waler_coords(waler_row)
+        if coords is None:
+            return None
+        x1, y1, x2, y2 = coords
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length <= 0:
+            return None
+        return (x2 - x1) / length, (y2 - y1) / length
+
+    def _draw_strut_angle_brace(
+        self,
+        strut_start_x,
+        strut_start_y,
+        strut_end_x,
+        strut_end_y,
+        from_start_endpoint,
+        waler_row,
+        length,
+        toward_start,
+        plotted_labels,
+        all_x,
+        all_y,
+    ):
+        if length is None or length <= 0:
+            return
+        waler_unit = self._waler_direction_unit(waler_row)
+        if waler_unit is None:
+            return
+
+        strut_dx = strut_end_x - strut_start_x
+        strut_dy = strut_end_y - strut_start_y
+        strut_length = math.hypot(strut_dx, strut_dy)
+        if strut_length <= 0:
+            return
+
+        strut_ux = strut_dx / strut_length
+        strut_uy = strut_dy / strut_length
+        inset = min(1500, strut_length)
+        if from_start_endpoint:
+            waler_base_x = strut_start_x
+            waler_base_y = strut_start_y
+            support_x = strut_start_x + strut_ux * inset
+            support_y = strut_start_y + strut_uy * inset
+        else:
+            waler_base_x = strut_end_x
+            waler_base_y = strut_end_y
+            support_x = strut_end_x - strut_ux * inset
+            support_y = strut_end_y - strut_uy * inset
+
+        waler_ux, waler_uy = waler_unit
+        direction = -1 if toward_start else 1
+        waler_x = waler_base_x + waler_ux * direction * length
+        waler_y = waler_base_y + waler_uy * direction * length
+        self.ax.plot(
+            [support_x, waler_x],
+            [support_y, waler_y],
+            color="#1565c0",
+            linewidth=2.1,
+            solid_capstyle="round",
+            label="角撐" if "角撐" not in plotted_labels else None,
+            zorder=5,
+        )
+        plotted_labels.add("角撐")
+        all_x.extend([support_x, waler_x])
+        all_y.extend([support_y, waler_y])
+
+    def update_preview(self, preserve_view=False):
+        self._cancel_preview_scroll_redraw()
+        self._end_preview_interaction(redraw=False)
+        preserved_xlim = None
+        preserved_ylim = None
+        if preserve_view:
+            try:
+                preserved_xlim = tuple(self.ax.get_xlim())
+                preserved_ylim = tuple(self.ax.get_ylim())
+            except Exception:
+                preserved_xlim = None
+                preserved_ylim = None
+
+        self.ax.clear()
+        self.ax.set_title("開挖支撐系統輸入預覽")
+        self.ax.set_xlabel("X")
+        self.ax.set_ylabel("Y")
+        self.ax.grid(True)
+        self.ax.set_aspect("equal", adjustable="datalim")
+        self.ax.format_coord = self._format_preview_coordinates
+
+        legend_handles = []
+        plotted_labels = set()
+
+        all_x = []
+        all_y = []
+        waler_by_id = {
+            str(row.get("WalerID", "")).strip(): row
+            for row in self.walers
+            if str(row.get("WalerID", "")).strip()
+        }
+
+        for row in self.walers:
+            x1 = self._to_number(row.get("StartX"))
+            y1 = self._to_number(row.get("StartY"))
+            x2 = self._to_number(row.get("EndX"))
+            y2 = self._to_number(row.get("EndY"))
+            if None in (x1, y1, x2, y2):
+                continue
+            line, = self.ax.plot([x1, x2], [y1, y2], color="black", linewidth=3, label="圍令" if "圍令" not in plotted_labels else None)
+            plotted_labels.add("圍令")
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            self.ax.text(mid_x, mid_y, str(row.get("WalerID", "")), color="black", fontsize=9, verticalalignment="center", horizontalalignment="center")
+            all_x.extend([x1, x2])
+            all_y.extend([y1, y2])
+
+        beam_x = []
+        beam_y = []
+        column_x = []
+        column_y = []
+        for row in self.struts:
+            self._migrate_strut_position_fields(row)
+            x1 = self._to_number(row.get("StartX"))
+            y1 = self._to_number(row.get("StartY"))
+            x2 = self._to_number(row.get("EndX"))
+            y2 = self._to_number(row.get("EndY"))
+            if None in (x1, y1, x2, y2):
+                continue
+            line, = self.ax.plot([x1, x2], [y1, y2], color="black", linewidth=3, label="支撐" if "支撐" not in plotted_labels else None)
+            plotted_labels.add("支撐")
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            self.ax.text(mid_x, mid_y, str(row.get("StrutID", "")), color="black", fontsize=9, verticalalignment="bottom", horizontalalignment="center")
+            all_x.extend([x1, x2])
+            all_y.extend([y1, y2])
+
+            length = self._line_length(x1, y1, x2, y2)
+            beam_positions, _ = self._parse_position_list(row.get("BeamPositions", ""))
+            column_positions, _ = self._parse_position_list(row.get("ColumnPositions", ""))
+            for positions, point_x, point_y, color, label_name in [
+                (beam_positions, beam_x, beam_y, "purple", "Bm"),
+                (column_positions, column_x, column_y, "green", "C"),
+            ]:
+                for station_num in positions:
+                    if length <= 0 or not (0 <= station_num <= length):
+                        continue
+                    point = point_on_line_by_station(x1, y1, x2, y2, station_num)
+                    if point is None:
+                        continue
+                    px, py = point
+                    point_x.append(px)
+                    point_y.append(py)
+                    self.ax.text(px, py, label_name, color=color, fontsize=8, verticalalignment="bottom", horizontalalignment="left")
+                    all_x.append(px)
+                    all_y.append(py)
+
+            from_waler = str(row.get("FromWaler", "") or "").strip()
+            to_waler = str(row.get("ToWaler", "") or "").strip()
+            if from_waler in waler_by_id:
+                self._draw_strut_angle_brace(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    True,
+                    waler_by_id[from_waler],
+                    self._to_number(row.get("FromBraceToWalerStartLen")),
+                    True,
+                    plotted_labels,
+                    all_x,
+                    all_y,
+                )
+                self._draw_strut_angle_brace(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    True,
+                    waler_by_id[from_waler],
+                    self._to_number(row.get("FromBraceToWalerEndLen")),
+                    False,
+                    plotted_labels,
+                    all_x,
+                    all_y,
+                )
+            if to_waler in waler_by_id:
+                self._draw_strut_angle_brace(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    False,
+                    waler_by_id[to_waler],
+                    self._to_number(row.get("ToBraceToWalerStartLen")),
+                    True,
+                    plotted_labels,
+                    all_x,
+                    all_y,
+                )
+                self._draw_strut_angle_brace(
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    False,
+                    waler_by_id[to_waler],
+                    self._to_number(row.get("ToBraceToWalerEndLen")),
+                    False,
+                    plotted_labels,
+                    all_x,
+                    all_y,
+                )
+
+        if beam_x:
+            self.ax.scatter(
+                beam_x,
+                beam_y,
+                color="purple",
+                marker="o",
+                s=60,
+                label="托梁" if "托梁" not in plotted_labels else None,
+            )
+            plotted_labels.add("托梁")
+        if column_x:
+            self.ax.scatter(
+                column_x,
+                column_y,
+                color="green",
+                marker="s",
+                s=60,
+                label="中間柱" if "中間柱" not in plotted_labels else None,
+            )
+            plotted_labels.add("中間柱")
+
+        for row in self.braces:
+            x1 = self._to_number(row.get("StartX"))
+            y1 = self._to_number(row.get("StartY"))
+            x2 = self._to_number(row.get("EndX"))
+            y2 = self._to_number(row.get("EndY"))
+            if None in (x1, y1, x2, y2):
+                continue
+            line, = self.ax.plot([x1, x2], [y1, y2], color="orange", linestyle="--", linewidth=2, label="斜撐" if "斜撐" not in plotted_labels else None)
+            plotted_labels.add("斜撐")
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            self.ax.text(mid_x, mid_y, str(row.get("BraceID", "")), color="orange", fontsize=9, verticalalignment="center", horizontalalignment="center")
+            all_x.extend([x1, x2])
+            all_y.extend([y1, y2])
+
+        self._draw_result_overlays()
+
+        if all_x and all_y:
+            padding_x = (max(all_x) - min(all_x)) * 0.05 if max(all_x) != min(all_x) else 100
+            padding_y = (max(all_y) - min(all_y)) * 0.05 if max(all_y) != min(all_y) else 100
+            self.ax.set_xlim(min(all_x) - padding_x, max(all_x) + padding_x)
+            self.ax.set_ylim(min(all_y) - padding_y, max(all_y) + padding_y)
+
+        home_xlim = tuple(self.ax.get_xlim())
+        home_ylim = tuple(self.ax.get_ylim())
+
+        self.ax.legend()
+        self.preview_counts_text = self.ax.text(
+            0.01,
+            0.99,
+            f"圍令：{len(self.walers)}\n支撐：{len(self.struts)}\n斜撐：{len(self.braces)}",
+            transform=self.ax.transAxes,
+            verticalalignment="top",
+            horizontalalignment="left",
+            fontsize=10,
+            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "black"},
+        )
+        self._preview_home_xlim = home_xlim
+        self._preview_home_ylim = home_ylim
+        if preserve_view and preserved_xlim is not None and preserved_ylim is not None:
+            self.ax.set_xlim(preserved_xlim)
+            self.ax.set_ylim(preserved_ylim)
+
+        self.canvas.draw()
+        if hasattr(self, "preview_toolbar"):
+            self.preview_toolbar.update()
+            self.preview_toolbar.push_current()
+            if preserve_view and preserved_xlim is not None and preserved_ylim is not None:
+                self.preview_toolbar.set_zoom_percent(self._get_preview_zoom_percent())
+            else:
+                self.preview_toolbar.set_zoom_percent(100)
+
+    def _draw_result_overlays(self):
+        for result_id, item in self.result_items.items():
+            if not item.get("visible", True):
+                continue
+            result_type = item.get("type")
+            result = item.get("result")
+            if result_type == "waler":
+                self._draw_single_waler_solution_overlay(result)
+            elif result_type == "support":
+                self._draw_support_solution_overlay(result_id, result, item)
+
+    def _draw_single_waler_solution_overlay(self, result):
+        plan = result.get("selected_plan")
+        waler_id = str(result.get("waler_id", "")).strip()
+        if not plan or not waler_id:
+            return
+
+        waler_row = next(
+            (row for row in self.walers if str(row.get("WalerID", "")).strip() == waler_id),
+            None,
+        )
+        if not waler_row:
+            return
+
+        x1 = self._to_number(waler_row.get("StartX"))
+        y1 = self._to_number(waler_row.get("StartY"))
+        x2 = self._to_number(waler_row.get("EndX"))
+        y2 = self._to_number(waler_row.get("EndY"))
+        if None in (x1, y1, x2, y2):
+            return
+
+        total_length = self._line_length(x1, y1, x2, y2)
+        if total_length <= 0:
+            return
+
+        segments = [int(round(v)) for v in plan.get("segments", []) if isinstance(v, (int, float))]
+        joints = [int(round(v)) for v in plan.get("joints", []) if isinstance(v, (int, float))]
+        if not segments:
+            return
+
+        if len(joints) != len(segments) - 1:
+            joints = []
+            position = 0
+            for seg in segments[:-1]:
+                position += seg
+                joints.append(position)
+
+        boundaries = [0] + joints + [int(round(total_length))]
+        colors = ["red", "green", "blue", "orange", "purple", "cyan", "magenta", "brown"]
+
+        for idx, (seg_len, start_pos, end_pos) in enumerate(zip(segments, boundaries, boundaries[1:])):
+            if total_length == 0:
+                continue
+            frac_start = start_pos / total_length
+            frac_end = end_pos / total_length
+            sx = x1 + (x2 - x1) * frac_start
+            sy = y1 + (y2 - y1) * frac_start
+            ex = x1 + (x2 - x1) * frac_end
+            ey = y1 + (y2 - y1) * frac_end
+            color = colors[idx % len(colors)]
+            self.ax.plot([sx, ex], [sy, ey], color=color, linewidth=6, alpha=0.7, solid_capstyle="round")
+            self._draw_segment_length_label(
+                sx,
+                sy,
+                ex,
+                ey,
+                seg_len,
+                color=color,
+                fontsize=9,
+            )
+
+        direction_x = (x2 - x1) / total_length
+        direction_y = (y2 - y1) / total_length
+        normal_x = -direction_y
+        normal_y = direction_x
+        joint_half_length = max(80.0, total_length * 0.008)
+        for joint_pos in joints:
+            frac = joint_pos / total_length
+            jx = x1 + (x2 - x1) * frac
+            jy = y1 + (y2 - y1) * frac
+            self.ax.plot(
+                [
+                    jx - normal_x * joint_half_length,
+                    jx + normal_x * joint_half_length,
+                ],
+                [
+                    jy - normal_y * joint_half_length,
+                    jy + normal_y * joint_half_length,
+                ],
+                color="#d62728",
+                linewidth=3.5,
+                solid_capstyle="butt",
+                zorder=13,
+            )
+
+    def _draw_support_solution_overlay(self, zoning, solution, item=None):
+        plans = getattr(solution, "plans", None)
+        if not plans:
+            return
+
+        struts_by_id = {
+            str(row.get("SupportID") or row.get("StrutID") or "").strip(): row
+            for row in self.struts
+            if str(row.get("SupportID") or row.get("StrutID") or "").strip()
+        }
+
+        for plan in plans:
+            support_id = str(getattr(plan, "support_id", "") or "").strip()
+            if item is not None and not self._support_plan_visible(item, support_id):
+                continue
+            strut_row = struts_by_id.get(support_id)
+            if not strut_row:
+                continue
+
+            x1 = self._to_number(strut_row.get("StartX"))
+            y1 = self._to_number(strut_row.get("StartY"))
+            x2 = self._to_number(strut_row.get("EndX"))
+            y2 = self._to_number(strut_row.get("EndY"))
+            if None in (x1, y1, x2, y2):
+                continue
+
+            pieces = list(plan.pieces)
+            line_length = self._line_length(x1, y1, x2, y2)
+            result_length = sum(length for _, length in pieces) + plan.gap
+            if line_length <= 0 or result_length <= 0:
+                continue
+
+            def point_at_station(station):
+                ratio = min(1.0, max(0.0, float(station) / result_length))
+                return (
+                    x1 + (x2 - x1) * ratio,
+                    y1 + (y2 - y1) * ratio,
+                )
+
+            self.ax.plot(
+                [x1, x2],
+                [y1, y2],
+                color="#607d8b",
+                linewidth=3,
+                alpha=0.35,
+                solid_capstyle="round",
+                zorder=8,
+            )
+
+            piece_colors = {
+                "steel": "#1f77b4",
+                "shim": "#2ca02c",
+                "jack": "#f2c811",
+            }
+            piece_text_colors = {
+                "steel": "#0b3d91",
+                "shim": "#176b2c",
+                "jack": "#7a5b00",
+            }
+            station = 0.0
+            for piece_type, piece_length in pieces:
+                next_station = station + piece_length
+                segment_start = point_at_station(station)
+                segment_end = point_at_station(next_station)
+                color = piece_colors.get(piece_type, "#7f7f7f")
+                text_color = piece_text_colors.get(piece_type, "#444444")
+                self.ax.plot(
+                    [segment_start[0], segment_end[0]],
+                    [segment_start[1], segment_end[1]],
+                    color=color,
+                    linewidth=6,
+                    alpha=0.92,
+                    solid_capstyle="butt",
+                    zorder=9,
+                )
+
+                self._draw_segment_length_label(
+                    segment_start[0],
+                    segment_start[1],
+                    segment_end[0],
+                    segment_end[1],
+                    piece_length,
+                    color=text_color,
+                    fontsize=8,
+                    zorder=11,
+                )
+                station = next_station
+
+            direction_x = (x2 - x1) / line_length
+            direction_y = (y2 - y1) / line_length
+            normal_x = -direction_y
+            normal_y = direction_x
+            joint_half_length = max(80.0, line_length * 0.008)
+            for joint_position in plan.joints:
+                jx, jy = point_at_station(joint_position)
+                self.ax.plot(
+                    [
+                        jx - normal_x * joint_half_length,
+                        jx + normal_x * joint_half_length,
+                    ],
+                    [
+                        jy - normal_y * joint_half_length,
+                        jy + normal_y * joint_half_length,
+                    ],
+                    color="#d62728",
+                    linewidth=3.5,
+                    solid_capstyle="butt",
+                    zorder=13,
+                )
+
+            jack_center = plan.jack_center
+            if jack_center < 0:
+                continue
+            jack_x, jack_y = point_at_station(jack_center)
+            self.ax.annotate(
+                f"★{jack_center:.0f}",
+                (jack_x, jack_y),
+                xytext=(0, 18),
+                textcoords="offset points",
+                color="#7a5b00",
+                fontsize=8,
+                fontweight="bold",
+                horizontalalignment="center",
+                verticalalignment="bottom",
+                bbox={
+                    "facecolor": "white",
+                    "alpha": 0.78,
+                    "edgecolor": "none",
+                    "pad": 1.2,
+                },
+                zorder=15,
+            )
+
+    def _get_inventory_items(self) -> List[Dict[str, object]]:
+        stock_items = []
+        for row in self.inventory:
+            length = self._to_number(row.get("Length"))
+            qty = self._to_number(row.get("Qty"))
+            if length is None or qty is None:
+                continue
+            if qty <= 0:
+                continue
+            stock_items.append({
+                "id": f"A{length}",
+                "length": length,
+                "qty": qty,
+            })
+        return stock_items
+
+    def _get_purchasable_lengths(self) -> List[int]:
+        lengths = set()
+        for row in self.inventory:
+            length = self._to_number(row.get("Length"))
+            if length is None or length <= 0:
+                continue
+            lengths.add(int(round(length)))
+        return sorted(lengths)
+
+    def _open_waler_solver(self):
+        if not self.validate_data():
+            return
+
+        waler_inputs = self.build_waler_inputs()
+        if not waler_inputs:
+            self.show_result("錯誤：找不到圍令輸入資料")
+            return
+
+        waler_ids = list(waler_inputs.keys())
+        dialog = WalerSelectionDialog(self.root, waler_ids)
+        selected_waler = dialog.open()
+        if selected_waler is None:
+            return
+
+        waler_data = waler_inputs[selected_waler]
+        solver_dialog = WalerSolverDialog(
+            self.root,
+            selected_waler,
+            waler_data.get("start_point"),
+            waler_data.get("end_point"),
+            waler_data["length"],
+            len(waler_data.get("forbidden_points", [])),
+            waler_data.get("forbidden_points", []),
+            self._get_inventory_items(),
+            self._get_purchasable_lengths(),
+            self.solver_memory,
+            self._store_waler_result,
+        )
+        solver_dialog.open()
+
+    def _open_support_solver(self):
+        if not self.validate_data():
+            return
+
+        zonings = sorted({
+            str(row.get("Zoning", "") or "").strip()
+            for row in self.struts
+            if str(row.get("Zoning", "") or "").strip()
+        })
+        if not zonings:
+            self.show_result("錯誤：支撐表中沒有可選取的分區")
+            return
+
+        dialog = ZoningSelectionDialog(self.root, zonings)
+        selected_zoning = dialog.open()
+        if selected_zoning is None:
+            return
+
+        configs = self.build_support_inputs(zoning=selected_zoning)
+        if not configs:
+            self.show_result(f"錯誤：分區 {selected_zoning} 沒有可供計算的支撐")
+            return
+
+        solver_dialog = SupportSolverDialog(
+            self.root,
+            selected_zoning,
+            configs,
+            self.support_candidate_cache,
+            self._store_support_solution,
+        )
+        solver_dialog.open()
+
+    def _store_support_solution(self, zoning, solution):
+        self._store_result_item(zoning, "support", solution)
+        self.show_result(
+            f"已完成分區 {zoning} 支撐配置："
+            f"支撐數量={len(solution.plans)}，"
+            f"總分={solution.total_score:.1f}，"
+            f"合法={'是' if solution.valid else '否'}"
+        )
+
+    def _store_waler_result(self, result):
+        waler_id = str(result.get("waler_id", "")).strip()
+        if not waler_id:
+            self.show_result("錯誤：圍令結果缺少圍令編號")
+            return
+
+        top_results = result.get("top_results")
+        if top_results is None:
+            selected_plan = result.get("selected_plan")
+            top_results = [selected_plan] if selected_plan else []
+        top_results = list(top_results or [])[:5]
+        if not top_results:
+            self.show_result(f"錯誤：{waler_id} 沒有可儲存的圍令方案")
+            return
+
+        ratio_targets = result.get("ratio_targets")
+        required_length = result.get("required_length")
+        forbidden_points = list(result.get("forbidden_points") or [])
+        joint_clearance = result.get("joint_clearance", 300)
+        min_piece_length = result.get("min_piece_length", 1000)
+        max_piece_length = result.get("max_piece_length", 10000)
+        old_result_ids = [
+            result_id
+            for result_id, item in self.result_items.items()
+            if (
+                item.get("type") == "waler"
+                and isinstance(item.get("result"), dict)
+                and item["result"].get("waler_id") == waler_id
+            )
+        ]
+        for result_id in old_result_ids:
+            self.result_items.pop(result_id, None)
+        for index, plan in enumerate(top_results, start=1):
+            result_id = f"{waler_id}-方案{index}"
+            self.result_items[result_id] = {
+                "type": "waler",
+                "result": {
+                    "waler_id": waler_id,
+                    "option_index": index,
+                    "selected_plan": plan,
+                    "ratio_targets": ratio_targets or plan.get("ratio_targets"),
+                    "required_length": required_length,
+                    "forbidden_points": forbidden_points,
+                    "joint_clearance": joint_clearance,
+                    "min_piece_length": min_piece_length,
+                    "max_piece_length": max_piece_length,
+                },
+                "visible": False,
+            }
+
+        self._refresh_results_tree(
+            selected_id=self._result_group_iid("waler", waler_id),
+        )
+        self.update_preview()
+        self.show_result(
+            f"已產生 {waler_id} 前 {len(top_results)} 名方案並加入結果。"
+            "請在結果頁勾選方案查看圖面，雙擊方案可查看詳細資訊。"
+        )
+
+    def build_support_inputs(self, zoning: Optional[str] = None) -> List[support.SupportConfig]:
+        supports: List[support.SupportConfig] = []
+        for row in self.struts:
+            row_zoning = str(row.get("Zoning", "") or "").strip()
+            if zoning is not None and row_zoning != zoning:
+                continue
+
+            x1 = self._to_number(row.get("StartX"))
+            y1 = self._to_number(row.get("StartY"))
+            x2 = self._to_number(row.get("EndX"))
+            y2 = self._to_number(row.get("EndY"))
+            explicit_length = self._to_number(row.get("Length"))
+            if explicit_length is not None:
+                total_length = explicit_length
+            else:
+                total_length = self._line_length(x1, y1, x2, y2) if None not in (x1, y1, x2, y2) else 0
+            self._migrate_strut_position_fields(row)
+            column_positions, _ = self._parse_position_list(
+                row.get("ColumnPositions", "")
+            )
+            beam_positions, _ = self._parse_position_list(
+                row.get("BeamPositions", "")
+            )
+            pile_centers = [
+                int(round(value))
+                for value in column_positions
+            ]
+            waler_centers = [
+                int(round(value))
+                for value in beam_positions
+            ]
+            support_id = str(
+                row.get("SupportID") or row.get("StrutID") or ""
+            ).strip()
+            target_jack_region_value = self._to_number(
+                row.get("TargetJackRegion")
+            )
+            target_jack_region = (
+                int(target_jack_region_value)
+                if target_jack_region_value is not None
+                else 2
+            )
+            supports.append(
+                support.SupportConfig(
+                    support_id=support_id,
+                    total_length=int(round(total_length)),
+                    pile_centers=pile_centers,
+                    waler_centers=waler_centers,
+                    target_jack_region=target_jack_region,
+                )
+            )
+        return supports
+
+    def build_waler_inputs(self) -> Dict[str, Dict[str, object]]:
+        def project_point_onto_waler(waler_row, px, py):
+            wx1 = self._to_number(waler_row.get("StartX"))
+            wy1 = self._to_number(waler_row.get("StartY"))
+            wx2 = self._to_number(waler_row.get("EndX"))
+            wy2 = self._to_number(waler_row.get("EndY"))
+            if None in (wx1, wy1, wx2, wy2):
+                return None
+            waler_length = self._line_length(wx1, wy1, wx2, wy2)
+            if waler_length <= 0:
+                return None
+            dx = wx2 - wx1
+            dy = wy2 - wy1
+            projection = ((px - wx1) * dx + (py - wy1) * dy) / waler_length
+            # 確認點是否落在 Waler 線上
+            distance_to_line = abs(dx * (wy1 - py) - dy * (wx1 - px)) / waler_length
+            if distance_to_line > 1e-6:
+                return None
+            if projection < -1e-6 or projection - waler_length > 1e-6:
+                return None
+            return int(round(projection))
+
+        waler_inputs: Dict[str, Dict[str, object]] = {}
+        waler_by_id = {
+            str(row.get("WalerID", "")): row
+            for row in self.walers
+            if str(row.get("WalerID", "") or "").strip()
+        }
+
+        for waler_id, waler_row in waler_by_id.items():
+            x1 = self._to_number(waler_row.get("StartX"))
+            y1 = self._to_number(waler_row.get("StartY"))
+            x2 = self._to_number(waler_row.get("EndX"))
+            y2 = self._to_number(waler_row.get("EndY"))
+            length = self._line_length(x1, y1, x2, y2) if None not in (x1, y1, x2, y2) else 0
+            waler_inputs[waler_id] = {
+                "start_point": (x1, y1),
+                "end_point": (x2, y2),
+                "length": int(round(length)),
+                "forbidden_points": [],
+            }
+
+        for row in self.struts:
+            self._migrate_strut_position_fields(row)
+            from_waler = str(row.get("FromWaler", "") or "").strip()
+            to_waler = str(row.get("ToWaler", "") or "").strip()
+            sx = self._to_number(row.get("StartX"))
+            sy = self._to_number(row.get("StartY"))
+            ex = self._to_number(row.get("EndX"))
+            ey = self._to_number(row.get("EndY"))
+
+            if from_waler and from_waler in waler_by_id and None not in (sx, sy):
+                position = project_point_onto_waler(waler_by_id[from_waler], sx, sy)
+                if position is not None:
+                    waler_inputs[from_waler]["forbidden_points"].append(position)
+                    start_len = self._to_number(row.get("FromBraceToWalerStartLen"))
+                    end_len = self._to_number(row.get("FromBraceToWalerEndLen"))
+                    if start_len is not None:
+                        waler_inputs[from_waler]["forbidden_points"].append(position - start_len)
+                    if end_len is not None:
+                        waler_inputs[from_waler]["forbidden_points"].append(position + end_len)
+
+            if to_waler and to_waler in waler_by_id and None not in (ex, ey):
+                position = project_point_onto_waler(waler_by_id[to_waler], ex, ey)
+                if position is not None:
+                    waler_inputs[to_waler]["forbidden_points"].append(position)
+                    start_len = self._to_number(row.get("ToBraceToWalerStartLen"))
+                    end_len = self._to_number(row.get("ToBraceToWalerEndLen"))
+                    if start_len is not None:
+                        waler_inputs[to_waler]["forbidden_points"].append(position - start_len)
+                    if end_len is not None:
+                        waler_inputs[to_waler]["forbidden_points"].append(position + end_len)
+
+        for row in self.braces:
+            from_waler = str(row.get("FromWaler", "") or "").strip()
+            to_waler = str(row.get("ToWaler", "") or "").strip()
+            sx = self._to_number(row.get("StartX"))
+            sy = self._to_number(row.get("StartY"))
+            ex = self._to_number(row.get("EndX"))
+            ey = self._to_number(row.get("EndY"))
+            if from_waler and from_waler in waler_by_id and None not in (sx, sy):
+                position = project_point_onto_waler(waler_by_id[from_waler], sx, sy)
+                if position is not None:
+                    waler_inputs[from_waler]["forbidden_points"].append(position)
+            if to_waler and to_waler in waler_by_id and None not in (ex, ey):
+                position = project_point_onto_waler(waler_by_id[to_waler], ex, ey)
+                if position is not None:
+                    waler_inputs[to_waler]["forbidden_points"].append(position)
+
+        for data in waler_inputs.values():
+            unique = sorted(set(data["forbidden_points"]))
+            data["forbidden_points"] = unique
+
+        return waler_inputs
+
+    def show_result(self, text):
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.insert("end", text)
+        self.result_text.configure(state="disabled")
+
+    def _set_window_size(self, width, height):
+        self.root.geometry(f"{width}x{height}")
+        self.root.update_idletasks()
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+class WalerSelectionDialog:
+    def __init__(self, parent, waler_ids: List[str]):
+        self.selected = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("選擇圍令")
+        self.dialog.grab_set()
+        self.dialog.geometry("320x140")
+        self.dialog.resizable(False, False)
+
+        label = ttk.Label(self.dialog, text="請選擇要配置的圍令：", font=(None, 12))
+        label.pack(padx=12, pady=(12, 6), anchor="w")
+
+        self.selection = tk.StringVar()
+        self.combobox = ttk.Combobox(self.dialog, values=waler_ids, textvariable=self.selection, state="readonly")
+        if waler_ids:
+            self.combobox.set(waler_ids[0])
+        self.combobox.pack(fill="x", padx=12, pady=6)
+
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(padx=12, pady=12, fill="x")
+
+        ok_btn = ttk.Button(button_frame, text="確定", command=self._on_ok)
+        cancel_btn = ttk.Button(button_frame, text="取消", command=self._on_cancel)
+        ok_btn.pack(side="left", expand=True, padx=6)
+        cancel_btn.pack(side="left", expand=True, padx=6)
+
+        self.dialog.bind("<Return>", lambda event: self._on_ok())
+        self.dialog.bind("<Escape>", lambda event: self._on_cancel())
+
+    def _on_ok(self):
+        selection = self.selection.get().strip()
+        if selection:
+            self.selected = selection
+        self.dialog.destroy()
+
+    def _on_cancel(self):
+        self.selected = None
+        self.dialog.destroy()
+
+    def open(self):
+        self.dialog.wait_window()
+        return self.selected
+
+
+class ZoningSelectionDialog:
+    def __init__(self, parent, zonings: List[str]):
+        self.selected = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title("選擇分區")
+        self.dialog.grab_set()
+        self.dialog.geometry("320x140")
+        self.dialog.resizable(False, False)
+
+        label = ttk.Label(
+            self.dialog,
+            text="請選擇要執行支撐配置的分區：",
+            font=(None, 12),
+        )
+        label.pack(padx=12, pady=(12, 6), anchor="w")
+
+        self.selection = tk.StringVar()
+        self.combobox = ttk.Combobox(
+            self.dialog,
+            values=zonings,
+            textvariable=self.selection,
+            state="readonly",
+        )
+        if zonings:
+            self.combobox.set(zonings[0])
+        self.combobox.pack(fill="x", padx=12, pady=6)
+
+        button_frame = ttk.Frame(self.dialog)
+        button_frame.pack(padx=12, pady=12, fill="x")
+        ttk.Button(
+            button_frame,
+            text="確定",
+            command=self._on_ok,
+        ).pack(side="left", expand=True, padx=6)
+        ttk.Button(
+            button_frame,
+            text="取消",
+            command=self._on_cancel,
+        ).pack(side="left", expand=True, padx=6)
+
+        self.dialog.bind("<Return>", lambda event: self._on_ok())
+        self.dialog.bind("<Escape>", lambda event: self._on_cancel())
+
+    def _on_ok(self):
+        selection = self.selection.get().strip()
+        if selection:
+            self.selected = selection
+        self.dialog.destroy()
+
+    def _on_cancel(self):
+        self.selected = None
+        self.dialog.destroy()
+
+    def open(self):
+        self.dialog.wait_window()
+        return self.selected
+
+
+def _text_is_at_bottom(text_widget, tolerance: float = 0.001) -> bool:
+    try:
+        return text_widget.yview()[1] >= 1.0 - tolerance
+    except (tk.TclError, IndexError):
+        return True
+
+
+class TextRedirector:
+    def __init__(self, text_widget, poll_interval: int = 50):
+        self.text_widget = text_widget
+        self._queue = queue.Queue()
+        self._poll_interval = poll_interval
+        try:
+            self.text_widget.after(self._poll_interval, self._flush_queue)
+        except tk.TclError:
+            pass
+
+    def write(self, message):
+        if not message:
+            return
+        self._queue.put(message)
+
+    def _flush_queue(self):
+        try:
+            messages = []
+            while True:
+                try:
+                    messages.append(self._queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            if messages:
+                follow_new_output = _text_is_at_bottom(self.text_widget)
+                self.text_widget.configure(state="normal")
+                self.text_widget.insert("end", "".join(messages))
+                if follow_new_output:
+                    self.text_widget.see("end")
+                self.text_widget.configure(state="disabled")
+            self.text_widget.after(self._poll_interval, self._flush_queue)
+        except tk.TclError:
+            pass
+
+    def flush(self):
+        pass
+
+
+class SupportSolverDialog:
+    def __init__(
+        self,
+        parent,
+        zoning: str,
+        configs: List[support.SupportConfig],
+        candidate_cache,
+        callback,
+    ):
+        self.zoning = zoning
+        self.configs = configs
+        self.candidate_cache = candidate_cache
+        self.callback = callback
+        self.solution = None
+
+        config_keys = [
+            support.get_support_config_key(config)
+            for config in configs
+        ]
+        duplicate_config_count = len(config_keys) - len(set(config_keys))
+        support_ids = ", ".join(config.support_id for config in configs)
+        region_counts = Counter(
+            config.target_jack_region
+            for config in configs
+        )
+        region_statistics = ", ".join(
+            f"區域 {region}: {count}"
+            for region, count in sorted(region_counts.items())
+        ) or "無"
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"支撐配置 - 分區 {zoning}")
+        self.dialog.geometry("900x720")
+        self.dialog.grab_set()
+
+        frame = ttk.Frame(self.dialog)
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
+
+        info_frame = ttk.LabelFrame(frame, text="固定資訊")
+        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        info_frame.columnconfigure(1, weight=1)
+        info_frame.columnconfigure(3, weight=1)
+
+        info_items = [
+            ("分區", zoning, "支撐數量", str(len(configs))),
+            ("重複設定數量", str(duplicate_config_count), "目標千斤頂區域統計", region_statistics),
+        ]
+        for row_index, (left_label, left_value, right_label, right_value) in enumerate(info_items):
+            ttk.Label(info_frame, text=f"{left_label}：").grid(
+                row=row_index,
+                column=0,
+                sticky="ne",
+                padx=(8, 4),
+                pady=3,
+            )
+            ttk.Label(info_frame, text=left_value).grid(
+                row=row_index,
+                column=1,
+                sticky="nw",
+                padx=(0, 12),
+                pady=3,
+            )
+            ttk.Label(info_frame, text=f"{right_label}：").grid(
+                row=row_index,
+                column=2,
+                sticky="ne",
+                padx=(8, 4),
+                pady=3,
+            )
+            ttk.Label(info_frame, text=right_value).grid(
+                row=row_index,
+                column=3,
+                sticky="nw",
+                padx=(0, 8),
+                pady=3,
+            )
+
+        ttk.Label(info_frame, text="支撐編號清單：").grid(
+            row=len(info_items),
+            column=0,
+            sticky="ne",
+            padx=(8, 4),
+            pady=3,
+        )
+        ttk.Label(
+            info_frame,
+            text=support_ids,
+            justify="left",
+            wraplength=700,
+        ).grid(
+            row=len(info_items),
+            column=1,
+            columnspan=3,
+            sticky="nw",
+            padx=(0, 8),
+            pady=3,
+        )
+
+        settings_frame = ttk.LabelFrame(frame, text="求解設定")
+        settings_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        ttk.Label(settings_frame, text="鋼材組合探索數").grid(
+            row=0, column=0, sticky="e", padx=(8, 4), pady=5
+        )
+        self.max_steel_combination_count_var = tk.StringVar(value="100")
+        ttk.Spinbox(
+            settings_frame,
+            from_=1,
+            to=5000,
+            textvariable=self.max_steel_combination_count_var,
+            width=8,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
+
+        ttk.Label(settings_frame, text="合法候選保留數").grid(
+            row=0, column=2, sticky="e", padx=(8, 4), pady=5
+        )
+        self.target_valid_candidate_count_var = tk.StringVar(value="40")
+        ttk.Spinbox(
+            settings_frame,
+            from_=1,
+            to=1000,
+            textvariable=self.target_valid_candidate_count_var,
+            width=8,
+        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
+
+        ttk.Label(
+            settings_frame,
+            text=(
+                "鋼材組合探索數越大，搜尋範圍越廣但計算量會增加；"
+                "合法候選保留數越大，後續全域最佳化的選擇越多。"
+            ),
+            wraplength=360,
+            justify="left",
+        ).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=5)
+
+        log_frame = ttk.LabelFrame(frame, text="支撐求解執行訊息")
+        log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+
+        self.result_text = scrolledtext.ScrolledText(
+            log_frame,
+            height=20,
+            wrap="none",
+            state="disabled",
+            font=("Consolas", 10),
+        )
+        self.result_text.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.text_writer = TextRedirector(self.result_text)
+
+        button_frame = ttk.Frame(frame)
+        button_frame.grid(row=3, column=0, sticky="ew")
+        self.run_button = ttk.Button(
+            button_frame,
+            text="開始計算",
+            command=self._run_solver,
+        )
+        self.run_button.pack(side="left", padx=6)
+        ttk.Button(
+            button_frame,
+            text="關閉",
+            command=self._on_close,
+        ).pack(side="right", padx=6)
+
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _append_message(self, text):
+        follow_new_output = _text_is_at_bottom(self.result_text)
+        self.result_text.configure(state="normal")
+        self.result_text.insert("end", text)
+        if follow_new_output:
+            self.result_text.see("end")
+        self.result_text.configure(state="disabled")
+
+    def _run_solver(self):
+        try:
+            max_steel_combination_count = int(
+                self.max_steel_combination_count_var.get().strip()
+            )
+            target_valid_candidate_count = int(
+                self.target_valid_candidate_count_var.get().strip()
+            )
+        except ValueError:
+            messagebox.showerror(
+                "輸入錯誤",
+                "鋼材組合探索數與合法候選保留數必須為整數",
+                parent=self.dialog,
+            )
+            return
+
+        if not 1 <= max_steel_combination_count <= 5000:
+            messagebox.showerror(
+                "輸入錯誤",
+                "鋼材組合探索數必須介於 1～5000",
+                parent=self.dialog,
+            )
+            return
+        if not 1 <= target_valid_candidate_count <= 1000:
+            messagebox.showerror(
+                "輸入錯誤",
+                "合法候選保留數必須介於 1～1000",
+                parent=self.dialog,
+            )
+            return
+
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.configure(state="disabled")
+        self.solution = None
+        self._append_message(
+            f"開始計算分區 {self.zoning}："
+            f"鋼材組合探索數={max_steel_combination_count}，"
+            f"合法候選保留數={target_valid_candidate_count}\n"
+        )
+        self.run_button.configure(state="disabled")
+        thread = threading.Thread(
+            target=self._solver_thread,
+            args=(max_steel_combination_count, target_valid_candidate_count),
+            daemon=True,
+        )
+        thread.start()
+
+    @staticmethod
+    def _log_candidate_shortage(
+        zoning,
+        config,
+        max_steel_combination_count,
+        target_valid_candidate_count,
+        actual_valid_count,
+    ):
+        support.log("支撐候選方案不足，已中止計算。")
+        support.log(f"分區：{zoning}")
+        support.log(f"支撐：{config.support_id}")
+        support.log(f"鋼材組合探索數：{max_steel_combination_count}")
+        support.log(f"合法候選保留數：{target_valid_candidate_count}")
+        support.log(f"實際合法候選數：{actual_valid_count}")
+        support.log(f"需求合法候選數：{target_valid_candidate_count}")
+        support.log("可能原因：")
+        support.log("  - 鋼材組合探索數太小，尚未探索到足夠組合")
+        support.log("  - 禁止區條件過於嚴格")
+        support.log("  - 目標千斤頂區域條件過於嚴格")
+        support.log("  - 可用材料長度組合不足")
+        support.log("  - 接頭位置容易落入禁止區")
+        support.log("建議：")
+        support.log(
+            "  請先增加「鋼材組合探索數」，"
+            f"例如由 {max_steel_combination_count} 提高到 "
+            f"{max(100, max_steel_combination_count * 2)}，再重新計算。"
+        )
+        support.log(
+            "  若仍不足，請檢查該支支撐的柱位置、"
+            "托梁位置與目標千斤頂區域設定。"
+        )
+
+    def _solve(
+        self,
+        max_steel_combination_count,
+        target_valid_candidate_count,
+    ):
+        candidates_by_support = []
+        candidate_statuses = []
+
+        for config in self.configs:
+            config_key = support.get_support_config_key(config)
+            cache_key = (
+                config_key,
+                max_steel_combination_count,
+                target_valid_candidate_count,
+            )
+            if cache_key not in self.candidate_cache:
+                support.log(f"產生支撐 {config.support_id} 候選解...")
+                diagnostic_record = {}
+                generated_candidates = support.generate_single_support_candidates(
+                    config=config,
+                    min_candidates=target_valid_candidate_count,
+                    min_valid_candidates=target_valid_candidate_count,
+                    max_length_combinations=max_steel_combination_count,
+                    beam_width=50,
+                    max_layouts_per_combo=20,
+                    diagnostics_out=diagnostic_record,
+                )
+                self.candidate_cache[cache_key] = {
+                    "candidates": generated_candidates,
+                    "diagnostics": diagnostic_record,
+                }
+                candidates = generated_candidates
+            else:
+                support.log(f"支撐 {config.support_id} 使用本次候選快取。")
+                cache_entry = self.candidate_cache[cache_key]
+                if isinstance(cache_entry, dict):
+                    candidates = cache_entry.get("candidates", [])
+                    diagnostic_record = cache_entry.get("diagnostics")
+                    if diagnostic_record:
+                        diagnostic_record.setdefault(
+                            "max_steel_combination_count",
+                            max_steel_combination_count,
+                        )
+                        diagnostic_record.setdefault(
+                            "target_valid_candidate_count",
+                            target_valid_candidate_count,
+                        )
+                        support.log_support_candidate_diagnostics(
+                            config,
+                            diagnostic_record,
+                        )
+                else:
+                    candidates = cache_entry
+
+            valid_candidates = [
+                plan
+                for plan in candidates
+                if plan.valid and not plan.reason
+            ]
+            actual_valid_count = len(valid_candidates)
+            candidate_statuses.append({
+                "config": config,
+                "actual_valid_count": actual_valid_count,
+                "sufficient": (
+                    actual_valid_count >= target_valid_candidate_count
+                ),
+            })
+            candidates_by_support.append([
+                support.clone_plan_with_support_id(
+                    plan,
+                    config.support_id,
+                )
+                for plan in valid_candidates
+            ])
+
+        support.log("=" * 72)
+        support.log(f"分區 {self.zoning} 候選方案總檢查")
+        for status in candidate_statuses:
+            config = status["config"]
+            actual_valid_count = status["actual_valid_count"]
+            state_text = "正常" if status["sufficient"] else "不足"
+            support.log(
+                f"{config.support_id}：合法候選 "
+                f"{actual_valid_count} / "
+                f"需求 {target_valid_candidate_count}，{state_text}"
+            )
+
+        shortages = [
+            status
+            for status in candidate_statuses
+            if not status["sufficient"]
+        ]
+        if shortages:
+            support.log("")
+            for status in shortages:
+                self._log_candidate_shortage(
+                    zoning=self.zoning,
+                    config=status["config"],
+                    max_steel_combination_count=max_steel_combination_count,
+                    target_valid_candidate_count=target_valid_candidate_count,
+                    actual_valid_count=status["actual_valid_count"],
+                )
+                support.log("")
+            support.log(
+                f"分區 {self.zoning} 未進入全域最佳化，"
+                "原因是部分支撐合法候選不足。"
+            )
+            support.log("=" * 72)
+            return None
+
+        support.log(
+            f"分區 {self.zoning} 全部支撐候選充足，"
+            "開始全域最佳化。"
+        )
+        support.log("=" * 72)
+        return support.build_global_solution(
+            candidates_by_support=candidates_by_support,
+            beam_width=100,
+        )
+
+    def _solver_thread(
+        self,
+        max_steel_combination_count,
+        target_valid_candidate_count,
+    ):
+        def gui_logger(*args):
+            message = " ".join(str(arg) for arg in args)
+            if not message.endswith("\n"):
+                message += "\n"
+            self.text_writer.write(message)
+
+        try:
+            support.set_logger(gui_logger)
+            support.random.seed(42)
+            solution = self._solve(
+                max_steel_combination_count,
+                target_valid_candidate_count,
+            )
+            if solution is not None:
+                self.dialog.after(
+                    0,
+                    lambda: self._display_solution(solution),
+                )
+        except Exception:
+            import traceback
+
+            message = traceback.format_exc()
+            self.text_writer.write(message)
+        finally:
+            support.set_logger(None)
+            self.dialog.after(
+                0,
+                lambda: self.run_button.configure(state="normal"),
+            )
+
+    def _display_solution(self, solution):
+        self.solution = solution
+        lines = [
+            "",
+            f"=== 分區 {self.zoning} 全域最佳配置 ===",
+            f"支撐數量：{len(solution.plans)}",
+            f"總分：{solution.total_score:.1f}",
+            f"是否合法：{'是' if solution.valid else '否'}",
+        ]
+        if solution.reason:
+            lines.append(f"說明：{solution.reason}")
+
+        lines.append("=" * 80)
+        for plan in solution.plans:
+            pieces = ", ".join(
+                f"{kind}:{length}"
+                for kind, length in plan.pieces
+            )
+            lines.extend([
+                f"支撐 {plan.support_id}",
+                f"  分數：{plan.score:.1f}",
+                f"  合法：{'是' if plan.valid and not plan.reason else '否'}",
+                f"  配置：[{pieces}]",
+                f"  接頭：{plan.joints}",
+                f"  餘長(mm)：{plan.gap}",
+                f"  千斤頂中心：{plan.jack_center:.1f}",
+                f"  千斤頂區域：{plan.jack_region_id}",
+            ])
+            if plan.reason:
+                lines.append(f"  說明：{plan.reason}")
+            lines.append("-" * 80)
+
+        self.text_writer.write("\n".join(lines) + "\n")
+        self.callback(self.zoning, solution)
+
+    def _on_close(self):
+        self.dialog.destroy()
+
+    def open(self):
+        self.dialog.wait_window()
+        return self.solution
+
+
+class WalerSolverDialog:
+    def __init__(
+        self,
+        parent,
+        waler_id,
+        start_point,
+        end_point,
+        length,
+        forbidden_count,
+        forbidden_points,
+        stock_items,
+        purchasable_lengths,
+        solver_memory,
+        callback,
+    ):
+        self.callback = callback
+        self.waler_id = waler_id
+        self.start_point = start_point
+        self.end_point = end_point
+        self.length = int(round(length))
+        self.forbidden_points = forbidden_points
+        self.stock_items = stock_items
+        self.purchasable_lengths = purchasable_lengths
+        self.solver_memory = solver_memory
+        self.min_piece_length = 1000
+        self.max_piece_length = 10000
+        self.joint_clearance = 300
+        self.candidate_joint_step = 500
+        self.cfg = None
+        self.current_results = None
+        self.solver_key = None
+
+        rounded_length = self.length
+        candidate_joint_count = len(wales.generate_candidate_joint_points(
+            rounded_length,
+            self.min_piece_length,
+            self.candidate_joint_step,
+        ))
+
+        def format_number(value):
+            if value is None:
+                return "無資料"
+            number = float(value)
+            if number.is_integer():
+                return f"{int(number):,}"
+            return f"{number:,.2f}"
+
+        def format_point(point):
+            if not point or len(point) != 2:
+                return "無資料"
+            return f"({format_number(point[0])}, {format_number(point[1])})"
+
+        forbidden_text = ", ".join(format_number(point) for point in forbidden_points) or "無"
+        purchasable_text = ", ".join(format_number(item) for item in purchasable_lengths) or "無"
+        score_weight_text = (
+            "購買數 × 100,000；比例偏差 × 100,000；小於 4,000 mm 的段數 × 100,000；"
+            "材料種類數 × 5,000；最大／最小料長差 × 1；接頭數 × 1,000"
+        )
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"圍令配置 - {waler_id}")
+        self.dialog.geometry("900x780")
+        self.dialog.grab_set()
+
+        frame = ttk.Frame(self.dialog)
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        info_frame = ttk.LabelFrame(frame, text="固定資訊與設定")
+        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        info_frame.columnconfigure(1, weight=1)
+        info_frame.columnconfigure(3, weight=1)
+
+        info_items = [
+            ("圍令編號", waler_id, "總長度", f"{format_number(rounded_length)} mm"),
+            ("起點座標", format_point(start_point), "終點座標", format_point(end_point)),
+            ("禁止點數量", str(forbidden_count), "候選接頭點數", str(candidate_joint_count)),
+            ("接頭安全距離", f"{format_number(self.joint_clearance)} mm", "最小段長", f"{format_number(self.min_piece_length)} mm"),
+            ("最大段長", f"{format_number(self.max_piece_length)} mm", "", ""),
+        ]
+        for row_index, (left_label, left_value, right_label, right_value) in enumerate(info_items):
+            ttk.Label(info_frame, text=f"{left_label}：").grid(row=row_index, column=0, sticky="ne", padx=(8, 4), pady=2)
+            ttk.Label(info_frame, text=left_value).grid(row=row_index, column=1, sticky="nw", padx=(0, 12), pady=2)
+            if right_label:
+                ttk.Label(info_frame, text=f"{right_label}：").grid(row=row_index, column=2, sticky="ne", padx=(8, 4), pady=2)
+                ttk.Label(info_frame, text=right_value).grid(row=row_index, column=3, sticky="nw", padx=(0, 8), pady=2)
+
+        detail_items = [
+            ("禁止點列表", forbidden_text),
+            ("可購買材料長度", purchasable_text),
+            ("評分權重說明", score_weight_text),
+        ]
+        detail_start_row = len(info_items)
+        for offset, (label, value) in enumerate(detail_items):
+            row_index = detail_start_row + offset
+            ttk.Label(info_frame, text=f"{label}：").grid(row=row_index, column=0, sticky="ne", padx=(8, 4), pady=2)
+            ttk.Label(
+                info_frame,
+                text=value,
+                justify="left",
+                wraplength=720,
+            ).grid(row=row_index, column=1, columnspan=3, sticky="nw", padx=(0, 8), pady=2)
+
+        solver_settings_row = detail_start_row + len(detail_items)
+        solver_settings_frame = ttk.LabelFrame(info_frame, text="演算法設定")
+        solver_settings_frame.grid(
+            row=solver_settings_row,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            padx=8,
+            pady=(6, 0),
+        )
+
+        ttk.Label(solver_settings_frame, text="演化代數").grid(
+            row=0, column=0, sticky="e", padx=(8, 4), pady=4
+        )
+        self.generations_var = tk.StringVar(value="10")
+        ttk.Spinbox(
+            solver_settings_frame,
+            from_=10,
+            to=5000,
+            textvariable=self.generations_var,
+            width=8,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 6), pady=4)
+        ttk.Label(solver_settings_frame, text="（10～5000）").grid(
+            row=0, column=2, sticky="w", padx=(0, 18), pady=4
+        )
+
+        ttk.Label(solver_settings_frame, text="族群大小").grid(
+            row=0, column=3, sticky="e", padx=(8, 4), pady=4
+        )
+        self.population_size_var = tk.StringVar(value="120")
+        ttk.Spinbox(
+            solver_settings_frame,
+            from_=10,
+            to=1000,
+            textvariable=self.population_size_var,
+            width=8,
+        ).grid(row=0, column=4, sticky="w", padx=(0, 6), pady=4)
+        ttk.Label(solver_settings_frame, text="（10～1000）").grid(
+            row=0, column=5, sticky="w", padx=(0, 8), pady=4
+        )
+
+        ratio_frame = ttk.LabelFrame(info_frame, text="短／中／長段比例設定")
+        ratio_frame.grid(
+            row=solver_settings_row + 1,
+            column=0,
+            columnspan=4,
+            sticky="ew",
+            padx=8,
+            pady=(6, 8),
+        )
+
+        ttk.Label(ratio_frame, text="短段").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=4)
+        self.short_ratio_var = tk.StringVar(value="20")
+        ttk.Entry(ratio_frame, textvariable=self.short_ratio_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        ttk.Label(ratio_frame, text="中段").grid(row=0, column=2, sticky="e", padx=(8, 4), pady=4)
+        self.mid_ratio_var = tk.StringVar(value="50")
+        ttk.Entry(ratio_frame, textvariable=self.mid_ratio_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=4)
+
+        ttk.Label(ratio_frame, text="長段").grid(row=0, column=4, sticky="e", padx=(8, 4), pady=4)
+        self.long_ratio_var = tk.StringVar(value="30")
+        ttk.Entry(ratio_frame, textvariable=self.long_ratio_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=4)
+
+        log_frame = ttk.LabelFrame(frame, text="求解執行資訊")
+        log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+
+        self.result_text = scrolledtext.ScrolledText(log_frame, height=14, wrap="none", state="disabled", font=("Consolas", 10))
+        self.result_text.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.text_writer = TextRedirector(self.result_text)
+
+        button_frame = ttk.Frame(frame)
+        button_frame.grid(row=2, column=0, sticky="ew")
+
+        self.run_button = ttk.Button(button_frame, text="開始計算", command=lambda: self._run_solver(waler_id, length))
+        self.run_button.pack(side="left", padx=6)
+
+        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _append_message(self, text):
+        follow_new_output = _text_is_at_bottom(self.result_text)
+        self.result_text.configure(state="normal")
+        self.result_text.insert("end", text)
+        if follow_new_output:
+            self.result_text.see("end")
+        self.result_text.configure(state="disabled")
+
+    @staticmethod
+    def _format_solver_number(value):
+        number = float(value)
+        return str(int(number)) if number.is_integer() else f"{number:g}"
+
+    @staticmethod
+    def _build_solver_key(
+        total_length,
+        forbidden_points,
+        short_ratio,
+        mid_ratio,
+        long_ratio,
+        purchasable_lengths,
+    ):
+        return (
+            total_length,
+            tuple(sorted(forbidden_points)),
+            short_ratio,
+            mid_ratio,
+            long_ratio,
+            tuple(sorted(purchasable_lengths)),
+        )
+
+    def _ask_use_memory_result(self, solver_key):
+        (
+            total_length,
+            forbidden_points,
+            short_ratio,
+            mid_ratio,
+            long_ratio,
+            purchasable_lengths,
+        ) = solver_key
+        forbidden_text = ", ".join(str(point) for point in forbidden_points) or "無"
+        ratio_text = " / ".join(
+            self._format_solver_number(ratio)
+            for ratio in (short_ratio, mid_ratio, long_ratio)
+        )
+        purchasable_text = ", ".join(str(length) for length in purchasable_lengths)
+
+        choice = {"use_memory": False}
+        prompt = tk.Toplevel(self.dialog)
+        prompt.title("圍令配置本次記憶")
+        prompt.transient(self.dialog)
+        prompt.resizable(False, False)
+
+        content = ttk.Frame(prompt, padding=16)
+        content.pack(fill="both", expand=True)
+        ttk.Label(
+            content,
+            text="本次執行期間已計算過相同條件，是否直接使用？",
+            justify="left",
+        ).pack(anchor="w", pady=(0, 12))
+        ttk.Separator(content).pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            content,
+            text=(
+                f"總長：{total_length}\n"
+                f"禁止點：{forbidden_text}\n"
+                f"比例：{ratio_text}\n"
+                f"材料長度：{purchasable_text}"
+            ),
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
+        ttk.Separator(content).pack(fill="x", pady=(0, 12))
+
+        button_frame = ttk.Frame(content)
+        button_frame.pack(fill="x")
+
+        def close_prompt(use_memory):
+            choice["use_memory"] = use_memory
+            prompt.destroy()
+
+        ttk.Button(
+            button_frame,
+            text="直接使用",
+            command=lambda: close_prompt(True),
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            button_frame,
+            text="重新計算",
+            command=lambda: close_prompt(False),
+        ).pack(side="left")
+
+        prompt.protocol("WM_DELETE_WINDOW", lambda: close_prompt(False))
+        prompt.grab_set()
+        self.dialog.wait_window(prompt)
+        if self.dialog.winfo_exists():
+            self.dialog.grab_set()
+        return choice["use_memory"]
+
+    def _save_solver_memory(self, results):
+        if self.solver_key is None:
+            return
+
+        best_score = min(
+            (item["score"] for item in results),
+            default=None,
+        )
+        self.solver_memory[self.solver_key] = {
+            "results": copy.deepcopy(results),
+            "best_score": best_score,
+        }
+
+    def _restore_solver_memory(self, memory_entry):
+        return copy.deepcopy(memory_entry["results"])
+
+    def _run_solver(self, waler_id, length):
+        try:
+            generations = int(self.generations_var.get().strip())
+            population_size = int(self.population_size_var.get().strip())
+        except ValueError:
+            messagebox.showerror("輸入錯誤", "演化代數與族群大小必須為整數")
+            return
+
+        if not 10 <= generations <= 5000:
+            messagebox.showerror("輸入錯誤", "演化代數必須介於 10～5000")
+            return
+        if not 10 <= population_size <= 1000:
+            messagebox.showerror("輸入錯誤", "族群大小必須介於 10～1000")
+            return
+
+        try:
+            short_ratio = float(self.short_ratio_var.get())
+            mid_ratio = float(self.mid_ratio_var.get())
+            long_ratio = float(self.long_ratio_var.get())
+        except ValueError:
+            messagebox.showerror("輸入錯誤", "段長比例必須為數字")
+            return
+
+        if not all(math.isfinite(ratio) for ratio in (short_ratio, mid_ratio, long_ratio)):
+            messagebox.showerror("輸入錯誤", "段長比例必須為有限數值")
             return
 
         if short_ratio < 0 or mid_ratio < 0 or long_ratio < 0:
-            messagebox.showerror("輸入錯誤", "目標比例不能是負數")
+            messagebox.showerror("輸入錯誤", "段長比例不能為負數")
             return
 
-        if short_ratio > 1 or mid_ratio > 1 or long_ratio > 1:
-            short_ratio /= 100.0 if short_ratio > 1 else 1.0
-            mid_ratio /= 100.0 if mid_ratio > 1 else 1.0
-            long_ratio /= 100.0 if long_ratio > 1 else 1.0
-
-        total_ratio = short_ratio + mid_ratio + long_ratio
-        if total_ratio <= 0:
-            messagebox.showerror("輸入錯誤", "短/中/長段目標比例總和必須大於 0")
+        ratios = [short_ratio, mid_ratio, long_ratio]
+        if sum(ratios) <= 0:
+            messagebox.showerror("輸入錯誤", "段長比例總和必須大於 0")
             return
+        normalized = [r / sum(ratios) for r in ratios]
 
-        short_ratio /= total_ratio
-        mid_ratio /= total_ratio
-        long_ratio /= total_ratio
-
-        result["total_length"] = total_length
-        result["support_points"] = sorted(set(support_points))
-        result["short_segment_ratio_target"] = short_ratio
-        result["mid_segment_ratio_target"] = mid_ratio
-        result["long_segment_ratio_target"] = long_ratio
-        root.destroy()
-
-    def on_cancel():
-        result["total_length"] = None
-        result["support_points"] = []
-        root.destroy()
-
-    button_frame = tk.Frame(root)
-    button_frame.pack(pady=10)
-
-    confirm_btn = tk.Button(button_frame, text="確定", width=12, command=on_confirm)
-    confirm_btn.grid(row=0, column=0, padx=10)
-
-    cancel_btn = tk.Button(button_frame, text="取消", width=12, command=on_cancel)
-    cancel_btn.grid(row=0, column=1, padx=10)
-
-    root.mainloop()
-
-    if "total_length" not in result:
-        return None
-    return {
-        "total_length": result["total_length"],
-        "support_points": result["support_points"],
-        "short_segment_ratio_target": result["short_segment_ratio_target"],
-        "mid_segment_ratio_target": result["mid_segment_ratio_target"],
-        "long_segment_ratio_target": result["long_segment_ratio_target"],
-    }
-
-
-def get_stock_items_from_gui(
-    lengths: List[int],
-    default_qty_map: Optional[Dict[int, int]] = None
-) -> Optional[List[Dict]]:
-    """
-    跳出 GUI 視窗，讓使用者輸入各長度的數量。
-
-    參數：
-    - lengths: 可選長度清單，例如 [4000, 4500, ..., 10000]
-    - default_qty_map: 每個長度的預設數量，例如：
-        {
-            4000: 10,
-            4500: 8,
-            5000: 12,
-            ...
-        }
-
-    回傳格式：
-    [
-        {"id": "A4000", "length": 4000, "qty": 2},
-        ...
-    ]
-
-    如果取消，回傳 None
-    """
-    if default_qty_map is None:
-        default_qty_map = {}
-
-    result = {"stock_items": None}
-
-    root = tk.Tk()
-    root.title("庫存料輸入")
-    root.geometry("360x650")
-
-    title_label = tk.Label(root, text="請輸入各長度庫存數量", font=("Arial", 12, "bold"))
-    title_label.pack(pady=10)
-
-    frame = tk.Frame(root)
-    frame.pack(fill="both", expand=True, padx=10, pady=5)
-
-    tk.Label(frame, text="長度(mm)", width=12, anchor="w").grid(row=0, column=0, padx=5, pady=5)
-    tk.Label(frame, text="數量", width=10, anchor="w").grid(row=0, column=1, padx=5, pady=5)
-
-    entry_widgets = {}
-
-    for i, length in enumerate(lengths, start=1):
-        tk.Label(frame, text=str(length), width=12, anchor="w").grid(row=i, column=0, padx=5, pady=3)
-
-        entry = tk.Entry(frame, width=10)
-
-        default_qty = default_qty_map.get(length, 0)
-        entry.insert(0, str(default_qty))
-
-        entry.grid(row=i, column=1, padx=5, pady=3)
-        entry_widgets[length] = entry
-
-    def on_confirm():
-        stock_items = []
-
-        for length in lengths:
-            text = entry_widgets[length].get().strip()
-
-            if text == "":
-                qty = 0
-            else:
-                try:
-                    qty = int(text)
-                except ValueError:
-                    messagebox.showerror("輸入錯誤", f"長度 {length} 的數量不是整數")
-                    return
-
-            if qty < 0:
-                messagebox.showerror("輸入錯誤", f"長度 {length} 的數量不能是負數")
+        try:
+            length = int(round(length))
+            if length <= 0:
+                self._append_message("錯誤：這個圍令長度無效，請檢查圍令座標。\n")
                 return
 
-            if qty > 0:
-                stock_items.append({
-                    "id": f"A{length}",
-                    "length": length,
-                    "qty": qty,
-                })
+            purchasable_lengths = sorted({
+                int(round(item))
+                for item in self.purchasable_lengths
+                if item is not None
+            })
+            if not purchasable_lengths:
+                self._append_message("錯誤：庫存表中沒有可購買長度。\n")
+                return
 
-        result["stock_items"] = stock_items
-        root.destroy()
+            cfg = wales.Config(
+                total_length=length,
+                support_points=[int(round(p)) for p in self.forbidden_points],
+                min_piece_length=self.min_piece_length,
+                max_piece_length=self.max_piece_length,
+                joint_clearance_to_support=self.joint_clearance,
+                candidate_joint_step=self.candidate_joint_step,
+                purchasable_lengths=purchasable_lengths,
+                short_segment_ratio_target=normalized[0],
+                mid_segment_ratio_target=normalized[1],
+                long_segment_ratio_target=normalized[2],
+                population_size=population_size,
+                generations=generations,
+                crossover_rate=0.85,
+                mutation_rate=0.08,
+                elite_size=8,
+                tournament_k=4,
+                top_n=5,
+            )
+            self.cfg = cfg
+        except Exception as exc:
+            self._append_message(f"錯誤：無法建立求解器設定：{exc}\n")
+            return
 
-    def on_cancel():
-        result["stock_items"] = None
-        root.destroy()
+        solver_key = self._build_solver_key(
+            length,
+            cfg.support_points,
+            short_ratio,
+            mid_ratio,
+            long_ratio,
+            purchasable_lengths,
+        )
+        self.solver_key = solver_key
+        memory_entry = self.solver_memory.get(solver_key)
 
-    button_frame = tk.Frame(root)
-    button_frame.pack(pady=15)
+        if memory_entry is not None and self._ask_use_memory_result(solver_key):
+            self.result_text.configure(state="normal")
+            self.result_text.delete("1.0", "end")
+            self.result_text.configure(state="disabled")
+            restored_results = self._restore_solver_memory(memory_entry)
+            self.current_results = None
+            self._append_message("已直接載入本次執行期間的相同條件結果。\n")
+            self._display_results(restored_results)
+            return
 
-    confirm_btn = tk.Button(button_frame, text="確定", width=10, command=on_confirm)
-    confirm_btn.grid(row=0, column=0, padx=10)
+        self.result_text.configure(state="normal")
+        self.result_text.delete("1.0", "end")
+        self.result_text.configure(state="disabled")
+        self.current_results = None
+        self._append_message(
+            f"開始計算：演化代數={cfg.generations}，"
+            f"族群大小={cfg.population_size}，請稍候...\n"
+        )
+        self.run_button.configure(state="disabled")
 
-    cancel_btn = tk.Button(button_frame, text="取消", width=10, command=on_cancel)
-    cancel_btn.grid(row=0, column=1, padx=10)
+        thread = threading.Thread(
+            target=self._solver_thread,
+            args=(cfg, self.stock_items),
+            daemon=True,
+        )
+        thread.start()
 
+
+    def _solver_thread(self, cfg, stock_items):
+        def gui_logger(*args):
+            message = " ".join(str(arg) for arg in args)
+            if not message.endswith("\n"):
+                message += "\n"
+            self.text_writer.write(message)
+
+        try:
+            wales.set_logger(gui_logger)
+            results = wales.evolve(cfg, stock_items, seed=42)
+            self._save_solver_memory(results)
+            self.dialog.after(0, lambda: self._display_results(results))
+        except Exception:
+            import traceback
+
+            msg = traceback.format_exc()
+            self.dialog.after(0, lambda: self._append_message(msg))
+        finally:
+            wales.set_logger(print)
+            self.dialog.after(0, lambda: self.run_button.configure(state="normal"))
+
+    def _waler_ratio_targets(self):
+        if self.cfg is None:
+            return {"short": 0.2, "mid": 0.5, "long": 0.3}
+        return {
+            "short": self.cfg.short_segment_ratio_target,
+            "mid": self.cfg.mid_segment_ratio_target,
+            "long": self.cfg.long_segment_ratio_target,
+        }
+
+    def _waler_segment_counts(self, item):
+        segment_counts = {"short": 0, "mid": 0, "long": 0}
+        if self.cfg is None:
+            return None
+
+        for segment in item.get("segments", []) or []:
+            category = wales.classify_length(segment, self.cfg)
+            if category in segment_counts:
+                segment_counts[category] += 1
+        return segment_counts
+
+    def _with_waler_display_metadata(self, item):
+        enriched = dict(item)
+        enriched["ratio_targets"] = self._waler_ratio_targets()
+        segment_counts = self._waler_segment_counts(item)
+        if segment_counts is not None:
+            enriched["segment_counts"] = segment_counts
+        return enriched
+
+    def _display_results(self, results, previous_results=None):
+        if not results:
+            self._append_message("找不到可顯示的方案。\n")
+            return
+
+        display_results = [
+            self._with_waler_display_metadata(item)
+            for item in list(results or [])[:5]
+        ]
+
+        self._append_message("\n=== 前 5 名方案 ===\n")
+        for idx, item in enumerate(display_results, start=1):
+            self._append_message(self._format_plan_summary(idx, item))
+
+        self.current_results = display_results
+        self.callback({
+            "waler_id": self.waler_id,
+            "top_results": display_results,
+            "ratio_targets": self._waler_ratio_targets(),
+            "required_length": int(round(self.length)),
+            "forbidden_points": [int(round(point)) for point in self.forbidden_points],
+            "joint_clearance": self.joint_clearance,
+            "min_piece_length": self.min_piece_length,
+            "max_piece_length": self.max_piece_length,
+        })
+        self._append_message(
+            "\n前 5 名已加入結果。請在結果頁勾選方案查看圖面，"
+            "雙擊方案可查看詳細資訊。\n"
+        )
+
+    def _format_plan_summary(self, index, item):
+        return (
+            SupportInputApp._format_waler_score_breakdown(
+                item,
+                option_index=index,
+                ratio_targets=item.get("ratio_targets"),
+                segment_counts=item.get("segment_counts"),
+            )
+            + "\n\n"
+        )
+
+    def _on_close(self):
+        self.dialog.destroy()
+
+    def open(self):
+        self.dialog.wait_window()
+        return self.current_results
+
+
+def main():
+    root = tk.Tk()
+    app = SupportInputApp(root)
     root.mainloop()
 
-    return result["stock_items"]
-
-
-def classify_length(length: int, cfg: Config) -> str:
-    """把段長分類成 short / mid / long。
-
-    依據目標區間:
-    - short: 4000 <= len < 6000
-    - mid: 6000 <= len <= 8000
-    - long: 8000 < len <= 10000
-    """
-    if cfg.short_segment_min <= length < cfg.short_segment_max:
-        return "short"
-    elif cfg.mid_segment_min <= length <= cfg.mid_segment_max:
-        return "mid"
-    elif cfg.long_segment_min < length <= cfg.long_segment_max:
-        return "long"
-    return "out"
-
-
-def is_joint_allowed(point: int, cfg: Config) -> bool:
-    """檢查接頭位置是否離支撐點太近。"""
-    for support in cfg.support_points:
-        if abs(point - support) < cfg.joint_clearance_to_support:
-            return False
-    return True
-
-
-def expand_stock_items(stock_items: List[Dict]) -> List[Dict]:
-    """
-    把庫存展開成單支清單。
-    例如:
-    [{"id":"A2", "length":9500, "qty":2}]
-    ->
-    [{"stock_id":"A2#1","stock_group":"A2","stock_length":9500},
-     {"stock_id":"A2#2","stock_group":"A2","stock_length":9500}]
-    """
-    inventory = []
-    for item in stock_items:
-        item_id = item.get("id", str(item["length"]))
-        length = item["length"]
-        qty = item["qty"]
-        for i in range(qty):
-            inventory.append(
-                {
-                    "stock_id": f"{item_id}#{i+1}",
-                    "stock_group": item_id,
-                    "stock_length": length,
-                }
-            )
-    return inventory
-
-
-# =========================
-# 3. 染色體 <-> 分段
-# =========================
-
-def decode_individual(individual: List[int], cfg: Config) -> Tuple[List[int], List[int]]:
-    """
-    染色體 = 每個候選點是否選為接頭 (0/1)
-    回傳:
-    - joints: 真正採用的接頭位置
-    - segments: 分段長度
-    """
-    selected_joints = []
-
-    for gene, point in zip(individual, cfg.candidate_joint_points):
-        if gene == 1:
-            selected_joints.append(point)
-
-    selected_joints = sorted(set(selected_joints))
-
-    # 加入終點，方便算 segment
-    all_points = [0] + selected_joints + [cfg.total_length]
-
-    segments = []
-    for i in range(len(all_points) - 1):
-        segments.append(all_points[i + 1] - all_points[i])
-
-    return selected_joints, segments
-
-
-def validate_segments(joints: List[int], segments: List[int], cfg: Config) -> Tuple[bool, List[str]]:
-    """
-    驗證是否符合基本規則。
-    回傳:
-    - 是否有效
-    - 錯誤訊息清單
-    """
-    errors = []
-
-    # 接頭距支撐限制
-    for joint in joints:
-        if not is_joint_allowed(joint, cfg):
-            errors.append(f"接頭 {joint} 距支撐過近")
-
-    # 每段長度限制
-    for seg in segments:
-        if seg < cfg.min_piece_length:
-            errors.append(f"段長 {seg} 小於最短限制 {cfg.min_piece_length}")
-        if seg > cfg.max_piece_length:
-            errors.append(f"段長 {seg} 大於最長限制 {cfg.max_piece_length}")
-
-    return len(errors) == 0, errors
-
-
-# =========================
-# 4. 配料與評分
-# =========================
-
-def segment_ratio_summary(
-    segments: List[int],
-    cfg: Config,
-) -> Tuple[Dict[str, int], Dict[str, float]]:
-    """回傳 short/mid/long 的數量與段數比例。"""
-    bucket_count = {"short": 0, "mid": 0, "long": 0}
-    for seg in segments:
-        category = classify_length(seg, cfg)
-        if category in bucket_count:
-            bucket_count[category] += 1
-
-    total_count = sum(bucket_count.values())
-    if total_count == 0:
-        return bucket_count, {k: 0.0 for k in bucket_count}
-
-    bucket_ratio = {k: bucket_count[k] / total_count for k in bucket_count}
-    return bucket_count, bucket_ratio
-
-
-def calculate_ratio_penalty(
-    segments: List[int],
-    cfg: Config,
-) -> Tuple[float, Dict[str, float]]:
-    """計算分段比例與比例懲罰。"""
-    _, bucket_ratio = segment_ratio_summary(segments, cfg)
-    target_ratios = {
-        "short": cfg.short_segment_ratio_target,
-        "mid": cfg.mid_segment_ratio_target,
-        "long": cfg.long_segment_ratio_target,
-    }
-    penalty = sum(
-        abs(bucket_ratio[key] - target_ratios[key])
-        for key in target_ratios
-    ) * cfg.ratio_penalty_weight
-    return penalty, bucket_ratio
-
-
-def allocate_stock_best_fit(
-    segments: List[int],
-    stock_items: List[Dict],
-    purchasable_lengths: List[int],
-) -> Optional[Dict]:
-    """
-    用 best-fit 把每段配到庫存料。
-    規則:
-    - 每段配一支料
-    - 料長必須 >= 段長
-    - 優先使用庫存；若庫存不夠則可購買補足
-
-    回傳:
-    {
-      "assignments": [...],
-      "total_waste": ...,           # 仍可計算但不作為評分
-      "total_bought": ...,
-      "distinct_groups": ..., 
-      "length_variation": ..., 
-    }
-    """
-    inventory = expand_stock_items(stock_items)
-    used = [False] * len(inventory)
-
-    assignments = []
-    total_waste = 0
-    total_bought = 0
-    available_lengths = sorted(purchasable_lengths)
-
-    # 先配長段
-    for seg in sorted(segments, reverse=True):
-        best_idx = next(
-            (i for i, stock in enumerate(inventory)
-             if not used[i] and stock["stock_length"] == seg),
-            None,
-        )
-
-        if best_idx is not None:
-            used[best_idx] = True
-            chosen = inventory[best_idx]
-            bought = False
-        else:
-            if seg not in available_lengths:
-                return None
-            total_bought += 1
-            chosen = {
-                "stock_id": f"BUY-{seg}#{total_bought}",
-                "stock_group": f"A{seg}",
-                "stock_length": seg,
-            }
-            bought = True
-
-        assignments.append(
-            {
-                "segment_length": seg,
-                "stock_id": chosen["stock_id"],
-                "stock_group": chosen["stock_group"],
-                "stock_length": chosen["stock_length"],
-                "waste": chosen["stock_length"] - seg,
-                "bought": bought,
-            }
-        )
-        total_waste += chosen["stock_length"] - seg
-
-    assignments.sort(key=lambda x: x["segment_length"], reverse=True)
-
-    stock_lengths = [a["stock_length"] for a in assignments]
-    distinct_groups = len({a["stock_group"] for a in assignments})
-    length_variation = max(stock_lengths) - min(stock_lengths) if stock_lengths else 0
-
-    under_4000_segment_count = sum(1 for seg in segments if seg < 4000)
-
-    return {
-        "assignments": assignments,
-        "total_waste": total_waste,
-        "total_bought": total_bought,
-        "distinct_groups": distinct_groups,
-        "length_variation": length_variation,
-        "under_4000_segment_count": under_4000_segment_count,
-    }
-
-
-def evaluate_individual(
-    individual: List[int],
-    cfg: Config,
-    stock_items: List[Dict]
-) -> Dict:
-    """
-    評估個體，回傳完整結果。
-    score 越低越好。
-    """
-    joints, segments = decode_individual(individual, cfg)
-    valid, errors = validate_segments(joints, segments, cfg)
-
-    # 大懲罰：基本幾何規則不符
-    if not valid:
-        penalty = 1_000_000 + 50_000 * len(errors)
-        return {
-            "individual": individual[:],
-            "joints": joints,
-            "segments": segments,
-            "valid": False,
-            "errors": errors,
-            "assignments": [],
-            "total_waste": None,
-            "ratio_penalty": None,
-            "joint_count": len(joints),
-            "score": penalty,
-        }
-
-    # 配料
-    alloc = allocate_stock_best_fit(segments, stock_items, cfg.purchasable_lengths)
-    if alloc is None:
-        return {
-            "individual": individual[:],
-            "joints": joints,
-            "segments": segments,
-            "valid": False,
-            "errors": ["無法配料，可能無合適庫存或可購買長度"],
-            "assignments": [],
-            "total_waste": None,
-            "buy_count": None,
-            "distinct_groups": None,
-            "length_variation": None,
-            "joint_count": len(joints),
-            "score": 800_000 + len(joints) * 1000,
-        }
-
-    joint_count = len(joints)
-    buy_count = alloc["total_bought"]
-    distinct_groups = alloc["distinct_groups"]
-    length_variation = alloc["length_variation"]
-    under_4000_segment_count = alloc["under_4000_segment_count"]
-    ratio_penalty, segment_ratios = calculate_ratio_penalty(segments, cfg)
-
-    # 綜合評分：
-    # 1) 優先使用庫存；若使用購買料，分數大幅扣除
-    # 2) 儘量符合短/中/長段比例目標
-    # 3) 儘量避免段長 <4000
-    # 4) 儘量減少不同料種
-    # 5) 儘量減少最大/最小料長變化
-    # 6) 保留接頭數量作為次要目標
-    score = (
-        buy_count * 100_000
-        + ratio_penalty
-        + under_4000_segment_count * 100_000
-        + distinct_groups * 5_000
-        + length_variation
-        + joint_count * 1000
-    )
-
-    return {
-        "individual": individual[:],
-        "joints": joints,
-        "segments": segments,
-        "valid": True,
-        "errors": [],
-        "assignments": alloc["assignments"],
-        "total_waste": alloc["total_waste"],
-        "buy_count": buy_count,
-        "distinct_groups": distinct_groups,
-        "length_variation": length_variation,
-        "under_4000_segment_count": under_4000_segment_count,
-        "segment_ratios": segment_ratios,
-        "ratio_penalty": ratio_penalty,
-        "joint_count": joint_count,
-        "score": score,
-    }
-
-
-# =========================
-# 5. GA 運算
-# =========================
-
-def repair_individual(individual: List[int], cfg: Config, max_iters: int = 80) -> List[int]:
-    """
-    修補個體：
-    1. 先修硬違規（支撐、太短、太長）
-    2. 再修「雖然合法但過短」的段（例如 < preferred_min_piece_length）
-    3. 最後嘗試簡化接頭數
-    """
-
-    hard_min = cfg.min_piece_length
-    preferred_min = getattr(cfg, "preferred_min_piece_length", cfg.min_piece_length)
-    hard_max = cfg.max_piece_length
-
-    selected = [p for gene, p in zip(individual, cfg.candidate_joint_points) if gene == 1]
-    selected = sorted(set(selected))
-
-    def to_individual(selected_joints: List[int]) -> List[int]:
-        joint_set = set(selected_joints)
-        return [1 if p in joint_set else 0 for p in cfg.candidate_joint_points]
-
-    def get_points(selected_joints: List[int]) -> List[int]:
-        return [0] + selected_joints + [cfg.total_length]
-
-    def get_segments(selected_joints: List[int]) -> List[int]:
-        pts = get_points(selected_joints)
-        return [pts[i + 1] - pts[i] for i in range(len(pts) - 1)]
-
-    def is_valid_selected(selected_joints: List[int]) -> bool:
-        test_ind = to_individual(selected_joints)
-        joints, segments = decode_individual(test_ind, cfg)
-        valid, _ = validate_segments(joints, segments, cfg)
-        return valid
-
-    def count_preferred_short(selected_joints: List[int]) -> int:
-        return sum(1 for seg in get_segments(selected_joints) if seg < preferred_min)
-
-    def remove_invalid_support_joints(selected_joints: List[int]) -> List[int]:
-        return [p for p in selected_joints if is_joint_allowed(p, cfg)]
-
-    def try_remove_joint(selected_joints: List[int], joint_to_remove: int) -> Optional[List[int]]:
-        new_selected = [p for p in selected_joints if p != joint_to_remove]
-        if is_valid_selected(new_selected):
-            return new_selected
-        return None
-
-    def fix_hard_short_once(selected_joints: List[int]) -> Tuple[List[int], bool]:
-        """
-        修真正違規的短段（seg < hard_min）
-        """
-        points = get_points(selected_joints)
-
-        for i in range(len(points) - 1):
-            seg = points[i + 1] - points[i]
-            if seg < hard_min:
-                candidates = []
-
-                # 刪右邊界接頭
-                if 0 < i + 1 < len(points) - 1:
-                    right_joint = points[i + 1]
-                    merged_len = points[i + 2] - points[i] if i + 2 < len(points) else None
-                    if merged_len is not None and hard_min <= merged_len <= hard_max:
-                        new_selected = [p for p in selected_joints if p != right_joint]
-                        if is_valid_selected(new_selected):
-                            candidates.append((abs(merged_len - preferred_min), new_selected))
-
-                # 刪左邊界接頭
-                if 0 < i < len(points) - 1:
-                    left_joint = points[i]
-                    merged_len = points[i + 1] - points[i - 1]
-                    if hard_min <= merged_len <= hard_max:
-                        new_selected = [p for p in selected_joints if p != left_joint]
-                        if is_valid_selected(new_selected):
-                            candidates.append((abs(merged_len - preferred_min), new_selected))
-
-                if candidates:
-                    candidates.sort(key=lambda x: x[0])
-                    return candidates[0][1], True
-
-                return selected_joints, False
-
-        return selected_joints, False
-
-    def fix_hard_long_once(selected_joints: List[int]) -> Tuple[List[int], bool]:
-        """
-        修真正違規的長段（seg > hard_max）
-        """
-        points = get_points(selected_joints)
-
-        for i in range(len(points) - 1):
-            left = points[i]
-            right = points[i + 1]
-            seg = right - left
-
-            if seg > hard_max:
-                candidates = []
-
-                for p in cfg.candidate_joint_points:
-                    if p <= left or p >= right:
-                        continue
-                    if p in selected_joints:
-                        continue
-                    if not is_joint_allowed(p, cfg):
-                        continue
-
-                    left_seg = p - left
-                    right_seg = right - p
-
-                    if hard_min <= left_seg <= hard_max and hard_min <= right_seg <= hard_max:
-                        new_selected = sorted(selected_joints + [p])
-                        if is_valid_selected(new_selected):
-                            # 優先：減少 < preferred_min 的段數
-                            short_count = count_preferred_short(new_selected)
-                            midpoint_pen = abs(p - (left + right) / 2)
-                            candidates.append((short_count, midpoint_pen, new_selected))
-
-                if candidates:
-                    candidates.sort(key=lambda x: (x[0], x[1]))
-                    return candidates[0][2], True
-
-                return selected_joints, False
-
-        return selected_joints, False
-
-    def improve_preferred_short_once(selected_joints: List[int]) -> Tuple[List[int], bool]:
-        """
-        修「雖然合法，但小於 preferred_min」的段。
-        主要做法：優先嘗試刪掉相鄰接頭來合併。
-        """
-        points = get_points(selected_joints)
-        current_short_count = count_preferred_short(selected_joints)
-
-        best_candidate = None
-        best_short_count = current_short_count
-
-        for i in range(len(points) - 1):
-            seg = points[i + 1] - points[i]
-
-            if hard_min <= seg < preferred_min:
-                # 刪右邊界接頭
-                if 0 < i + 1 < len(points) - 1:
-                    right_joint = points[i + 1]
-                    new_selected = [p for p in selected_joints if p != right_joint]
-                    if is_valid_selected(new_selected):
-                        new_short_count = count_preferred_short(new_selected)
-                        if new_short_count < best_short_count:
-                            best_short_count = new_short_count
-                            best_candidate = new_selected
-
-                # 刪左邊界接頭
-                if 0 < i < len(points) - 1:
-                    left_joint = points[i]
-                    new_selected = [p for p in selected_joints if p != left_joint]
-                    if is_valid_selected(new_selected):
-                        new_short_count = count_preferred_short(new_selected)
-                        if new_short_count < best_short_count:
-                            best_short_count = new_short_count
-                            best_candidate = new_selected
-
-        if best_candidate is not None:
-            return best_candidate, True
-
-        return selected_joints, False
-
-    def simplify_joints_once(selected_joints: List[int]) -> Tuple[List[int], bool]:
-        """
-        如果沒有硬違規，也沒有 preferred short，可以試著減少接頭數。
-        刪掉一個接頭後若仍合法，且不增加 preferred short，就接受。
-        """
-        current_short_count = count_preferred_short(selected_joints)
-
-        for joint in selected_joints:
-            new_selected = [p for p in selected_joints if p != joint]
-            if is_valid_selected(new_selected):
-                new_short_count = count_preferred_short(new_selected)
-                if new_short_count <= current_short_count:
-                    return new_selected, True
-
-        return selected_joints, False
-
-    # -------------------------------------------------
-    # 主流程
-    # -------------------------------------------------
-    selected = remove_invalid_support_joints(selected)
-
-    for _ in range(max_iters):
-        changed = False
-
-        # 1. 先修硬違規
-        selected, did_fix = fix_hard_short_once(selected)
-        if did_fix:
-            changed = True
-            continue
-
-        selected, did_fix = fix_hard_long_once(selected)
-        if did_fix:
-            changed = True
-            continue
-
-        # 2. 再修 preferred short（例如 < 4000）
-        selected, did_fix = improve_preferred_short_once(selected)
-        if did_fix:
-            changed = True
-            continue
-
-        # 3. 如果已合法且沒有 preferred short，就試著減少接頭
-        if is_valid_selected(selected) and count_preferred_short(selected) == 0:
-            selected, did_fix = simplify_joints_once(selected)
-            if did_fix:
-                changed = True
-                continue
-
-        if not changed:
-            break
-
-    if is_valid_selected(selected):
-        return to_individual(selected)
-
-    return build_valid_individual(cfg)
-
-def find_valid_joint_sequence(cfg: Config, randomize: bool = False) -> Optional[List[int]]:
-    points = sorted(cfg.candidate_joint_points)
-    target = cfg.total_length
-    nodes = [0] + points + [target]
-    n = len(nodes)
-
-    neighbors = []
-    for i, pos in enumerate(nodes):
-        next_nodes = []
-        for j in range(i + 1, n):
-            seg = nodes[j] - pos
-            if cfg.min_piece_length <= seg <= cfg.max_piece_length:
-                next_nodes.append(j)
-            elif seg > cfg.max_piece_length:
-                break
-        neighbors.append(next_nodes)
-
-    def dfs(idx: int) -> Optional[List[int]]:
-        if idx == n - 1:
-            return [nodes[idx]]
-
-        next_indices = neighbors[idx][:]
-        if randomize:
-            random.shuffle(next_indices)
-
-        for j in next_indices:
-            path = dfs(j)
-            if path is not None:
-                return [nodes[idx]] + path
-
-        return None
-
-    path = dfs(0)
-    if path is None or path[-1] != target:
-        return None
-    return [p for p in path[1:-1]]
-
-
-def build_valid_individual(cfg: Config, max_attempts: int = 100) -> List[int]:
-    for _ in range(max_attempts):
-        selected = find_valid_joint_sequence(cfg, randomize=True)
-        if selected is not None:
-            return [1 if p in selected else 0 for p in cfg.candidate_joint_points]
-
-    selected = find_valid_joint_sequence(cfg, randomize=False)
-    if selected is not None:
-        return [1 if p in selected else 0 for p in cfg.candidate_joint_points]
-
-    return [0] * len(cfg.candidate_joint_points)
-
-
-def create_individual(cfg: Config) -> List[int]:
-    """建立一個合法的初始個體。"""
-    raw = build_valid_individual(cfg)
-    return repair_individual(raw, cfg)
-
-
-
-def initial_population(cfg: Config) -> List[List[int]]:
-    return [create_individual(cfg) for _ in range(cfg.population_size)]
-
-
-def tournament_selection(
-    population: List[List[int]],
-    evaluated: List[Dict],
-    k: int
-) -> List[int]:
-    """
-    Tournament selection，分數低者勝。
-    """
-    idxs = random.sample(range(len(population)), k)
-    best_idx = min(idxs, key=lambda i: evaluated[i]["score"])
-    return population[best_idx][:]
-
-
-def crossover(parent1: List[int], parent2: List[int], rate: float) -> Tuple[List[int], List[int]]:
-    """
-    單點交配。
-    """
-    if random.random() > rate or len(parent1) <= 1:
-        return parent1[:], parent2[:]
-
-    cut = random.randint(1, len(parent1) - 1)
-    child1 = parent1[:cut] + parent2[cut:]
-    child2 = parent2[:cut] + parent1[cut:]
-
-    return child1, child2
-
-
-def mutate(individual: List[int], rate: float) -> List[int]:
-    """
-    位元翻轉突變。
-    """
-    mutated = individual[:]
-    for i in range(len(mutated)):
-        if random.random() < rate:
-            mutated[i] = 1 - mutated[i]
-    return mutated
-
-
-def evolve(cfg: Config, stock_items: List[Dict], seed: int = 42) -> List[Dict]:
-    random.seed(seed)
-
-    population = initial_population(cfg)
-    history_best = []
-
-    for gen in range(cfg.generations):
-        evaluated = [evaluate_individual(ind, cfg, stock_items) for ind in population]
-        evaluated.sort(key=lambda x: x["score"])
-
-        best = evaluated[0]
-        history_best.append(best["score"])
-
-        # 每 20 代印一次進度
-        if gen % 20 == 0 or gen == cfg.generations - 1:
-            print(
-                f"[Generation {gen:>3}] "
-                f"best_score={best['score']:.2f}, "
-                f"valid={best['valid']}, "
-                f"segments={best['segments']}"
-            )
-
-        # Elite 保留
-        elite_individuals = [item["individual"][:] for item in evaluated[: cfg.elite_size]]
-
-        # 建新族群
-        new_population = elite_individuals[:]
-
-        # 注意：這裡的 evaluated 已排序，但 population 尚未排序
-        # 所以重新建立一份與 population 對應的評估
-        evaluated_for_population = [evaluate_individual(ind, cfg, stock_items) for ind in population]
-
-        while len(new_population) < cfg.population_size:
-            parent1 = tournament_selection(population, evaluated_for_population, cfg.tournament_k)
-            parent2 = tournament_selection(population, evaluated_for_population, cfg.tournament_k)
-
-            child1, child2 = crossover(parent1, parent2, cfg.crossover_rate)
-            child1 = mutate(child1, cfg.mutation_rate)
-            child2 = mutate(child2, cfg.mutation_rate)
-
-            child1 = repair_individual(child1, cfg)
-            child2 = repair_individual(child2, cfg)
-
-            new_population.append(child1)
-            if len(new_population) < cfg.population_size:
-                new_population.append(child2)
-
-        population = new_population
-
-    # 最後再評估一次，取前 top_n
-    final_evaluated = [evaluate_individual(ind, cfg, stock_items) for ind in population]
-
-    # 優先只保留有效方案；若沒有任何有效方案，再退回所有方案
-    valid_evaluated = [item for item in final_evaluated if item["valid"]]
-    if valid_evaluated:
-        final_evaluated = valid_evaluated
-
-    # 去重：避免同樣的 segments 一直重複
-    unique = {}
-    for item in final_evaluated:
-        key = tuple(item["segments"])
-        if key not in unique or item["score"] < unique[key]["score"]:
-            unique[key] = item
-
-    results = list(unique.values())
-    results.sort(key=lambda x: x["score"])
-
-    return results[: cfg.top_n]
-
-
-# =========================
-# 診斷工具
-# =========================
-
-def build_neighbors(cfg: Config) -> Tuple[List[int], List[List[int]]]:
-    """
-    建立節點與鄰接表。
-    nodes: [0] + 候選接頭點 + [終點]
-    neighbors[i]: 從 nodes[i] 出發，可以合法跳到哪些下一個節點索引
-    """
-    points = sorted(cfg.candidate_joint_points)
-    target = cfg.total_length
-    nodes = [0] + points + [target]
-    n = len(nodes)
-
-    neighbors: List[List[int]] = []
-    for i, pos in enumerate(nodes):
-        next_nodes = []
-        for j in range(i + 1, n):
-            seg = nodes[j] - pos
-            if cfg.min_piece_length <= seg <= cfg.max_piece_length:
-                next_nodes.append(j)
-            elif seg > cfg.max_piece_length:
-                break
-        neighbors.append(next_nodes)
-
-    return nodes, neighbors
-
-
-def diagnose_search_space(cfg: Config, stock_items: List[Dict], sample_population_size: int = 120) -> None:
-    
-    """
-    診斷搜尋空間與初始族群狀況。
-    """
-    print("\n" + "=" * 100)
-    print("搜尋空間診斷報告")
-    print("=" * 100)
-
-    # -------------------------------------------------
-    # 1. 候選點 / 合法點
-    # -------------------------------------------------
-    total_candidate_points = len(cfg.candidate_joint_points)
-    valid_joint_points = [p for p in cfg.candidate_joint_points if is_joint_allowed(p, cfg)]
-    valid_candidate_points = len(valid_joint_points)
-
-    print(f"總長度 total_length: {cfg.total_length}")
-    print(f"候選接頭點總數: {total_candidate_points}")
-    print(f"合法接頭點總數(通過支撐距離限制): {valid_candidate_points}")
-
-    if total_candidate_points > 0:
-        valid_ratio = valid_candidate_points / total_candidate_points
-        print(f"合法接頭點比例: {valid_ratio:.2%}")
-    else:
-        print("合法接頭點比例: 無法計算（候選點為 0）")
-
-    # -------------------------------------------------
-    # 2. 分支數診斷（不含支撐點限制的鄰接圖）
-    # 注意：這裡使用 candidate_joint_points 建圖
-    # 真正是否合法還要靠 validate_segments 再判斷
-    # -------------------------------------------------
-    nodes, neighbors = build_neighbors(cfg)
-
-    branch_counts = [len(x) for x in neighbors[:-1]]  # 最後一個終點通常沒有下一步
-    if branch_counts:
-        avg_branch = sum(branch_counts) / len(branch_counts)
-        max_branch = max(branch_counts)
-        min_branch = min(branch_counts)
-
-        print("\n[分支數統計]")
-        print(f"節點總數(含起點與終點): {len(nodes)}")
-        print(f"平均分支數: {avg_branch:.2f}")
-        print(f"最大分支數: {max_branch}")
-        print(f"最小分支數: {min_branch}")
-
-        # 你也可以看有多少節點是死路
-        dead_end_count = sum(1 for c in branch_counts if c == 0)
-        print(f"死路節點數(沒有合法下一步): {dead_end_count}")
-    else:
-        print("\n[分支數統計]")
-        print("沒有可分析的節點。")
-
-    # -------------------------------------------------
-    # 3. 初始族群診斷
-    # -------------------------------------------------
-    print("\n[初始族群診斷]")
-    raw_population = [build_valid_individual(cfg) for _ in range(sample_population_size)]
-    repaired_population = [repair_individual(ind, cfg) for ind in raw_population]
-
-    raw_eval = [evaluate_individual(ind, cfg, stock_items) for ind in raw_population]
-    repaired_eval = [evaluate_individual(ind, cfg, stock_items) for ind in repaired_population]
-
-    raw_valid = sum(1 for x in raw_eval if x["valid"])
-    repaired_valid = sum(1 for x in repaired_eval if x["valid"])
-
-    print(f"repair 前有效率: {raw_valid / sample_population_size:.2%}")
-    print(f"repair 後有效率: {repaired_valid / sample_population_size:.2%}")
-
-    sample_population = [create_individual(cfg) for _ in range(sample_population_size)]
-    evaluated = [evaluate_individual(ind, cfg, stock_items) for ind in sample_population]
-
-    # 有效方案比例
-    valid_count = sum(1 for item in evaluated if item["valid"])
-    print(f"抽樣初始族群數量: {sample_population_size}")
-    print(f"有效方案數量: {valid_count}")
-    print(f"有效方案比例: {valid_count / sample_population_size:.2%}")
-
-    # 不同分段方案數量（看多樣性）
-    unique_segments = {tuple(item["segments"]) for item in evaluated}
-    print(f"不同分段方案數量(去重後): {len(unique_segments)}")
-    print(f"分段多樣性比例: {len(unique_segments) / sample_population_size:.2%}")
-
-    # 分數統計
-    scores = [item["score"] for item in evaluated]
-    if scores:
-        best_score = min(scores)
-        worst_score = max(scores)
-        avg_score = sum(scores) / len(scores)
-
-        print("\n[初始族群分數統計]")
-        print(f"最佳分數(best): {best_score:.2f}")
-        print(f"平均分數(avg): {avg_score:.2f}")
-        print(f"最差分數(worst): {worst_score:.2f}")
-
-    # 接頭數統計
-    joint_counts = [item["joint_count"] for item in evaluated]
-    if joint_counts:
-        avg_joint_count = sum(joint_counts) / len(joint_counts)
-        print("\n[初始族群接頭數統計]")
-        print(f"最少接頭數: {min(joint_counts)}")
-        print(f"平均接頭數: {avg_joint_count:.2f}")
-        print(f"最多接頭數: {max(joint_counts)}")
-
-    # 顯示前幾個不同方案
-    print("\n[初始族群前 10 個不同分段方案（依分數排序）]")
-    unique_best = {}
-    for item in evaluated:
-        key = tuple(item["segments"])
-        if key not in unique_best or item["score"] < unique_best[key]["score"]:
-            unique_best[key] = item
-
-    preview = list(unique_best.values())
-    preview.sort(key=lambda x: x["score"])
-
-    for i, item in enumerate(preview[:10], start=1):
-        print(
-            f"{i:>2}. valid={item['valid']}, "
-            f"score={item['score']:.2f}, "
-            f"joint_count={item['joint_count']}, "
-            f"segments={item['segments']}"
-        )
-
-    print("=" * 100 + "\n")
-
-# =========================
-# 6. 輸出
-# =========================
-
-def print_results(results: List[Dict]) -> None:
-    if not results:
-        print("找不到結果。")
-        return
-
-    for i, r in enumerate(results, start=1):
-        print("=" * 90)
-        print(f"方案 {i}")
-        print(f"是否有效: {r['valid']}")
-        print(f"分段長度: {r['segments']}")
-        print(f"接頭位置: {r['joints']}")
-        print(f"接頭數量: {r['joint_count']}")
-
-        print(f"購買數量: {r.get('buy_count', 0)}")
-        print(f"短段 (<4000) 數: {r.get('under_4000_segment_count', 0)}")
-        print(f"使用料種數: {r.get('distinct_groups', 0)}")
-        print(f"料長變化: {r.get('length_variation', 0)} mm")
-        ratios = r.get("segment_ratios", {"short": 0, "mid": 0, "long": 0})
-        print(
-            f"段長比例: 短段 {ratios['short']:.0%}, 中段 {ratios['mid']:.0%}, 長段 {ratios['long']:.0%}"
-        )
-        print(f"比例懲罰: {r.get('ratio_penalty', 0):.2f}")
-        print(f"綜合分數: {r['score']:.2f}")
-
-        if r["errors"]:
-            print("錯誤/警告:")
-            for err in r["errors"]:
-                print(f"  - {err}")
-
-        if r["assignments"]:
-            print("材料配置:")
-            for a in r["assignments"]:
-                source = "購買" if a.get("bought") else "庫存"
-                print(
-                    f"  段長 {a['segment_length']:>5} mm "
-                    f"<- {source} {a['stock_id']} / {a['stock_group']} "
-                    f"({a['stock_length']:>5} mm)"
-                )
-
-
-# =========================
-# 7. 主程式
-# =========================
 
 if __name__ == "__main__":
-    print("程式啟動中，請在跳出的視窗中輸入庫存數量...", flush=True)
-    default_total_length = 95500
-    default_support_points = [
-        2050, 3550, 4550, 7050, 9550, 11550, 13050, 14550,
-        17550, 19050, 20550, 23550, 25050, 26550, 29550, 31050,
-        32550, 34550, 36050, 37550, 40550, 42050, 43550, 46550,
-        48050, 49550, 52050, 53550, 55050, 58050, 59550, 61050,
-        64050, 65550, 67050, 70050, 71550, 73050, 76050, 77550,
-        79050, 82050, 83550, 85050, 86050, 88550, 91050, 92050,
-        93550,
-    ]
-
-    config_input = get_initial_config_from_gui(
-        default_total_length,
-        default_support_points,
-    )
-
-    if config_input is None or config_input.get("total_length") is None:
-        print("使用者取消輸入，程式結束。")
-    else:
-        default_qty_map = {
-            1000: 4,
-            1500: 2,
-            2000: 13,
-            2500: 5,
-            3000: 9,
-            3500: 9,
-            4000: 19,
-            4500: 23,
-            5000: 50,
-            5500: 46,
-            6000: 59,
-            6500: 48,
-            7000: 67,
-            7500: 57,
-            8000: 86,
-            8500: 55,
-            9000: 78,
-            9500: 0,
-            10000: 66,
-        }
-
-        available_lengths = sorted(default_qty_map.keys())
-
-        cfg = Config(
-            total_length=config_input["total_length"],
-            support_points=config_input["support_points"],
-            min_piece_length=1000,
-            max_piece_length=10000,
-            joint_clearance_to_support=300,
-            candidate_joint_step=500,
-            purchasable_lengths=available_lengths,
-            short_segment_ratio_target=config_input["short_segment_ratio_target"],
-            mid_segment_ratio_target=config_input["mid_segment_ratio_target"],
-            long_segment_ratio_target=config_input["long_segment_ratio_target"],
-            population_size=120,
-            generations=200,
-            crossover_rate=0.85,
-            mutation_rate=0.08,
-            elite_size=8,
-            tournament_k=4,
-            top_n=5,
-        )
-
-        stock_items = get_stock_items_from_gui(
-            available_lengths,
-            default_qty_map=default_qty_map
-        )
-
-        if stock_items is None:
-            print("使用者取消輸入，程式結束。")
-        else:
-            diagnose_search_space(cfg, stock_items, sample_population_size=120)
-            results = evolve(cfg, stock_items, seed=42)
-            print_results(results)
-            input("\n按 Enter 鍵結束程式...")
-
+    main()

@@ -5,51 +5,6 @@ from typing import Dict, List, Tuple, Optional
 from collections import Counter
 import random
 import math
-import sys
-
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as font_manager
-from matplotlib.patches import Rectangle
-from matplotlib.lines import Line2D
-import tkinter as tk
-from tkinter import messagebox
-
-
-def configure_matplotlib_engineering_font() -> str:
-    """Configure matplotlib fonts for clean engineering drawings with Chinese support."""
-    preferred_fonts = [
-        "Microsoft JhengHei",
-        "Microsoft YaHei",
-        "PingFang TC",
-        "Noto Sans CJK TC",
-        "Source Han Sans TC",
-        "SimHei",
-        "WenQuanYi Micro Hei",
-        "Arial Unicode MS",
-        "DejaVu Sans",
-    ]
-
-    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
-    selected_font = next((name for name in preferred_fonts if name in available_fonts), None)
-    if selected_font is None:
-        selected_font = "DejaVu Sans"
-
-    plt.rcParams["font.family"] = "sans-serif"
-    plt.rcParams["font.sans-serif"] = [selected_font]
-    plt.rcParams["font.serif"] = [selected_font]
-    plt.rcParams["font.monospace"] = [selected_font]
-    plt.rcParams["font.size"] = 10
-    plt.rcParams["font.weight"] = "normal"
-    plt.rcParams["axes.unicode_minus"] = True
-    plt.rcParams["mathtext.fontset"] = "dejavusans"
-    plt.rcParams["pdf.fonttype"] = 42
-    plt.rcParams["ps.fonttype"] = 42
-
-    return selected_font
-
-
-SELECTED_MATPLOTLIB_FONT = configure_matplotlib_engineering_font()
-
 
 # =========================================================
 # dataclass 定義
@@ -136,96 +91,45 @@ PILE_FORBIDDEN_HALF = 730
 WALER_FORBIDDEN_HALF = 1130
 
 MIN_JACK_DISTANCE_BETWEEN_SUPPORTS = 600
-DEFAULT_MIN_VALID_CANDIDATES = 51
 
 # Debug
 DEBUG = False
-DEBUG_FREQ = 10
-DP_PROGRESS_STEP = 100
-BEAM_PROGRESS_STEP = 10
+
+logger = None
 
 
-@dataclass
-class DebugLogger:
-    dp_candidates: int = 0
-    beam_expansions: int = 0
-    beam_kept: int = 0
-    layout_generated: int = 0
-    valid_plans: int = 0
-    forbidden_violations: int = 0
-    scores: List[float] = field(default_factory=list)
-    best_score: Optional[float] = None
-    no_improve_count: int = 0
-
-    def record_score(self, score: float):
-        self.scores.append(score)
-        if self.best_score is None or score < self.best_score:
-            self.best_score = score
-            self.no_improve_count = 0
-        else:
-            self.no_improve_count += 1
-
-    def periodic_print(self, context: str, iteration: int):
-        if not DEBUG:
-            return
-        if iteration % DEBUG_FREQ != 0:
-            return
-        if not self.scores:
-            return
-        best = min(self.scores)
-        worst = max(self.scores)
-        avg = sum(self.scores) / len(self.scores)
-        print("[DEBUG] ------------------------------")
-        print(f"[DEBUG] 位置: {context}，迭代: {iteration}")
-        print(f"[DEBUG] best_score: {best:.1f}, avg_score: {avg:.1f}, worst_score: {worst:.1f}")
-        print(f"[DEBUG] no_improve_count: {self.no_improve_count}")
-        print(f"[DEBUG] DP 候選數: {self.dp_candidates}, Beam 展開數: {self.beam_expansions}, 保留數: {self.beam_kept}")
-        print(f"[DEBUG] 產生佈局: {self.layout_generated}, 合法數: {self.valid_plans}, 禁止區違規數: {self.forbidden_violations}")
-        print("[DEBUG] ------------------------------")
-
-    def reset(self) -> None:
-        self.dp_candidates = 0
-        self.beam_expansions = 0
-        self.beam_kept = 0
-        self.layout_generated = 0
-        self.valid_plans = 0
-        self.forbidden_violations = 0
-        self.scores.clear()
-        self.best_score = None
-        self.no_improve_count = 0
+def set_logger(func) -> None:
+    """Set the callback that receives all Support Solver messages."""
+    global logger
+    logger = func
 
 
-logger = DebugLogger()
+def log(*args) -> None:
+    """Send a message to the configured logger without writing to stdout."""
+    if logger is not None:
+        logger(*args)
 
 
-def print_progress(context: str, current: int, total: int, extra: str = "") -> None:
-    if total <= 0:
-        return
-    bar_length = 30
-    filled = int(bar_length * current / total)
-    bar = "[" + "=" * filled + " " * (bar_length - filled) + "]"
-    percent = current * 100.0 / total
-    sys.stdout.write(f"\r[PROGRESS] {context}: {current}/{total} {bar} {percent:5.1f}% {extra}")
-    sys.stdout.flush()
+def display_piece_kind(kind: str) -> str:
+    return {
+        "steel": "鋼材",
+        "shim": "調整塊",
+        "jack": "千斤頂",
+    }.get(str(kind).lower(), str(kind))
 
 
-def finalize_progress() -> None:
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+def format_pieces_for_display(pieces: List[Tuple[str, int]]) -> str:
+    return ", ".join(
+        f"{display_piece_kind(kind)}:{length}"
+        for kind, length in pieces
+    )
 
 
 def print_summary(
     context: str,
     metrics: Dict[str, object],
-    iteration: int = 0,
-    total_iterations: int = 0,
 ) -> None:
-    if total_iterations and iteration % 10 != 0 and iteration != total_iterations:
-        return
-
     header = f"【摘要】{context}"
-    if total_iterations:
-        header += f" ({iteration}/{total_iterations})"
 
     lines = [header]
     for key, value in metrics.items():
@@ -236,45 +140,22 @@ def print_summary(
     border_mid = "╠" + "═" * (width - 2) + "╣"
     border_bot = "╚" + "═" * (width - 2) + "╝"
 
-    print(border_top)
-    print(f"║ {header.ljust(width - 4)} ║")
-    print(border_mid)
+    log(border_top)
+    log(f"║ {header.ljust(width - 4)} ║")
+    log(border_mid)
     for line in lines[1:]:
-        print(f"║ {line.ljust(width - 4)} ║")
-    print(border_bot)
-    print()
+        log(f"║ {line.ljust(width - 4)} ║")
+    log(border_bot)
+    log("")
 
 
 def print_global_summary(solution: GlobalSolution) -> None:
-    scores = [plan.score for plan in solution.plans]
-    avg_single = sum(scores) / len(scores) if scores else 0.0
-    penalty = solution.total_score - sum(scores)
-    steel_usage: Dict[int, int] = {}
-    material_usage: Dict[str, int] = {}
     jack_centers: List[float] = []
     region_counts: Dict[int, int] = {}
 
     for plan in solution.plans:
-        for kind, length in plan.pieces:
-            if kind == "steel":
-                steel_usage[length] = steel_usage.get(length, 0) + 1
-                label = f"steel:{length}"
-            elif kind == "shim":
-                label = f"shim:{length}"
-            elif kind == "jack":
-                label = "jack"
-            else:
-                label = f"{kind}:{length}"
-            material_usage[label] = material_usage.get(label, 0) + 1
         jack_centers.append(plan.jack_center)
         region_counts[plan.jack_region_id] = region_counts.get(plan.jack_region_id, 0) + 1
-
-    steel_types = len(steel_usage)
-    material_types = len(material_usage)
-    usage_parts = [f"{length}:{count}" for length, count in sorted(steel_usage.items())]
-    usage_str = ", ".join(usage_parts) if usage_parts else "無"
-    material_usage_parts = [f"{mat}:{count}" for mat, count in sorted(material_usage.items())]
-    material_usage_str = ", ".join(material_usage_parts) if material_usage_parts else "無"
 
     min_jack_distance = None
     if len(jack_centers) > 1:
@@ -283,117 +164,23 @@ def print_global_summary(solution: GlobalSolution) -> None:
             for i in range(1, len(jack_centers))
         )
 
-    config_types = len({
-        tuple(length for kind, length in plan.pieces if kind == "steel")
-        for plan in solution.plans
-    })
-
     region_parts = [f"區{region}={count}" for region, count in sorted(region_counts.items())]
     region_str = ", ".join(region_parts) if region_parts else "無"
 
+    metrics: Dict[str, object] = {
+        "總分": f"{solution.total_score:.1f}",
+        "是否合法": "是" if solution.valid else "否",
+        "最小千斤頂間距(mm)": f"{min_jack_distance:.1f}" if min_jack_distance is not None else "無資料",
+        "千斤頂區域分布": region_str,
+    }
+    if solution.reason:
+        metrics["說明"] = solution.reason
+
     print_summary(
-        "Phase 2 全域摘要",
-        {
-            "總分": f"{solution.total_score:.1f}",
-            "全域罰則": f"{penalty:.1f}",
-            "不同配置型態數": config_types,
-            "使用鋼材種類數": steel_types,
-            "鋼材長度使用次數": usage_str,
-            "不同材料使用數量": material_types,
-            "材料使用統計": material_usage_str,
-            "相鄰支撐 Jack 最小距離": f"{min_jack_distance:.1f}" if min_jack_distance is not None else "N/A",
-            "Jack 區域分布": region_str,
-        },
+        "全域最佳化完成",
+        metrics,
     )
 
-
-def draw_support_construction_diagram(solution: GlobalSolution, filename: str = "support_layout.png") -> str:
-    """產生所有支撐合併施工圖，並輸出成圖檔。"""
-    if not solution.plans:
-        raise ValueError("Solution has no plans to draw.")
-
-    total_lengths = [sum(length for _, length in plan.pieces) + plan.gap for plan in solution.plans]
-    max_length = max(total_lengths)
-    row_height = 0.8
-    row_padding = 0.4
-    figure_height = len(solution.plans) * (row_height + row_padding) + 2.0
-
-    fig, ax = plt.subplots(figsize=(12, max(4.0, figure_height)))
-
-    steel_color = "#4c72b0"
-    colors = {
-        "jack": "#d62728",
-        "shim": "#ff7f0e",
-        "gap": "#d3d3d3",
-    }
-
-    for index, plan in enumerate(solution.plans):
-        y = len(solution.plans) - index
-        x = 0.0
-        for kind, length in plan.pieces:
-            if kind == "steel":
-                color = steel_color
-                label = f"{length}"
-            else:
-                color = colors.get(kind, "#7f7f7f")
-                label = "Jack" if kind == "jack" else ("Shim" if kind == "shim" else "")
-
-            rect = Rectangle((x, y - row_height / 2), length, row_height,
-                             facecolor=color, edgecolor="black")
-            ax.add_patch(rect)
-            if label:
-                ax.text(x + length / 2, y, label, va="center", ha="center",
-                        color="white" if kind == "steel" else "black", fontsize=7, fontweight="bold")
-            x += length
-
-        if plan.gap > 0:
-            ax.add_patch(Rectangle((x, y - row_height / 2), plan.gap, row_height,
-                                   facecolor=colors["gap"], edgecolor="black", hatch="..."))
-
-        # 樁與托梁位置標示
-        for p in plan.pile_centers:
-            ax.vlines(p, y - row_height / 2, y + row_height / 2, colors="#2ca02c", linestyles="--", linewidth=1.5)
-            ax.text(p, y + row_height / 2 + 0.08, "Pile", ha="center", va="bottom", fontsize=7, color="#2ca02c")
-        for w in plan.waler_centers:
-            ax.vlines(w, y - row_height / 2, y + row_height / 2, colors="#9467bd", linestyles="-.", linewidth=1.5)
-            ax.text(w, y + row_height / 2 + 0.08, "Waler", ha="center", va="bottom", fontsize=7, color="#9467bd")
-
-        annotations = (
-            f"S{plan.support_id}  L={total_lengths[index]} mm  "
-            f"Jack@{plan.jack_center:.0f}  區{plan.jack_region_id}"
-        )
-        ax.text(-max_length * 0.02, y, annotations, va="center", ha="right", fontsize=9)
-
-    border = Rectangle((0, 0.5), max_length, len(solution.plans) + 0.5,
-                       fill=False, edgecolor="black", linewidth=1.8)
-    ax.add_patch(border)
-
-    ax.set_xlim(-max_length * 0.08, max_length * 1.02)
-    ax.set_ylim(0.5, len(solution.plans) + 1.5)
-    ax.set_yticks([])
-    ax.set_xlabel("長度 (mm)")
-    ax.set_title("支撐施工圖 - 合併檢視")
-    ax.grid(axis="x", linestyle="--", alpha=0.4)
-
-    legend_patches = [
-        Rectangle((0, 0), 1, 1, facecolor=steel_color, edgecolor='black'),
-        Rectangle((0, 0), 1, 1, facecolor=colors["jack"], edgecolor='black'),
-        Rectangle((0, 0), 1, 1, facecolor=colors["shim"], edgecolor='black'),
-        Rectangle((0, 0), 1, 1, facecolor=colors["gap"], edgecolor='black', hatch="..."),
-        Line2D([0], [0], color="#2ca02c", linestyle="--", linewidth=1.5),
-        Line2D([0], [0], color="#9467bd", linestyle="-.", linewidth=1.5),
-    ]
-    ax.legend(legend_patches, ["steel", "jack", "shim", "gap", "Pile", "Waler"], loc="upper right")
-
-    plt.tight_layout()
-    fig.savefig(filename, dpi=150)
-    plt.close(fig)
-    return filename
-
-
-# =========================================================
-# 幾何工具
-# =========================================================
 
 def build_positions(pieces: List[Tuple[str, int]]) -> List[int]:
     """
@@ -481,11 +268,11 @@ def evaluate_single_support(
 
     if jack_count != 1:
         valid = False
-        reasons.append("jack 數量不是 1")
+        reasons.append("千斤頂數量不是 1")
 
     if not (0 <= gap <= MAX_GAP):
         valid = False
-        reasons.append(f"gap 不合法: {gap}")
+        reasons.append(f"餘長(mm) 不合法: {gap}")
 
     forbidden_count = count_forbidden_joints(joints, config)
     if forbidden_count > 0:
@@ -531,9 +318,6 @@ def evaluate_single_support(
         "jack_edge_penalty": float(jack_edge_penalty),
         "invalid_penalty": float(invalid_penalty),
     }
-
-    # record to logger
-    logger.record_score(score)
 
     return SupportPlan(
         support_id=config.support_id,
@@ -611,11 +395,7 @@ def generate_length_combinations_dp(
         0: [(0.0, (), 0)]
     }
 
-    steel_idx = 0
     for steel in STEEL_LENGTHS:
-        steel_idx += 1
-        # periodic progress: steel index
-        logger.periodic_print("DP-steel", steel_idx)
         for total in range(steel, max_steel_sum + 1):
             if total - steel not in dp:
                 continue
@@ -637,10 +417,6 @@ def generate_length_combinations_dp(
                 updated.append((new_score, new_seq, new_short))
 
             dp[total] = _keep_top_candidates(updated, max_states_per_sum)
-
-        # debug: after finishing this steel length iteration
-        if DEBUG:
-            print(f"[DEBUG] DP: processed steel {steel} (index {steel_idx}), sums tracked: {len(dp)}")
 
     results: List[Dict[str, object]] = []
     seen: Dict[Tuple[Tuple[int, ...], int, int], bool] = {}
@@ -666,11 +442,6 @@ def generate_length_combinations_dp(
                 })
 
     results.sort(key=lambda item: item["score"])
-    # debug
-    logger.dp_candidates = len(results)
-    if DEBUG:
-        print(f"[DEBUG] DP combos generated: {len(results)} candidates from {len(dp)} sums")
-    logger.periodic_print("DP", 1)
     return results[:max_combinations]
 
 
@@ -683,11 +454,8 @@ def beam_search_steel_orders(
     beam: List[Tuple[float, Tuple[int, ...], Counter[int]]] = [initial_state]
     completed: List[Tuple[float, Tuple[int, ...]]] = []
 
-    round_idx = 0
-
     while beam:
         next_beam: List[Tuple[float, Tuple[int, ...], Counter[int]]] = []
-        round_idx += 1
 
         for score, sequence, remaining in beam:
             if not remaining:
@@ -707,15 +475,8 @@ def beam_search_steel_orders(
         if not next_beam:
             break
 
-        # debug: count expansions
-        logger.beam_expansions += len(next_beam)
         next_beam.sort(key=lambda item: item[0])
         beam = next_beam[:beam_width]
-        logger.beam_kept = len(beam)
-        # periodic debug print per round
-        logger.periodic_print("BeamOrders", round_idx)
-        if DEBUG:
-            print(f"[DEBUG] Beam round {round_idx}: expansions={len(next_beam)}, kept={len(beam)}, completed={len(completed)}")
 
     completed.sort(key=lambda item: item[0])
     return [list(sequence) for _, sequence in completed[:max_orders]]
@@ -728,6 +489,7 @@ def beam_search_layout(
     gap: int,
     beam_width: int = 50,
     max_layouts: int = 50,
+    diagnostics: Optional[Dict[str, int]] = None,
 ) -> List[SupportPlan]:
     steel_orders = beam_search_steel_orders(
         steel_lengths,
@@ -735,14 +497,10 @@ def beam_search_layout(
         max_orders=beam_width,
     )
 
-    if DEBUG:
-        print(f"[DEBUG] BeamLayout start: steel_lengths={steel_lengths}, shim={shim}, gap={gap}, steel_orders={len(steel_orders)}")
-
     candidates: List[SupportPlan] = []
     seen: Dict[Tuple[Tuple[str, int], ...], bool] = {}
 
-    for idx, order in enumerate(steel_orders, 1):
-        logger.periodic_print("BeamLayoutOrder", idx)
+    for order in steel_orders:
         steel_pieces = [("steel", length) for length in order]
 
         if shim > 0:
@@ -758,12 +516,6 @@ def beam_search_layout(
                         continue
                     seen[key] = True
                     plan = evaluate_single_support(config, pieces)
-                    # update layout stats
-                    logger.layout_generated += 1
-                    if plan.valid and not plan.reason:
-                        logger.valid_plans += 1
-                    # count forbidden joints explicitly
-                    logger.forbidden_violations += count_forbidden_joints(plan.joints, config)
                     candidates.append(plan)
         else:
             for jack_pos in range(len(steel_pieces) + 1):
@@ -774,14 +526,241 @@ def beam_search_layout(
                     continue
                 seen[key] = True
                 plan = evaluate_single_support(config, pieces)
-                logger.layout_generated += 1
-                if plan.valid and not plan.reason:
-                    logger.valid_plans += 1
-                logger.forbidden_violations += count_forbidden_joints(plan.joints, config)
                 candidates.append(plan)
+
+    if diagnostics is not None:
+        diagnostics["layouts_generated"] = diagnostics.get("layouts_generated", 0) + len(candidates)
+        diagnostics["region_matched"] = diagnostics.get("region_matched", 0) + sum(
+            plan.jack_region_id == config.target_jack_region
+            for plan in candidates
+        )
+        diagnostics["valid_before_region"] = diagnostics.get("valid_before_region", 0) + sum(
+            plan.valid and not plan.reason
+            for plan in candidates
+        )
+        diagnostics["valid_region_matched"] = diagnostics.get("valid_region_matched", 0) + sum(
+            plan.valid
+            and not plan.reason
+            and plan.jack_region_id == config.target_jack_region
+            for plan in candidates
+        )
 
     candidates.sort(key=lambda x: x.score)
     return candidates[:max_layouts]
+
+
+def _invalid_reason_statistics(plans: List[SupportPlan]) -> Counter[str]:
+    statistics: Counter[str] = Counter()
+    for plan in plans:
+        if plan.valid and not plan.reason:
+            continue
+        for reason in (part.strip() for part in plan.reason.split(";") if part.strip()):
+            reason_lower = reason.lower()
+            if "接頭落入禁止區" in reason:
+                label = "接頭落入禁止區"
+            elif "餘長" in reason:
+                label = "餘長不合法"
+            elif "jack 數量" in reason_lower or "千斤頂數量" in reason:
+                label = "千斤頂數量錯誤"
+            else:
+                label = reason
+            statistics[label] += 1
+    return statistics
+
+
+def _merged_forbidden_intervals(config: SupportConfig) -> List[Tuple[int, int]]:
+    intervals = sorted(
+        (max(0, start), min(config.total_length, end))
+        for start, end, _ in forbidden_zones(config)
+        if end >= 0 and start <= config.total_length
+    )
+    merged: List[Tuple[int, int]] = []
+    for start, end in intervals:
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, end))
+    return merged
+
+
+def _log_support_candidate_diagnostics(
+    config: SupportConfig,
+    max_steel_combination_count: int,
+    combination_count: int,
+    target_valid_candidate_count: int,
+    diagnostics: Dict[str, int],
+    candidates: List[SupportPlan],
+    retained_layouts: List[SupportPlan],
+    returned_candidates: List[SupportPlan],
+) -> None:
+    merged_zones = _merged_forbidden_intervals(config)
+    covered_length = sum(end - start for start, end in merged_zones)
+    coverage_ratio = covered_length / config.total_length if config.total_length > 0 else 0.0
+
+    safe_intervals: List[Tuple[int, int]] = []
+    cursor = 0
+    for start, end in merged_zones:
+        if cursor < start:
+            safe_intervals.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < config.total_length:
+        safe_intervals.append((cursor, config.total_length))
+
+    valid_candidates = [plan for plan in candidates if plan.valid and not plan.reason]
+    returned_valid_count = sum(
+        plan.valid and not plan.reason
+        for plan in returned_candidates
+    )
+    best_single_score = min(
+        (plan.score for plan in valid_candidates),
+        default=None,
+    )
+    reason_statistics = _invalid_reason_statistics(candidates)
+    candidates_sufficient = (
+        len(valid_candidates) >= target_valid_candidate_count
+        and returned_valid_count >= target_valid_candidate_count
+    )
+
+    log("=" * 72)
+    log(f"支撐 {config.support_id} 候選方案分析")
+    log(f"總長度：{config.total_length} mm")
+    log(f"目標千斤頂區域：區 {config.target_jack_region}")
+    log(f"鋼材組合探索數：{max_steel_combination_count}")
+    log(f"實際處理鋼材組合數：{diagnostics.get('combinations_processed', 0)}")
+    log(f"產生配置方案數：{diagnostics.get('layouts_generated', 0)}")
+    log(f"符合目標千斤頂區域方案數：{diagnostics.get('region_matched', 0)}")
+    log(f"合法方案數：{len(valid_candidates)}")
+    log(f"最終保留合法候選數：{returned_valid_count}")
+    log(
+        f"最佳單體分數：{best_single_score:.1f}"
+        if best_single_score is not None
+        else "最佳單體分數：無資料"
+    )
+    log(f"禁止區覆蓋率：{coverage_ratio:.1%}")
+    log("可用接頭區間：")
+    if safe_intervals:
+        for start, end in safe_intervals:
+            log(f"  {start} ~ {end}")
+    else:
+        log("  無")
+
+    log("主要不合法原因：")
+    for label in ("接頭落入禁止區", "餘長不合法", "千斤頂數量錯誤"):
+        log(f"  {label}：{reason_statistics.pop(label, 0)}")
+    for label, count in sorted(reason_statistics.items()):
+        log(f"  {label}：{count}")
+
+    valid_before_region = diagnostics.get("valid_before_region", 0)
+    valid_region_matched = diagnostics.get("valid_region_matched", 0)
+    if candidates_sufficient:
+        diagnosis = "第一階段正常：已成功產生足夠合法候選方案。"
+    elif valid_before_region == 0:
+        diagnosis = "A：目前探索範圍內沒有產生合法配置方案。"
+    elif valid_region_matched == 0:
+        diagnosis = "B：有合法配置方案，但被目標千斤頂區域條件排除。"
+    elif not valid_candidates:
+        diagnosis = "C：合法且符合區域的方案曾經產生，但未進入最終候選。"
+    else:
+        diagnosis = "合法候選方案已產生，但數量不足。"
+
+    log("診斷結果：")
+    log(f"  {diagnosis}")
+
+    if DEBUG:
+        log("除錯詳細統計：")
+        log(f"  實際產生鋼材組合數：{combination_count}")
+        log(f"  配置方案保留數：{diagnostics.get('layouts_retained', 0)}")
+        log(f"  配置保留後符合目標區域數：{diagnostics.get('region_matched_retained', 0)}")
+        log(f"  目標區域篩選前合法數：{valid_before_region}")
+        log(f"  符合目標區域且合法數：{valid_region_matched}")
+        log("  禁止區：")
+        for start, end, label in forbidden_zones(config):
+            log(f"    {label}：{start} ~ {end}")
+
+    if not candidates_sufficient:
+        failed_plans: List[SupportPlan] = []
+        failed_keys = set()
+        for plan in sorted(candidates, key=lambda item: item.score):
+            if plan.valid and not plan.reason:
+                continue
+            key = tuple(plan.pieces)
+            if key in failed_keys:
+                continue
+            failed_keys.add(key)
+            failed_plans.append(plan)
+
+        for plan in sorted(retained_layouts, key=lambda item: item.score):
+            key = tuple(plan.pieces)
+            if key in failed_keys:
+                continue
+            if (
+                plan.valid
+                and not plan.reason
+                and plan.jack_region_id == config.target_jack_region
+            ):
+                continue
+            failed_keys.add(key)
+            failed_plans.append(plan)
+            if len(failed_plans) >= 10:
+                break
+
+        log("候選不足時的前 10 個最低分方案：")
+        if not failed_plans:
+            log("  無可供排查的失敗方案")
+        for rank, plan in enumerate(
+            sorted(failed_plans, key=lambda item: item.score)[:10],
+            start=1,
+        ):
+            pieces_text = format_pieces_for_display(plan.pieces)
+            if plan.reason:
+                reason = plan.reason
+            elif plan.jack_region_id != config.target_jack_region:
+                reason = (
+                    f"不符合目標千斤頂區域"
+                    f"（實際為區 {plan.jack_region_id}）"
+                )
+            else:
+                reason = "未進入最終候選"
+            log(f"  方案 {rank}")
+            log(f"    分數：{plan.score:.1f}")
+            log(
+                f"    是否合法："
+                f"{'是' if plan.valid and not plan.reason else '否'}"
+            )
+            log(f"    原因：{reason}")
+            log(f"    接頭位置：{plan.joints}")
+            log(f"    千斤頂中心：{plan.jack_center:.1f}")
+            log(f"    配置：[{pieces_text}]")
+
+    log(f"支撐 {config.support_id} 候選方案分析完成。")
+    log(
+        f"合法候選方案：{len(valid_candidates)} / "
+        f"需求 {target_valid_candidate_count}"
+    )
+    log(f"狀態：{'正常' if candidates_sufficient else '不足'}")
+    log("=" * 72)
+
+
+def log_support_candidate_diagnostics(
+    config: SupportConfig,
+    diagnostic_record: Dict[str, object],
+) -> None:
+    """Log a previously collected Phase 1 diagnostic record for a cached config."""
+    _log_support_candidate_diagnostics(
+        config=config,
+        max_steel_combination_count=int(
+            diagnostic_record.get("max_steel_combination_count", 0)
+        ),
+        combination_count=int(diagnostic_record.get("combination_count", 0)),
+        target_valid_candidate_count=int(
+            diagnostic_record.get("target_valid_candidate_count", 0)
+        ),
+        diagnostics=dict(diagnostic_record.get("diagnostics", {})),
+        candidates=list(diagnostic_record.get("candidates", [])),
+        retained_layouts=list(diagnostic_record.get("retained_layouts", [])),
+        returned_candidates=list(diagnostic_record.get("returned_candidates", [])),
+    )
 
 
 def generate_single_support_candidates(
@@ -792,6 +771,7 @@ def generate_single_support_candidates(
     max_layouts_per_combo: int = 20,
     min_valid_candidates: Optional[int] = None,
     random_seed: Optional[int] = None,
+    diagnostics_out: Optional[Dict[str, object]] = None,
 ) -> List[SupportPlan]:
     if random_seed is not None:
         random.seed(random_seed)
@@ -804,13 +784,14 @@ def generate_single_support_candidates(
         max_combinations=max_length_combinations,
     )
 
-    logger.reset()
     candidates: List[SupportPlan] = []
+    retained_layouts: List[SupportPlan] = []
     seen: Dict[Tuple[Tuple[str, int], ...], bool] = {}
     valid_count = 0
+    diagnostics: Dict[str, int] = {}
 
-    for idx, combo in enumerate(combinations, 1):
-        logger.periodic_print("GenerateCombo", idx)
+    for combo in combinations:
+        diagnostics["combinations_processed"] = diagnostics.get("combinations_processed", 0) + 1
         layouts = beam_search_layout(
             config,
             combo["steel_lengths"],
@@ -818,97 +799,49 @@ def generate_single_support_candidates(
             combo["gap"],
             beam_width=beam_width,
             max_layouts=max_layouts_per_combo,
+            diagnostics=diagnostics,
         )
+        retained_layouts.extend(layouts)
+        diagnostics["layouts_retained"] = diagnostics.get("layouts_retained", 0) + len(layouts)
 
-        added_count = 0
         for plan in layouts:
             if plan.jack_region_id != config.target_jack_region:
                 continue
+            diagnostics["region_matched_retained"] = diagnostics.get("region_matched_retained", 0) + 1
             key = tuple(plan.pieces)
             if key in seen:
                 continue
             seen[key] = True
             candidates.append(plan)
-            added_count += 1
             if plan.valid and not plan.reason:
                 valid_count += 1
-
-        if DEBUG:
-            print(f"[DEBUG] GenerateCombo {idx}/{len(combinations)} complete: layouts={len(layouts)}, new candidates={added_count}, total unique candidates={len(candidates)}")
-
-        total_layouts = logger.layout_generated
-        if DEBUG:
-            valid_plans_list = [plan for plan in candidates if plan.valid and not plan.reason]
-            invalid_plans_list = [plan for plan in candidates if not (plan.valid and not plan.reason)]
-            valid_ratio = len(valid_plans_list) / total_layouts if total_layouts else 0.0
-            best_score = min((plan.score for plan in valid_plans_list), default=None)
-            avg_valid_score = sum(plan.score for plan in valid_plans_list) / len(valid_plans_list) if valid_plans_list else None
-            steel_combo_set = set(
-                tuple(sorted(length for kind, length in plan.pieces if kind == "steel"))
-                for plan in valid_plans_list
-            )
-            distinct_steel_combos = len(steel_combo_set)
-            distinct_jack_regions = len({plan.jack_region_id for plan in valid_plans_list})
-            print_summary(
-                f"Support {config.support_id}",
-                {
-                    "DP 組合數": len(combinations),
-                    "DP 檢查": f"{idx}/{len(combinations)}",
-                    "Layout 檢查數": total_layouts,
-                    "目前累積合法方案數": len(valid_plans_list),
-                    "合法率": f"{valid_ratio:.2%}",
-                    "最佳分數": f"{best_score:.1f}" if best_score is not None else "N/A",
-                    "合法方案平均分數": f"{avg_valid_score:.1f}" if avg_valid_score is not None else "N/A",
-                    "不合法方案數": len(invalid_plans_list),
-                    "不同鋼材組合數": distinct_steel_combos,
-                    "不同 Jack 區域數": distinct_jack_regions,
-                },
-                iteration=idx,
-                total_iterations=len(combinations),
-            )
-
-        # periodic debug print per combination index
-        logger.periodic_print("GenerateSingle", len(candidates))
 
         if valid_count >= min_valid_candidates:
             break
 
-    if combinations:
-        finalize_progress()
-
-    total_layouts = logger.layout_generated
     candidates.sort(key=lambda x: x.score)
     final_valid_plans = [plan for plan in candidates if plan.valid and not plan.reason]
-    final_invalid_plans = [plan for plan in candidates if not (plan.valid and not plan.reason)]
-    final_steel_combo_set = set(
-        tuple(sorted(length for kind, length in plan.pieces if kind == "steel"))
-        for plan in final_valid_plans
-    )
-    final_distinct_steel_combos = len(final_steel_combo_set)
-    final_returned_candidates = final_valid_plans[:min_candidates] if final_valid_plans else candidates[:min_candidates]
-    final_avg_valid_score = (
-        sum(plan.score for plan in final_valid_plans) / len(final_valid_plans)
+    returned_candidates = (
+        final_valid_plans[:min_candidates]
         if final_valid_plans
-        else None
+        else candidates[:min_candidates]
     )
 
-    print_summary(
-        f"Support {config.support_id} 最終統計",
-        {
-            "DP 組合總數": len(combinations),
-            "Layout 檢查總數": total_layouts,
-            "最終合法方案數": len(final_valid_plans),
-            "最終不合法方案數": len(final_invalid_plans),
-            "最終合法平均分數": f"{final_avg_valid_score:.1f}" if final_avg_valid_score is not None else "N/A",
-            "不同鋼材組合數": final_distinct_steel_combos,
-            "最終保留候選數": len(final_returned_candidates),
-        },
-    )
+    diagnostic_record: Dict[str, object] = {
+        "max_steel_combination_count": max_length_combinations,
+        "combination_count": len(combinations),
+        "target_valid_candidate_count": min_candidates,
+        "diagnostics": dict(diagnostics),
+        "candidates": list(candidates),
+        "retained_layouts": sorted(retained_layouts, key=lambda plan: plan.score)[:10],
+        "returned_candidates": list(returned_candidates),
+    }
+    if diagnostics_out is not None:
+        diagnostics_out.clear()
+        diagnostics_out.update(diagnostic_record)
+    log_support_candidate_diagnostics(config, diagnostic_record)
 
-    if final_valid_plans:
-        return final_valid_plans[:min_candidates]
-
-    return candidates[:min_candidates]
+    return returned_candidates
 
 
 # =========================================================
@@ -944,8 +877,12 @@ def build_global_solution(
     避免所有組合暴力枚舉。
     """
 
+    log(f"全域最佳化開始：支撐數量={len(candidates_by_support)}")
+
     if not candidates_by_support:
-        return GlobalSolution([], 0, False, "沒有候選資料")
+        solution = GlobalSolution([], 0, False, "沒有候選資料")
+        print_global_summary(solution)
+        return solution
 
     # beam item: (total_score, plans)
     beam: List[Tuple[float, List[SupportPlan]]] = []
@@ -956,8 +893,6 @@ def build_global_solution(
     beam.sort(key=lambda x: x[0])
     beam = beam[:beam_width]
 
-    no_improve = 0
-    best_so_far = beam[0][0] if beam else None
     for support_idx in range(1, len(candidates_by_support)):
         new_beam: List[Tuple[float, List[SupportPlan]]] = []
 
@@ -975,19 +910,6 @@ def build_global_solution(
 
         new_beam.sort(key=lambda x: x[0])
         beam = new_beam[:beam_width]
-
-        # debug: record beam stats
-        logger.beam_expansions += sum(len(candidates) for candidates in candidates_by_support)
-        logger.beam_kept = len(beam)
-        # track improvement
-        if beam:
-            if best_so_far is None or beam[0][0] < best_so_far:
-                best_so_far = beam[0][0]
-                no_improve = 0
-            else:
-                no_improve += 1
-        logger.no_improve_count = no_improve
-        logger.periodic_print("GlobalBeam", support_idx)
 
         if not beam:
             solution = fallback_global_solution(candidates_by_support)
@@ -1031,29 +953,6 @@ def fallback_global_solution(
 # =========================================================
 # 輸出工具
 
-def parse_position_list(text: str) -> List[int]:
-    """將使用者輸入的逗號或空白分隔位置字串解析成排序且唯一的整數清單。
-
-    回傳空清單表示使用者未輸入任何位置。
-    """
-    if not text:
-        return []
-
-    normalized = text.replace(",", " ").replace("\n", " ")
-    parts = [part for part in normalized.split() if part]
-    values: List[int] = []
-    for part in parts:
-        try:
-            value = int(part)
-            if value < 0:
-                raise ValueError
-            values.append(value)
-        except ValueError:
-            raise ValueError(f"無效位置值：{part}，請輸入非負整數")
-
-    return sorted(set(values))
-
-
 def get_jack_region_id(jack_center: float, pile_centers: List[int]) -> int:
     """根據 pile_centers 定義區域，確定 jack_center 所在的區間。
 
@@ -1078,334 +977,34 @@ def get_jack_region_id(jack_center: float, pile_centers: List[int]) -> int:
 
 
 def print_plan(plan: SupportPlan) -> None:
-    pieces_str = ", ".join(f"{kind}:{length}" for kind, length in plan.pieces)
+    pieces_str = format_pieces_for_display(plan.pieces)
     valid_str = "是" if plan.valid and not plan.reason else "否"
-    print(f"    分數: {plan.score:.1f} | 合法: {valid_str} | gap: {plan.gap} | jack: {plan.jack_center:.1f} | 區域: {plan.jack_region_id}")
-    print(f"      片段: [{pieces_str}]")
+    log(f"    分數: {plan.score:.1f} | 合法: {valid_str} | 餘長(mm): {plan.gap} | 千斤頂: {plan.jack_center:.1f} | 區域: {plan.jack_region_id}")
+    log(f"      片段: [{pieces_str}]")
     if plan.reason:
-        print(f"      原因: {plan.reason}")
+        log(f"      原因: {plan.reason}")
 
 
 def format_plan_compact(plan: SupportPlan) -> str:
-    pieces_str = ", ".join(f"{kind}:{length}" for kind, length in plan.pieces)
+    pieces_str = format_pieces_for_display(plan.pieces)
     valid_str = "是" if plan.valid and not plan.reason else "否"
     base = (
-        f"分數:{plan.score:.1f} | 合法:{valid_str} | gap:{plan.gap} | "
-        f"jack:{plan.jack_center:.1f} | 區域:{plan.jack_region_id} | 片段:[{pieces_str}]"
+        f"分數:{plan.score:.1f} | 合法:{valid_str} | 餘長(mm):{plan.gap} | "
+        f"千斤頂:{plan.jack_center:.1f} | 區域:{plan.jack_region_id} | 片段:[{pieces_str}]"
     )
     if plan.reason:
         return f"{base} | 原因:{plan.reason}"
     return base
 
 
-def print_support_diagram(plan: SupportPlan, width: int = 80) -> None:
-    total_length = sum(length for _, length in plan.pieces) + plan.gap
-    if total_length <= 0:
-        print("      (無法繪製支撐圖：總長度為 0)")
-        return
-
-    scale = max(1, width / total_length)
-    bar_chars: List[str] = []
-
-    def append_segment(char: str, length: int) -> None:
-        count = max(1, int(round(length * scale)))
-        bar_chars.extend([char] * count)
-
-    for kind, length in plan.pieces:
-        if kind == "steel":
-            append_segment("=", length)
-        elif kind == "jack":
-            append_segment("J", length)
-        elif kind == "shim":
-            append_segment("~", length)
-        else:
-            append_segment("?", length)
-
-    if plan.gap > 0:
-        append_segment(".", plan.gap)
-
-    # Force final width exact if rounding drifted
-    if len(bar_chars) > width:
-        bar_chars = bar_chars[:width]
-    elif len(bar_chars) < width:
-        bar_chars.extend(["."] * (width - len(bar_chars)))
-
-    diagram = "".join(bar_chars)
-    print(f"      [{diagram}]")
-    print(f"      legend: '=' steel, 'J' jack, '~' shim, '.' gap")
-    print(f"      total_length={total_length}, gap={plan.gap}, jack_center={plan.jack_center:.1f}")
-
-
 def print_global_solution(solution: GlobalSolution) -> None:
-    print("===================================================")
-    print("整體解摘要")
-    print(f"  總分: {solution.total_score:.1f}")
-    print(f"  是否合法: {'是' if solution.valid else '否'}")
+    log("===================================================")
+    log("整體解摘要")
+    log(f"  總分: {solution.total_score:.1f}")
+    log(f"  是否合法: {'是' if solution.valid else '否'}")
     if solution.reason:
-        print(f"  說明: {solution.reason}")
-    print("---------------------------------------------------")
+        log(f"  說明: {solution.reason}")
+    log("---------------------------------------------------")
     for idx, p in enumerate(solution.plans, 1):
-        print(f"支撐 {idx}：")
+        log(f"支撐 {idx}：")
         print_plan(p)
-        print_support_diagram(p)
-
-    try:
-        output_path = draw_support_construction_diagram(solution)
-        print(f"已輸出合併施工圖: {output_path}")
-    except Exception as exc:
-        print(f"無法輸出施工圖: {exc}")
-
-
-def launch_support_input_gui(default_supports: List[SupportConfig]) -> List[SupportConfig]:
-    root = tk.Tk()
-    root.title("支撐配置輸入")
-    root.geometry("980x720")
-    root.resizable(True, True)
-
-    values: List[dict] = []
-    result: List[SupportConfig] = []
-    support_count_var = tk.IntVar(value=len(default_supports))
-
-    def parse_positions(text: str) -> List[int]:
-        text = text.strip()
-        if not text or text == "無":
-            return []
-        return parse_position_list(text)
-
-    def build_rows():
-        for widget in row_frame.winfo_children():
-            widget.destroy()
-        values.clear()
-        count = support_count_var.get()
-        for idx in range(1, count + 1):
-            if idx <= len(default_supports):
-                default_support = default_supports[idx - 1]
-                total_value = str(default_support.total_length)
-                pile_value = ",".join(map(str, default_support.pile_centers)) if default_support.pile_centers else ""
-                waler_value = ",".join(map(str, default_support.waler_centers)) if default_support.waler_centers else ""
-                region_value = str(default_support.target_jack_region)
-            else:
-                total_value = ""
-                pile_value = ""
-                waler_value = ""
-                region_value = ""
-
-            total_var = tk.StringVar(value=total_value)
-            pile_var = tk.StringVar(value=pile_value)
-            waler_var = tk.StringVar(value=waler_value)
-            region_var = tk.StringVar(value=region_value)
-            values.append({
-                "support_id": f"S{idx}",
-                "total": total_var,
-                "pile": pile_var,
-                "waler": waler_var,
-                "region": region_var,
-            })
-
-            row = idx - 1
-            label = tk.Label(row_frame, text=f"S{idx}", anchor="w", width=4)
-            label.grid(row=row, column=0, padx=5, pady=4, sticky="w")
-            total_entry = tk.Entry(row_frame, textvariable=total_var, width=14)
-            total_entry.grid(row=row, column=1, padx=5, pady=4)
-            pile_entry = tk.Entry(row_frame, textvariable=pile_var, width=24)
-            pile_entry.grid(row=row, column=2, padx=5, pady=4)
-            waler_entry = tk.Entry(row_frame, textvariable=waler_var, width=24)
-            waler_entry.grid(row=row, column=3, padx=5, pady=4)
-            region_entry = tk.Entry(row_frame, textvariable=region_var, width=10)
-            region_entry.grid(row=row, column=4, padx=5, pady=4)
-
-    def update_rows(*args):
-        count = support_count_var.get()
-        if count < 1:
-            support_count_var.set(1)
-            return
-        build_rows()
-
-    def on_submit():
-        nonlocal result
-        result.clear()
-        try:
-            for idx, item in enumerate(values, start=1):
-                total_length = int(item["total"].get().strip())
-                if total_length <= 0:
-                    raise ValueError("總長度必須大於 0")
-                pile_centers = parse_positions(item["pile"].get())
-                waler_centers = parse_positions(item["waler"].get())
-                target_jack_region = int(item["region"].get().strip())
-                if target_jack_region <= 0:
-                    raise ValueError("Jack 區域必須大於 0")
-                result.append(
-                    SupportConfig(
-                        support_id=f"S{idx}",
-                        total_length=total_length,
-                        pile_centers=pile_centers,
-                        waler_centers=waler_centers,
-                        target_jack_region=target_jack_region,
-                    )
-                )
-        except ValueError as exc:
-            messagebox.showerror("輸入錯誤", str(exc), parent=root)
-            return
-
-        root.destroy()
-
-    def on_cancel():
-        root.destroy()
-
-    title_label = tk.Label(root, text="支撐配置輸入", font=(None, 18, "bold"))
-    title_label.pack(fill="x", padx=10, pady=(10, 0))
-
-    top_frame = tk.Frame(root)
-    top_frame.pack(fill="x", padx=10, pady=10)
-
-    tk.Label(top_frame, text="支撐數量：").pack(side="left")
-    support_count_spin = tk.Spinbox(
-        top_frame,
-        from_=1,
-        to=50,
-        textvariable=support_count_var,
-        width=4,
-        command=update_rows,
-    )
-    support_count_spin.pack(side="left")
-    tk.Label(top_frame, text="（修改數量後會重新建立輸入欄位）").pack(side="left", padx=8)
-
-    header_frame = tk.Frame(root)
-    header_frame.pack(fill="x", padx=10)
-    header_labels = ["支撐ID", "總長度(mm)", "樁位置(mm)", "托梁位置(mm)", "Jack 區域"]
-    header_widths = [4, 14, 24, 24, 10]
-    for col, (text, width) in enumerate(zip(header_labels, header_widths)):
-        tk.Label(
-            header_frame,
-            text=text,
-            font=(None, 10, "bold"),
-            borderwidth=1,
-            relief="raised",
-            width=width,
-        ).grid(row=0, column=col, padx=2, pady=2)
-
-    for col, width in enumerate(header_widths):
-        header_frame.grid_columnconfigure(col, minsize=width * 8)
-
-    canvas = tk.Canvas(root)
-    scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
-    scroll_frame = tk.Frame(canvas)
-
-    scroll_frame.bind(
-        "<Configure>",
-        lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    )
-
-    canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-    canvas.configure(yscrollcommand=scrollbar.set)
-    canvas.pack(side="left", fill="both", expand=True)
-    scrollbar.pack(side="right", fill="y")
-
-    row_frame = scroll_frame
-    for col, width in enumerate(header_widths):
-        row_frame.grid_columnconfigure(col, minsize=width * 8)
-    build_rows()
-
-    button_frame = tk.Frame(root)
-    button_frame.pack(fill="x", pady=10)
-    tk.Button(button_frame, text="產生支撐配置", command=on_submit, width=18).pack(side="right", padx=10)
-    tk.Button(button_frame, text="取消", command=on_cancel, width=10).pack(side="right")
-
-    root.mainloop()
-    return result
-
-
-def get_support_configs_from_input(default_count: Optional[int] = None) -> List[SupportConfig]:
-    default_supports = get_default_supports()
-    if default_count is None:
-        default_count = len(default_supports)
-    return launch_support_input_gui(default_supports[:default_count])
-
-
-def get_default_supports() -> List[SupportConfig]:
-    """回傳預設的支撐設定，用於非互動測試或快速執行。"""
-    return [
-        SupportConfig(support_id="S1", total_length=21300, pile_centers=[8550, 12750], waler_centers=[8550, 12750]),
-        SupportConfig(support_id="S2", total_length=21300, pile_centers=[8642, 12787], waler_centers=[8642, 12787]),
-        SupportConfig(support_id="S3", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S4", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S5", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S6", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S7", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S8", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S9", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S10", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S11", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S12", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S13", total_length=21300, pile_centers=[7850, 13450], waler_centers=[7850, 13450]),
-        SupportConfig(support_id="S14", total_length=21300, pile_centers=[8642, 12787], waler_centers=[8642, 12787]),
-        SupportConfig(support_id="S15", total_length=21300, pile_centers=[8550, 12750], waler_centers=[8550, 12750], target_jack_region=1),
-    ]
-
-
-def format_support_group_ids(configs: List[SupportConfig]) -> str:
-    ids = [config.support_id for config in configs]
-    if len(ids) == 1:
-        return ids[0]
-    return "、".join(ids)
-
-
-def main():
-    random.seed(42)
-
-    supports = get_support_configs_from_input()
-    candidates_by_support: List[List[SupportPlan]] = []
-    cache: Dict[Tuple[int, Tuple[int, ...], Tuple[int, ...]], List[SupportPlan]] = {}
-    support_groups: Dict[Tuple[int, Tuple[int, ...], Tuple[int, ...]], List[SupportConfig]] = {}
-
-    for config in supports:
-        key = get_support_config_key(config)
-        support_groups.setdefault(key, []).append(config)
-        if key not in cache:
-            cache[key] = generate_single_support_candidates(
-                config=config,
-                min_candidates=40,
-                min_valid_candidates=DEFAULT_MIN_VALID_CANDIDATES,
-                max_length_combinations=100,
-                beam_width=50,
-                max_layouts_per_combo=20,
-            )
-
-        candidates_by_support.append([
-            clone_plan_with_support_id(plan, config.support_id)
-            for plan in cache[key]
-        ])
-
-    print("===================================================")
-    print("Phase 1：產生單支支撐候選方案")
-    print("===================================================")
-
-    for key, configs in support_groups.items():
-        group_candidates = cache[key]
-        feasible_count = sum(1 for p in group_candidates if p.valid and not p.reason)
-        ratio = feasible_count / len(group_candidates) if group_candidates else 0
-        group_label = format_support_group_ids(configs)
-
-        print(f"\n支撐 {group_label} 共用設定 (共 {len(configs)} 支)")
-        print(f"  目標 Jack 區域 : {configs[0].target_jack_region}")
-        print(f"  候選數量   : {len(group_candidates)}")
-        print(f"  可行數量   : {feasible_count}")
-        print(f"  可行解比例 : {ratio:.2%}")
-
-        if group_candidates:
-            print("  前10名候選：")
-            for rank, candidate in enumerate(group_candidates[:10], start=1):
-                compact = format_plan_compact(clone_plan_with_support_id(candidate, configs[0].support_id))
-                print(f"    {rank:2}. {compact}")
-
-    solution = build_global_solution(
-        candidates_by_support=candidates_by_support,
-        beam_width=100
-    )
-
-    print_global_solution(solution)
-    input("\n按 Enter 結束...")
-
-
-if __name__ == "__main__":
-    main()
