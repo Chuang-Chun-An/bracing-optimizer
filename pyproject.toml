@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "dataclasses>=0.8",
+    "matplotlib>=3.11.1",
     "pyinstaller>=6.20.0",
     "pylint>=4.0.5",
 ]
