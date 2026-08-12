@@ -2,8 +2,10 @@ import copy
 import json
 import math
 import queue
+import sys
 import threading
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -21,16 +23,31 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 
 import support
+from cad_builder import (
+    DEFAULT_TEMP_PATH,
+    POLL_INTERVAL_MS,
+    CadEventMapper,
+    TempEventWatcher,
+)
+from project_data import TABLE_COLUMNS as PROJECT_TABLE_COLUMNS
+from project_data import ProjectDataModel
+from DXFinput import DXFImportDialog, DXFImportError
+from cad_view_interaction import CADViewInteractionController
+
+
+RESOURCE_DIR = Path(__file__).resolve().parent
+APP_DIR = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else RESOURCE_DIR
+)
 
 
 class PreviewNavigationToolbar(NavigationToolbar2Tk):
-    """現場圖面只保留常用工具；縮放由滑鼠滾輪操作。"""
-
-    PAN_THROTTLE_MS = 40
+    """現場圖面只保留全圖與匯出；滑鼠互動由共用控制器處理。"""
 
     toolitems = (
         ("全圖", "回到完整圖面", "home", "home"),
-        ("平移", "拖曳平移", "move", "pan"),
         ("儲存", "儲存圖片", "filesave", "save_figure"),
     )
 
@@ -42,18 +59,11 @@ class PreviewNavigationToolbar(NavigationToolbar2Tk):
         pack_toolbar=True,
         export_callback=None,
         zoom_getter=None,
-        interaction_start_callback=None,
-        interaction_end_callback=None,
     ):
         self.export_callback = export_callback
         self.zoom_getter = zoom_getter
-        self.interaction_start_callback = interaction_start_callback
-        self.interaction_end_callback = interaction_end_callback
         self._zoom_percent = 100.0
         self._base_message = ""
-        self._pending_pan_event = None
-        self._pan_after_id = None
-        self._pan_interaction_active = False
         super().__init__(canvas, window, pack_toolbar=pack_toolbar)
 
     @staticmethod
@@ -85,51 +95,18 @@ class PreviewNavigationToolbar(NavigationToolbar2Tk):
             self.message.set(f"{prefix}倍率={zoom_text}")
 
     def home(self, *args):
-        result = super().home(*args)
+        super().home(*args)
         self.after_idle(self.sync_zoom_display)
-        return result
 
-    def drag_pan(self, event):
-        """限制拖曳平移的更新頻率，避免每個滑鼠事件都重畫。"""
-        if not self._pan_interaction_active:
-            self._pan_interaction_active = True
-            if self.interaction_start_callback is not None:
-                self.interaction_start_callback()
-        self._pending_pan_event = event
-        if self._pan_after_id is None:
-            self._pan_after_id = self.after(
-                self.PAN_THROTTLE_MS,
-                self._flush_pending_pan,
-            )
+    def pan(self, *args):
+        """Left-button pan is intentionally disabled; middle drag owns Pan."""
 
-    def _flush_pending_pan(self):
-        self._pan_after_id = None
-        event = self._pending_pan_event
-        self._pending_pan_event = None
-        if event is None or self._pan_info is None:
-            return
-        super().drag_pan(event)
+        return None
 
-    def release_pan(self, event):
-        """滑鼠放開前套用最後一個尚未處理的平移位置。"""
-        if self._pan_after_id is not None:
-            try:
-                self.after_cancel(self._pan_after_id)
-            except tk.TclError:
-                pass
-            self._pan_after_id = None
+    def zoom(self, *args):
+        """Rectangle zoom is disabled so the left button always means Select."""
 
-        pending_event = self._pending_pan_event
-        self._pending_pan_event = None
-        try:
-            if pending_event is not None and self._pan_info is not None:
-                super().drag_pan(pending_event)
-            return super().release_pan(event)
-        finally:
-            if self._pan_interaction_active:
-                self._pan_interaction_active = False
-                if self.interaction_end_callback is not None:
-                    self.interaction_end_callback()
+        return None
 
     def save_figure(self, *args):
         if self.export_callback is not None:
@@ -160,7 +137,7 @@ def load_ascii_art(code):
     if code != Path(code).name or "/" in code or "\\" in code:
         return None
 
-    art_path = Path(__file__).resolve().parent / "picture" / f"{code}.txt"
+    art_path = RESOURCE_DIR / "picture" / f"{code}.txt"
     if not art_path.is_file():
         return None
 
@@ -200,6 +177,7 @@ class SupportInputApp:
     EXPORT_DPI = 100
     EXPORT_SCALE_OPTIONS = (100, 200, 400, 800)
     PREVIEW_SCROLL_DEBOUNCE_MS = 60
+    TABLE_COLUMNS = PROJECT_TABLE_COLUMNS
     STRUT_BRACE_LENGTH_FIELDS = (
         ("FromBraceToWalerStartLen", "起點角撐長度(往圍令起點)"),
         ("FromBraceToWalerEndLen", "起點角撐長度(往圍令終點)"),
@@ -207,44 +185,75 @@ class SupportInputApp:
         ("ToBraceToWalerEndLen", "終點角撐長度(往圍令終點)"),
     )
 
+    def _ensure_project_data(self):
+        model = self.__dict__.get("project_data")
+        if model is None:
+            model = ProjectDataModel()
+            self.project_data = model
+        return model
+
+    @property
+    def walers(self):
+        return self._ensure_project_data().walers
+
+    @walers.setter
+    def walers(self, rows):
+        self._ensure_project_data().replace_table("walers", rows)
+
+    @property
+    def struts(self):
+        return self._ensure_project_data().struts
+
+    @struts.setter
+    def struts(self, rows):
+        self._ensure_project_data().replace_table("struts", rows)
+
+    @property
+    def braces(self):
+        return self._ensure_project_data().braces
+
+    @braces.setter
+    def braces(self, rows):
+        self._ensure_project_data().replace_table("braces", rows)
+
+    @property
+    def inventory(self):
+        return self._ensure_project_data().inventory
+
+    @inventory.setter
+    def inventory(self, rows):
+        self._ensure_project_data().replace_table("inventory", rows)
+
     def __init__(self, root):
         self.root = root
         self.root.title("開挖支撐系統幾何資料輸入介面")
         self._set_window_size(1600, 900)
 
-        self.walers = []
-        self.struts = []
-        self.braces = []
+        self.project_data = ProjectDataModel()
         self.result_items = {}
+        self.project_result = None
+        self.last_calculated_time = None
+        self.current_project_path = None
         self.solver_memory = {}
         self.support_candidate_cache = {}
-        self.data_dir = Path(__file__).resolve().parent / "data"
+        self.cad_event_mapper = CadEventMapper()
+        self.cad_event_watcher = TempEventWatcher(DEFAULT_TEMP_PATH)
+        self.cad_import_enabled = True
+        self.dxf_dialog_active = False
+        self.cad_import_status = "等待 CAD 事件"
+        self.cad_last_event = None
+        self.cad_last_error = None
+        self.dxf_last_import_debug = None
+        self._cad_poll_after_id = None
+        self.data_dir = RESOURCE_DIR / "data"
         self.default_inventory_path = self.data_dir / "default_inventory.json"
-        self.test_cases_dir = Path(__file__).resolve().parent / "test_cases"
-        self.test_cases_dir.mkdir(exist_ok=True)
+        self.project_cases_dir = APP_DIR / "project_cases"
+        self.project_cases_dir.mkdir(exist_ok=True)
         self.inventory = self._load_default_inventory()
 
         self.table_columns = {
-            "walers": ["WalerID", "StartX", "StartY", "EndX", "EndY", "Remark"],
-            "struts": [
-                "StrutID",
-                "FromWaler",
-                "ToWaler",
-                "StartX",
-                "StartY",
-                "EndX",
-                "EndY",
-                "BeamPositions",
-                "ColumnPositions",
-                "FromBraceToWalerStartLen",
-                "FromBraceToWalerEndLen",
-                "ToBraceToWalerStartLen",
-                "ToBraceToWalerEndLen",
-                "TargetJackRegion",
-                "Zoning",
-            ],
-            "braces": ["BraceID", "FromWaler", "ToWaler", "StartX", "StartY", "EndX", "EndY"],
-            "inventory": ["Length", "Qty"],
+            table_name: list(columns)
+            for table_name, columns in self.TABLE_COLUMNS.items()
         }
 
         self.table_tab_labels = {
@@ -262,6 +271,7 @@ class SupportInputApp:
                 "StartY": "起點Y",
                 "EndX": "終點X",
                 "EndY": "終點Y",
+                "material_spec": "材料規格",
                 "Remark": "備註",
             },
             "struts": {
@@ -273,8 +283,11 @@ class SupportInputApp:
                 "StartY": "起點Y",
                 "EndX": "終點X",
                 "EndY": "終點Y",
+                "material_spec": "材料規格",
                 "BeamPositions": "托梁位置(mm)",
                 "ColumnPositions": "中間柱位置(mm)",
+                "AssociatedColumnIDs": "關聯中間柱",
+                "AssociatedBeamIDs": "關聯托梁",
                 "FromBraceToWalerStartLen": "起點角撐長度(往圍令起點)",
                 "FromBraceToWalerEndLen": "起點角撐長度(往圍令終點)",
                 "ToBraceToWalerStartLen": "終點角撐長度(往圍令起點)",
@@ -324,6 +337,8 @@ class SupportInputApp:
         self._load_initial_data()
         self.root.after(300, lambda: self.main_paned.sashpos(0, self.main_paned.winfo_width() // 2))
         self.update_preview()
+        self._schedule_cad_event_poll()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
 
     def _build_ui(self):
         self.main_paned = ttk.PanedWindow(self.root, orient="horizontal")
@@ -342,7 +357,8 @@ class SupportInputApp:
         self._create_table_tab("struts", self.table_tab_labels["struts"])
         self._create_table_tab("braces", self.table_tab_labels["braces"])
         self._create_table_tab("inventory", self.table_tab_labels["inventory"])
-        self._create_test_cases_tab()
+        self._create_cad_import_tab()
+        self._create_project_cases_tab()
         self._create_results_tab()
 
         button_frame = ttk.Frame(self.root)
@@ -434,44 +450,135 @@ class SupportInputApp:
         tree.bind("<Double-1>", self._on_tree_double_click)
         self.treeviews[table_name] = tree
 
-    def _create_test_cases_tab(self):
+    def _create_cad_import_tab(self):
         frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="測試案例")
+        self.notebook.add(frame, text="CAD 匯入")
+
+        self.cad_import_enabled_var = tk.BooleanVar(value=self.cad_import_enabled)
+        self.cad_import_status_var = tk.StringVar(value=self.cad_import_status)
+        self.cad_import_last_event_var = tk.StringVar(value="尚無匯入紀錄")
+        self.cad_import_error_var = tk.StringVar(value="")
+
+        status_frame = ttk.LabelFrame(frame, text="AutoLISP 事件同步")
+        status_frame.pack(fill="x", padx=12, pady=12)
+        status_frame.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(
+            status_frame,
+            text="自動接收 CAD 事件",
+            variable=self.cad_import_enabled_var,
+            command=self._toggle_cad_import,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
+
+        ttk.Label(status_frame, text="事件檔：").grid(
+            row=1, column=0, sticky="ne", padx=(10, 4), pady=4
+        )
+        path_entry = ttk.Entry(status_frame)
+        path_entry.grid(row=1, column=1, sticky="ew", padx=(0, 10), pady=4)
+        path_entry.insert(0, str(self.cad_event_watcher.temp_path))
+        path_entry.configure(state="readonly")
+
+        ttk.Label(status_frame, text="目前狀態：").grid(
+            row=2, column=0, sticky="ne", padx=(10, 4), pady=4
+        )
+        ttk.Label(
+            status_frame,
+            textvariable=self.cad_import_status_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=2, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        ttk.Label(status_frame, text="最近事件：").grid(
+            row=3, column=0, sticky="ne", padx=(10, 4), pady=4
+        )
+        ttk.Label(
+            status_frame,
+            textvariable=self.cad_import_last_event_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=3, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        ttk.Label(status_frame, text="錯誤：").grid(
+            row=4, column=0, sticky="ne", padx=(10, 4), pady=4
+        )
+        ttk.Label(
+            status_frame,
+            textvariable=self.cad_import_error_var,
+            foreground="#b71c1c",
+            wraplength=760,
+            justify="left",
+        ).grid(row=4, column=1, sticky="w", padx=(0, 10), pady=4)
+
+        action_frame = ttk.Frame(status_frame)
+        action_frame.grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 10))
+        ttk.Button(
+            action_frame,
+            text="匯入 DXF…",
+            command=self._import_dxf_file,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            action_frame,
+            text="立即讀取",
+            command=self._manual_read_cad_event,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            action_frame,
+            text="重新顯示狀態",
+            command=self._refresh_cad_import_status,
+        ).pack(side="left")
+
+        instructions = (
+            "使用方式：先在 progeCAD 載入 cad_builder.lsp，再執行 "
+            "ADDWALER、ADDSTRUT 或 ADDBRACE，依 CAD 指令列提示點選起點與終點。"
+            "匯入資料會直接加入"
+            "既有圍令／支撐／斜撐分頁，並更新預覽；本頁不保存第二份資料。"
+        )
+        ttk.Label(
+            frame,
+            text=instructions,
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+    def _create_project_cases_tab(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text="專案")
 
         container = ttk.Frame(frame)
         container.pack(fill="both", expand=True, padx=8, pady=8)
         container.rowconfigure(0, weight=1)
         container.columnconfigure(0, weight=1)
 
-        self.test_case_listbox = tk.Listbox(container, exportselection=False)
-        self.test_case_listbox.grid(row=0, column=0, sticky="nsew")
-        y_scroll = ttk.Scrollbar(container, orient="vertical", command=self.test_case_listbox.yview)
+        self.project_case_listbox = tk.Listbox(container, exportselection=False)
+        self.project_case_listbox.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(container, orient="vertical", command=self.project_case_listbox.yview)
         y_scroll.grid(row=0, column=1, sticky="ns")
-        self.test_case_listbox.configure(yscrollcommand=y_scroll.set)
-        self.test_case_listbox.bind("<Double-1>", lambda _event: self._load_selected_test_case())
+        self.project_case_listbox.configure(yscrollcommand=y_scroll.set)
+        self.project_case_listbox.bind("<Double-1>", lambda _event: self._load_selected_project_case())
 
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(
             button_frame,
-            text="載入案例",
-            command=self._load_selected_test_case,
+            text="載入專案",
+            command=self._load_selected_project_case,
         ).pack(side="left", padx=(0, 6))
         ttk.Button(
             button_frame,
-            text="儲存目前資料為案例",
-            command=self._save_current_test_case_from_prompt,
+            text="儲存目前資料為專案",
+            command=self._save_current_project_case_from_prompt,
         ).pack(side="left", padx=(0, 6))
         ttk.Button(
             button_frame,
-            text="刪除案例",
-            command=self._delete_selected_test_case,
+            text="刪除專案",
+            command=self._delete_selected_project_case,
         ).pack(side="left", padx=(0, 6))
 
-        self._refresh_test_case_list()
+        self._refresh_project_case_list()
 
     def _create_results_tab(self):
         frame = ttk.Frame(self.notebook)
+        self.results_tab = frame
         self.notebook.add(frame, text="結果")
 
         container = ttk.Frame(frame)
@@ -551,6 +658,7 @@ class SupportInputApp:
         material_frame.columnconfigure(0, weight=1)
 
         material_columns = (
+            "Material Spec",
             "Length",
             "Used Qty",
             "Inventory Qty",
@@ -572,6 +680,7 @@ class SupportInputApp:
         self.material_summary_tree.configure(yscrollcommand=material_scroll.set)
 
         material_column_labels = {
+            "Material Spec": "材料規格",
             "Length": "料長(mm)",
             "Used Qty": "使用數量",
             "Inventory Qty": "庫存數量",
@@ -675,13 +784,13 @@ class SupportInputApp:
         text_widget.insert("1.0", art_text)
         text_widget.configure(state="disabled")
 
-    def _test_case_json_files(self):
-        self.test_cases_dir.mkdir(exist_ok=True)
-        return sorted(self.test_cases_dir.glob("*.json"), key=lambda path: path.stem)
+    def _project_case_json_files(self):
+        self.project_cases_dir.mkdir(exist_ok=True)
+        return sorted(self.project_cases_dir.glob("*.json"), key=lambda path: path.stem)
 
     @staticmethod
-    def _sanitize_test_case_name(case_name):
-        name = str(case_name or "").strip()
+    def _sanitize_project_case_name(project_name):
+        name = str(project_name or "").strip()
         translation = str.maketrans({
             "<": "＜",
             ">": "＞",
@@ -695,83 +804,83 @@ class SupportInputApp:
         })
         return name.translate(translation).strip()
 
-    def _test_case_path(self, case_name):
-        safe_name = self._sanitize_test_case_name(case_name)
+    def _project_case_path(self, project_name):
+        safe_name = self._sanitize_project_case_name(project_name)
         if not safe_name:
             return None
         if safe_name.lower().endswith(".json"):
             safe_name = safe_name[:-5]
-        return self.test_cases_dir / f"{safe_name}.json"
+        return self.project_cases_dir / f"{safe_name}.json"
 
-    def _refresh_test_case_list(self, selected_name=None, select_first=False):
-        if not hasattr(self, "test_case_listbox"):
+    def _refresh_project_case_list(self, selected_name=None, select_first=False):
+        if not hasattr(self, "project_case_listbox"):
             return
-        self.test_case_listbox.delete(0, "end")
+        self.project_case_listbox.delete(0, "end")
         selected_index = None
-        for index, path in enumerate(self._test_case_json_files()):
-            self.test_case_listbox.insert("end", path.stem)
+        for index, path in enumerate(self._project_case_json_files()):
+            self.project_case_listbox.insert("end", path.stem)
             if selected_name is not None and path.stem == selected_name:
                 selected_index = index
-        if selected_index is None and select_first and self.test_case_listbox.size() > 0:
+        if selected_index is None and select_first and self.project_case_listbox.size() > 0:
             selected_index = 0
         if selected_index is not None:
-            self.test_case_listbox.selection_set(selected_index)
-            self.test_case_listbox.see(selected_index)
+            self.project_case_listbox.selection_set(selected_index)
+            self.project_case_listbox.see(selected_index)
 
-    def _selected_test_case_name(self):
-        if not hasattr(self, "test_case_listbox"):
+    def _selected_project_case_name(self):
+        if not hasattr(self, "project_case_listbox"):
             return None
-        selection = self.test_case_listbox.curselection()
+        selection = self.project_case_listbox.curselection()
         if not selection:
             return None
-        return self.test_case_listbox.get(selection[0])
+        return self.project_case_listbox.get(selection[0])
 
-    def _load_selected_test_case(self):
-        case_name = self._selected_test_case_name()
-        if not case_name:
-            messagebox.showwarning("載入案例", "請先選擇要載入的測試案例。")
+    def _load_selected_project_case(self):
+        project_name = self._selected_project_case_name()
+        if not project_name:
+            messagebox.showwarning("載入專案", "請先選擇要載入的專案。")
             return
         try:
-            self.load_test_case(case_name)
+            self.load_project_case(project_name)
         except Exception as exc:
-            messagebox.showerror("載入案例失敗", str(exc))
+            messagebox.showerror("載入專案失敗", str(exc))
 
-    def _delete_selected_test_case(self):
-        case_name = self._selected_test_case_name()
-        if not case_name:
-            messagebox.showwarning("刪除案例", "請先選擇要刪除的測試案例。")
+    def _delete_selected_project_case(self):
+        project_name = self._selected_project_case_name()
+        if not project_name:
+            messagebox.showwarning("刪除專案", "請先選擇要刪除的專案。")
             return
 
-        path = self._test_case_path(case_name)
+        path = self._project_case_path(project_name)
         if path is None:
-            messagebox.showwarning("刪除案例", "請先選擇要刪除的測試案例。")
+            messagebox.showwarning("刪除專案", "請先選擇要刪除的專案。")
             return
 
         try:
-            test_cases_dir = self.test_cases_dir.resolve()
+            project_cases_dir = self.project_cases_dir.resolve()
             target_path = path.resolve(strict=False)
         except Exception as exc:
             messagebox.showerror(
-                "刪除案例",
+                "刪除專案",
                 f"無法刪除：\n{path}\n\n原因：\n{exc}",
             )
             return
 
-        if target_path.parent != test_cases_dir or target_path.suffix.lower() != ".json":
+        if target_path.parent != project_cases_dir or target_path.suffix.lower() != ".json":
             messagebox.showerror(
-                "刪除案例",
-                f"無法刪除：\n{path}\n\n原因：\n只能刪除 test_cases 資料夾內的 JSON 檔案。",
+                "刪除專案",
+                f"無法刪除：\n{path}\n\n原因：\n只能刪除 project_cases 資料夾內的 JSON 檔案。",
             )
             return
 
         if not target_path.is_file():
-            messagebox.showwarning("刪除案例", "找不到測試案例檔案。")
-            self._refresh_test_case_list(select_first=True)
+            messagebox.showwarning("刪除專案", "找不到專案檔案。")
+            self._refresh_project_case_list(select_first=True)
             return
 
         confirmed = messagebox.askyesno(
             "確認刪除",
-            f"確定要刪除測試案例：\n\n{case_name}\n\n此動作無法復原。",
+            f"確定要刪除專案：\n\n{project_name}\n\n此動作無法復原。",
         )
         if not confirmed:
             return
@@ -780,107 +889,47 @@ class SupportInputApp:
             target_path.unlink()
         except Exception as exc:
             messagebox.showerror(
-                "刪除案例",
+                "刪除專案",
                 f"無法刪除：\n{target_path}\n\n原因：\n{exc}",
             )
             return
 
-        self._refresh_test_case_list(select_first=True)
-        messagebox.showinfo("刪除案例", f"已刪除測試案例：\n{case_name}")
+        self._refresh_project_case_list(select_first=True)
+        messagebox.showinfo("刪除專案", f"已刪除專案：\n{project_name}")
 
-    def _save_current_test_case_from_prompt(self):
-        case_name = simpledialog.askstring(
-            "儲存測試案例",
-            "案例名稱：",
+    def _save_current_project_case_from_prompt(self):
+        project_name = simpledialog.askstring(
+            "儲存專案",
+            "專案名稱：",
             parent=self.root,
         )
-        if case_name is None:
+        if project_name is None:
             return
-        case_name = case_name.strip()
-        if not case_name:
-            messagebox.showwarning("儲存測試案例", "案例名稱不可空白。")
+        project_name = project_name.strip()
+        if not project_name:
+            messagebox.showwarning("儲存專案", "專案名稱不可空白。")
             return
 
-        path = self._test_case_path(case_name)
+        path = self._project_case_path(project_name)
         if path is None:
-            messagebox.showwarning("儲存測試案例", "案例名稱不可空白。")
+            messagebox.showwarning("儲存專案", "專案名稱不可空白。")
             return
         if path.exists():
             confirmed = messagebox.askyesno(
-                "覆蓋測試案例",
-                f"測試案例「{path.stem}」已存在。\n是否覆蓋？",
+                "覆蓋專案",
+                f"專案「{path.stem}」已存在。\n是否覆蓋？",
             )
             if not confirmed:
                 return
 
         try:
-            saved_path = self.save_test_case(case_name)
+            saved_path = self.save_project_case(project_name)
         except Exception as exc:
-            messagebox.showerror("儲存案例失敗", str(exc))
+            messagebox.showerror("儲存專案失敗", str(exc))
             return
 
-        self._refresh_test_case_list(selected_name=saved_path.stem)
-        messagebox.showinfo("儲存測試案例", f"已儲存：\n{saved_path}")
-
-    def _build_test_case_payload(self, case_name):
-        waler_inputs = self.build_waler_inputs()
-        return {
-            "schema_version": 1,
-            "case_name": case_name,
-            "data": {
-                "walers": copy.deepcopy(self.walers),
-                "struts": copy.deepcopy(self.struts),
-                "braces": copy.deepcopy([
-                    {
-                        key: value
-                        for key, value in row.items()
-                        if key != "Type"
-                    }
-                    for row in self.braces
-                ]),
-            },
-            "derived": {
-                "waler_inputs": copy.deepcopy(waler_inputs),
-            },
-            "solver_settings": {
-                "waler": {
-                    "generations": 10,
-                    "population_size": 120,
-                    "short_ratio": 20,
-                    "mid_ratio": 50,
-                    "long_ratio": 30,
-                    "min_piece_length": 1000,
-                    "max_piece_length": 10000,
-                    "joint_clearance": 300,
-                    "candidate_joint_step": 500,
-                    "top_n": 5,
-                },
-                "support": {
-                    "max_steel_combination_count": 100,
-                    "target_valid_candidate_count": 40,
-                    "beam_width": 100,
-                },
-                "export": {
-                    "base_figsize": list(self.EXPORT_BASE_FIGSIZE),
-                    "dpi": self.EXPORT_DPI,
-                    "scale_options": list(self.EXPORT_SCALE_OPTIONS),
-                    "default_scale": 400,
-                },
-            },
-            "parameters": {
-                "support_solver": {
-                    "steel_lengths": list(support.STEEL_LENGTHS),
-                    "jack_length": support.JACK_LENGTH,
-                    "shim_lengths": list(support.SHIM_LENGTHS),
-                    "max_gap": support.MAX_GAP,
-                    "target_gap": support.TARGET_GAP,
-                    "min_end_clear": support.MIN_END_CLEAR,
-                    "pile_forbidden_half": support.PILE_FORBIDDEN_HALF,
-                    "waler_forbidden_half": support.WALER_FORBIDDEN_HALF,
-                    "min_jack_distance_between_supports": support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS,
-                },
-            },
-        }
+        self._refresh_project_case_list(selected_name=saved_path.stem)
+        messagebox.showinfo("儲存專案", f"已儲存：\n{saved_path}")
 
     def _load_default_inventory(self):
         path = getattr(self, "default_inventory_path", None)
@@ -897,47 +946,229 @@ class SupportInputApp:
             return []
         return copy.deepcopy(inventory)
 
-    def save_test_case(self, case_name):
-        path = self._test_case_path(case_name)
+    def save_project_case(self, project_name):
+        path = self._project_case_path(project_name)
         if path is None:
-            raise ValueError("案例名稱不可空白。")
-        payload = self._build_test_case_payload(path.stem)
-        self.test_cases_dir.mkdir(exist_ok=True)
+            raise ValueError("專案名稱不可空白。")
+        payload = self._build_project_payload(path)
+        self.project_cases_dir.mkdir(exist_ok=True)
         path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self.current_project_path = path
+        self.project_result = copy.deepcopy(payload.get("result"))
         return path
 
-    def load_test_case(self, case_name, *, silent=False):
-        path = self._test_case_path(case_name)
+    def load_project_case(self, project_name, *, silent=False):
+        path = self._project_case_path(project_name)
         if path is None or not path.is_file():
-            raise FileNotFoundError(f"找不到測試案例：{case_name}")
+            raise FileNotFoundError(f"找不到專案：{project_name}")
 
         payload = json.loads(path.read_text(encoding="utf-8"))
-        data = payload.get("data", payload)
-        self.walers = copy.deepcopy(data.get("walers", []))
-        self.struts = copy.deepcopy(data.get("struts", []))
-        self.braces = copy.deepcopy(data.get("braces", []))
+        self._apply_project_payload(payload, path)
+        self._refresh_project_case_list(selected_name=path.stem)
+        if not silent:
+            if self.result_items:
+                self.show_result(f"已載入專案：{path.stem}\n已恢復計算結果與材料統計。")
+            else:
+                self.show_result(f"已載入專案：{path.stem}\n此專案尚無計算結果。")
+        return payload
 
-        for strut in self.struts:
-            strut.setdefault("TargetJackRegion", 2)
-            self._migrate_strut_position_fields(strut)
-        for brace in self.braces:
-            brace.pop("Type", None)
+    def _build_material_summary_payload(self):
+        usage = self._collect_visible_material_usage()
+        inventory_quantities = self._collect_inventory_quantities()
+        summary = []
+        for material_spec, length in sorted(usage):
+            used_quantity = usage[(material_spec, length)]
+            inventory_quantity = inventory_quantities.get(length, 0)
+            remaining_quantity = inventory_quantity - used_quantity
+            summary.append({
+                "material_spec": material_spec,
+                "length": length,
+                "used_qty": used_quantity,
+                "inventory_qty": inventory_quantity,
+                "remaining_qty": remaining_quantity,
+            })
+        return summary
+
+    @staticmethod
+    def _serialize_support_plan(plan):
+        return {
+            "support_id": getattr(plan, "support_id", ""),
+            "pieces": [list(piece) for piece in getattr(plan, "pieces", []) or []],
+            "joints": list(getattr(plan, "joints", []) or []),
+            "gap": getattr(plan, "gap", 0),
+            "jack_center": getattr(plan, "jack_center", 0),
+            "jack_region_id": getattr(plan, "jack_region_id", 0),
+            "score": getattr(plan, "score", 0),
+            "valid": bool(getattr(plan, "valid", False)),
+            "pile_centers": list(getattr(plan, "pile_centers", []) or []),
+            "waler_centers": list(getattr(plan, "waler_centers", []) or []),
+            "reason": getattr(plan, "reason", ""),
+            "breakdown": dict(getattr(plan, "breakdown", {}) or {}),
+            "material_spec": getattr(plan, "material_spec", ""),
+        }
+
+    @staticmethod
+    def _deserialize_support_plan(data):
+        return support.SupportPlan(
+            support_id=str(data.get("support_id", "") or ""),
+            pieces=[
+                (str(piece[0]), int(piece[1]))
+                for piece in list(data.get("pieces", []) or [])
+                if isinstance(piece, (list, tuple)) and len(piece) == 2
+            ],
+            joints=list(data.get("joints", []) or []),
+            gap=data.get("gap", 0),
+            jack_center=data.get("jack_center", 0),
+            jack_region_id=data.get("jack_region_id", 0),
+            score=data.get("score", 0),
+            valid=bool(data.get("valid", False)),
+            pile_centers=list(data.get("pile_centers", []) or []),
+            waler_centers=list(data.get("waler_centers", []) or []),
+            reason=str(data.get("reason", "") or ""),
+            breakdown=dict(data.get("breakdown", {}) or {}),
+            material_spec=str(data.get("material_spec", "") or ""),
+        )
+
+    def _serialize_result_item(self, result_id, item):
+        result_type = item.get("type")
+        result = item.get("result")
+        if result_type == "support":
+            serialized_result = {
+                "total_score": getattr(result, "total_score", 0),
+                "valid": bool(getattr(result, "valid", False)),
+                "reason": getattr(result, "reason", ""),
+                "single_score_total": getattr(result, "single_score_total", 0),
+                "jack_region_penalty": getattr(result, "jack_region_penalty", 0),
+                "material_ratio_penalty": getattr(result, "material_ratio_penalty", 0),
+                "material_ratio_analysis": copy.deepcopy(getattr(result, "material_ratio_analysis", {}) or {}),
+                "material_ratio_targets": copy.deepcopy(getattr(result, "material_ratio_targets", {}) or {}),
+                "material_ratio_weight": getattr(result, "material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
+                "min_jack_distance": getattr(result, "min_jack_distance", None),
+                "plans": [
+                    self._serialize_support_plan(plan)
+                    for plan in list(getattr(result, "plans", []) or [])
+                ],
+            }
+        else:
+            serialized_result = copy.deepcopy(result)
+
+        payload = {
+            "id": result_id,
+            "type": result_type,
+            "visible": bool(item.get("visible", True)),
+            "result": serialized_result,
+        }
+        if "support_visibility" in item:
+            payload["support_visibility"] = copy.deepcopy(item.get("support_visibility") or {})
+        return payload
+
+    def _deserialize_result_item(self, payload):
+        result_type = payload.get("type")
+        result = payload.get("result")
+        if result_type == "support" and isinstance(result, dict):
+            result = support.GlobalSolution(
+                plans=[
+                    self._deserialize_support_plan(plan_data)
+                    for plan_data in list(result.get("plans", []) or [])
+                    if isinstance(plan_data, dict)
+                ],
+                total_score=result.get("total_score", 0),
+                valid=bool(result.get("valid", False)),
+                reason=str(result.get("reason", "") or ""),
+                single_score_total=result.get("single_score_total", 0),
+                jack_region_penalty=result.get("jack_region_penalty", 0),
+                material_ratio_penalty=result.get("material_ratio_penalty", 0),
+                material_ratio_analysis=dict(result.get("material_ratio_analysis", {}) or {}),
+                material_ratio_targets=dict(result.get("material_ratio_targets", {}) or {}),
+                material_ratio_weight=result.get("material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
+                min_jack_distance=result.get("min_jack_distance", None),
+            )
+        else:
+            result = copy.deepcopy(result)
+
+        item = {
+            "type": result_type,
+            "result": result,
+            "visible": bool(payload.get("visible", True)),
+        }
+        if isinstance(payload.get("support_visibility"), dict):
+            item["support_visibility"] = copy.deepcopy(payload["support_visibility"])
+        return item
+
+    def _build_project_result_payload(self):
+        if not self.result_items:
+            return None
+        last_calculated_time = self.last_calculated_time or datetime.now().isoformat(timespec="seconds")
+        return {
+            "last_calculated_time": last_calculated_time,
+            "material_summary": self._build_material_summary_payload(),
+            "best_solution": {
+                "result_items": [
+                    self._serialize_result_item(result_id, item)
+                    for result_id, item in sorted(self.result_items.items())
+                ],
+            },
+        }
+
+    def _mark_results_updated(self):
+        self.last_calculated_time = datetime.now().isoformat(timespec="seconds")
+        self.project_result = self._build_project_result_payload()
+
+    def _build_project_payload(self, path=None):
+        project_name = Path(path).stem if path else "未命名專案"
+        return {
+            "schema_version": 2,
+            "project_information": {
+                "project_name": project_name,
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "application": "SupportSolver",
+            },
+            "input_data": self._ensure_project_data().to_case_data(),
+            "dxf_import_state": copy.deepcopy(
+                getattr(self, "dxf_last_import_debug", None)
+            ),
+            "result": self._build_project_result_payload(),
+        }
+
+    def _apply_project_payload(self, payload, path=None):
+        input_data = payload.get("input_data") or payload.get("data") or payload
+        result_payload = payload.get("result", None)
+        dxf_import_state = payload.get("dxf_import_state")
+        self.dxf_last_import_debug = (
+            copy.deepcopy(dxf_import_state)
+            if isinstance(dxf_import_state, dict)
+            else None
+        )
+
+        self.walers = copy.deepcopy(input_data.get("walers", []))
+        self.struts = copy.deepcopy(input_data.get("struts", []))
+        self.braces = copy.deepcopy(input_data.get("braces", []))
 
         self.result_items.clear()
+        if isinstance(result_payload, dict):
+            best_solution = result_payload.get("best_solution", {})
+            for item_payload in list(best_solution.get("result_items", []) or []):
+                if not isinstance(item_payload, dict):
+                    continue
+                result_id = str(item_payload.get("id", "") or "").strip()
+                if result_id:
+                    self.result_items[result_id] = self._deserialize_result_item(item_payload)
+            self.project_result = copy.deepcopy(result_payload)
+            self.last_calculated_time = result_payload.get("last_calculated_time")
+        else:
+            self.project_result = None
+            self.last_calculated_time = None
+
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
-
+        self.current_project_path = path
         for table_name in ("walers", "struts", "braces", "inventory"):
             self._refresh_tree(table_name)
         self._refresh_results_tree()
-        self._refresh_test_case_list(selected_name=path.stem)
         self.update_preview()
-        if not silent:
-            self.show_result(f"已載入測試案例：{path.stem}")
-        return payload
 
     def _on_results_tree_click(self, event):
         if self.results_tree.identify_region(event.x, event.y) != "cell":
@@ -1102,6 +1333,7 @@ class SupportInputApp:
         group_iid = self._get_result_tree_info(result_id, item)["group_iid"]
         self.result_items.pop(result_id, None)
         self._remove_result_from_session_caches(result_id)
+        self._mark_results_updated()
 
         remaining_entries = self._get_result_group_entries(group_iid)
         next_selected = remaining_entries[0][0] if remaining_entries else None
@@ -1156,34 +1388,43 @@ class SupportInputApp:
                 plans[index] = new_plan
                 solution.plans = plans
                 self._recalculate_support_global_solution(solution)
+                self._mark_results_updated()
                 return True
         return False
 
     def _recalculate_support_global_solution(self, solution):
         plans = list(getattr(solution, "plans", []) or [])
-        total_score = 0.0
-        group_penalty = 0.0
         valid = True
         reasons = []
         for plan in plans:
-            total_score += float(getattr(plan, "score", 0.0) or 0.0)
             if not (getattr(plan, "valid", False) and not getattr(plan, "reason", "")):
                 valid = False
         for prev_plan, curr_plan in zip(plans, plans[1:]):
-            ok, penalty = support.pair_penalty(prev_plan, curr_plan)
-            if ok:
-                group_penalty += float(penalty)
-            else:
+            ok, _penalty = support.pair_penalty(prev_plan, curr_plan)
+            if not ok:
                 valid = False
-                group_penalty += float(penalty)
                 reasons.append(
                     f"{getattr(prev_plan, 'support_id', '')} 與 {getattr(curr_plan, 'support_id', '')} 千斤頂距離不足"
                 )
-        solution.total_score = total_score + group_penalty
+        recalculated = support.make_global_solution(
+            plans,
+            material_ratio_targets=getattr(solution, "material_ratio_targets", None) or support.default_material_ratio_targets(),
+            material_ratio_weight=getattr(solution, "material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
+            valid=valid,
+            reason="；".join(reasons),
+        )
+        solution.total_score = recalculated.total_score
         solution.valid = valid
-        solution.reason = "；".join(reasons)
-        solution.group_penalty = group_penalty
-        return group_penalty, reasons
+        solution.reason = recalculated.reason
+        solution.single_score_total = recalculated.single_score_total
+        solution.jack_region_penalty = recalculated.jack_region_penalty
+        solution.material_ratio_penalty = recalculated.material_ratio_penalty
+        solution.material_ratio_analysis = recalculated.material_ratio_analysis
+        solution.material_ratio_targets = recalculated.material_ratio_targets
+        solution.material_ratio_weight = recalculated.material_ratio_weight
+        solution.min_jack_distance = recalculated.min_jack_distance
+        solution.group_penalty = recalculated.jack_region_penalty + recalculated.material_ratio_penalty
+        return solution.group_penalty, reasons
 
     def _find_support_forbidden_zone_hit(self, plan, config):
         for joint in getattr(plan, "joints", []) or []:
@@ -1217,7 +1458,7 @@ class SupportInputApp:
             ])
         return "\n".join(lines)
 
-    def _format_support_plan_breakdown(self, plan, config, neighbor_checks=None):
+    def _format_support_plan_breakdown(self, plan, config, neighbor_checks=None, solution=None):
         breakdown = dict(getattr(plan, "breakdown", {}) or {})
         short_penalty = breakdown.get("short_penalty", 0.0)
         joint_penalty = breakdown.get("joint_penalty", 0.0)
@@ -1234,7 +1475,9 @@ class SupportInputApp:
             + float(gap_penalty)
             + float(jack_edge_penalty)
         )
-        group_penalty = sum(float(item.get("penalty", 0.0) or 0.0) for item in neighbor_checks or [])
+        region_group_penalty = sum(float(item.get("penalty", 0.0) or 0.0) for item in neighbor_checks or [])
+        material_ratio_penalty = float(getattr(solution, "material_ratio_penalty", 0.0) or 0.0) if solution is not None else 0.0
+        group_penalty = region_group_penalty + material_ratio_penalty
         ranking_score = quality_score + float(invalid_penalty) + group_penalty
         lines = [
             f"支撐：{getattr(plan, 'support_id', '')}",
@@ -1278,10 +1521,14 @@ class SupportInputApp:
             "【求解器排序分數】",
             f"品質分數：{self._format_result_value(quality_score)}",
             f"不合法懲罰：{self._format_result_value(invalid_penalty)}",
-            f"群組懲罰：{self._format_result_value(group_penalty)}",
+            f"Jack Region 群組懲罰：{self._format_result_value(region_group_penalty)}",
+            f"材料比例懲罰：{self._format_result_value(material_ratio_penalty)}",
+            f"群組懲罰合計：{self._format_result_value(group_penalty)}",
             "-" * 50,
             f"排序用總分：{self._format_result_value(ranking_score)}",
         ])
+        if solution is not None:
+            lines.extend(self._format_support_global_analysis_lines(solution))
         return "\n".join(lines)
 
     def _support_neighbor_penalty_for_plan(self, zoning, support_id):
@@ -1479,7 +1726,12 @@ class SupportInputApp:
 
             summary_text.configure(state="normal")
             summary_text.delete("1.0", "end")
-            summary_text.insert("1.0", self._format_support_plan_breakdown(new_plan, config, neighbor_checks))
+            summary_text.insert("1.0", self._format_support_plan_breakdown(
+                new_plan,
+                config,
+                neighbor_checks,
+                solution=solution,
+            ))
             summary_text.configure(state="disabled")
             self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
             parent_id = self.results_tree.parent(self._support_plan_iid(zoning, support_id)) if self.results_tree.exists(self._support_plan_iid(zoning, support_id)) else ""
@@ -1667,6 +1919,7 @@ class SupportInputApp:
             },
             "visible": True,
         }
+        self._mark_results_updated()
         self._refresh_results_tree(selected_id=result_id)
         parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
         if parent_id:
@@ -1767,11 +2020,16 @@ class SupportInputApp:
                 y2 = self._to_number(waler_row.get("EndY"))
                 if None not in (x1, y1, x2, y2):
                     waler_length_text = self._format_result_value(self._line_length(x1, y1, x2, y2))
-            total_length = sum(latest_plan.get("segments", []) or [])
+            steel_length = sum(latest_plan.get("segments", []) or [])
+            assembled_length = (
+                steel_length
+                + int(latest_plan.get("tail_adjustment", 0) or 0)
+                + int(latest_plan.get("gap", 0) or 0)
+            )
             lines = [
                 f"{waler_id}-{custom_label} [自訂]",
                 f"方案狀態：{legality.get('summary', '未檢查')}",
-                f"分段總長：{self._format_result_value(total_length)} mm；圍令長度：{waler_length_text} mm",
+                f"鋼材總長：{self._format_result_value(steel_length)} mm；完成長度：{self._format_result_value(assembled_length)} mm；圍令長度：{waler_length_text} mm",
                 "",
                 self._format_waler_score_breakdown(
                     latest_plan,
@@ -1805,6 +2063,7 @@ class SupportInputApp:
             custom_plan["custom"] = True
             self.result_items[result_id]["result"]["selected_plan"] = custom_plan
             self.result_items[result_id]["result"]["ratio_targets"] = ratio_targets or custom_plan.get("ratio_targets")
+            self._mark_results_updated()
             self._refresh_results_tree(selected_id=result_id)
             parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
             if parent_id:
@@ -2216,6 +2475,19 @@ class SupportInputApp:
             score_text(length_variation),
             score_text(joint_score),
         ])
+        steel_length = count_value(plan.get("steel_length"), sum(segments))
+        tail_adjustment = count_value(plan.get("tail_adjustment"), 0)
+        tail_gap = count_value(plan.get("gap"), 0)
+        required_length = count_value(
+            plan.get("required_length"),
+            steel_length + tail_adjustment + tail_gap,
+        )
+        tail_lines = [
+            f"需求長度：{required_length} mm",
+            f"標準鋼材總長：{steel_length} mm",
+            f"尾端調整塊：{tail_adjustment} mm",
+            f"現場處理餘量：{tail_gap} mm（允許 0～{wales.WALER_MAX_GAP} mm）",
+        ]
 
         if isinstance(option_index, str) and option_index.startswith("自訂方案"):
             option_title = option_index
@@ -2223,6 +2495,7 @@ class SupportInputApp:
             option_title = f"方案 {option_index}" if option_index is not None else "方案"
         return "\n".join([
             option_title,
+            *tail_lines,
             f"總分：{score_text(total_score)}",
             f"分段長度：{segments}",
             "評分拆解",
@@ -2270,8 +2543,30 @@ class SupportInputApp:
             "long": target_value("long", "long_segment_ratio_target", 0.3),
         }
         purchasable_lengths = self._get_purchasable_lengths()
+        steel_length = sum(segments)
+        required_length = (
+            self._get_waler_required_length(waler_id, result_context or {})
+            if waler_id
+            else None
+        )
+        if required_length is None:
+            required_length = int(round(float(
+                base_plan.get("required_length", steel_length)
+            )))
+        completion_error = ""
+        try:
+            _resolved_steel, tail_adjustment, tail_gap = (
+                wales.resolve_tail_adjustment(
+                    required_length,
+                    steel_length=steel_length,
+                )
+            )
+        except ValueError as exc:
+            tail_adjustment = 0
+            tail_gap = required_length - steel_length
+            completion_error = str(exc)
         cfg = wales.Config(
-            total_length=sum(segments),
+            total_length=steel_length,
             support_points=[],
             purchasable_lengths=purchasable_lengths,
             short_segment_ratio_target=targets["short"],
@@ -2303,6 +2598,9 @@ class SupportInputApp:
             total_waste = allocation["total_waste"]
             errors = []
 
+        if completion_error:
+            errors.append(completion_error)
+
         joint_count = len(joints)
         score = (
             buy_count * 100_000
@@ -2332,6 +2630,14 @@ class SupportInputApp:
             "valid": not errors,
             "errors": errors,
             "custom": True,
+            "required_length": required_length,
+            "steel_length": steel_length,
+            "tail_adjustment": tail_adjustment,
+            "gap": tail_gap,
+            "pieces": [
+                *[("steel", length) for length in segments],
+                *([("shim", tail_adjustment)] if tail_adjustment > 0 else []),
+            ],
         })
         if waler_id:
             legality = self._validate_custom_waler_plan(
@@ -2387,8 +2693,22 @@ class SupportInputApp:
         max_piece_length = int(round(float(result.get("max_piece_length", 10000) or 10000)))
         purchasable_lengths = self._get_purchasable_lengths()
 
+        tail_adjustment = 0
+        tail_gap = None
+        completion_error = ""
+        if required_length is not None:
+            try:
+                _resolved_steel, tail_adjustment, tail_gap = (
+                    wales.resolve_tail_adjustment(
+                        required_length,
+                        steel_length=current_length,
+                    )
+                )
+            except ValueError as exc:
+                completion_error = str(exc)
+
         cfg = wales.Config(
-            total_length=required_length or current_length,
+            total_length=current_length,
             support_points=forbidden_points,
             min_piece_length=min_piece_length,
             max_piece_length=max_piece_length,
@@ -2399,14 +2719,12 @@ class SupportInputApp:
 
         violations = []
         details = []
-        if required_length is not None and current_length != required_length:
-            diff = current_length - required_length
-            violations.append("長度不符")
+        if completion_error:
+            violations.append("尾端調整量不合法")
             details.extend([
-                "❌ 長度不符",
+                "❌ 無法以一塊調整塊及 0～199 mm 餘量完成圍令",
                 f"需求長度：{required_length} mm",
-                f"目前長度：{current_length} mm",
-                f"長度差異：{diff:+d} mm",
+                f"標準鋼材總長：{current_length} mm",
             ])
 
         forbidden_joint = None
@@ -2461,7 +2779,7 @@ class SupportInputApp:
 
         valid = (
             required_length is not None
-            and current_length == required_length
+            and not completion_error
             and solver_valid
             and not violations
         )
@@ -2470,7 +2788,9 @@ class SupportInputApp:
             details = [
                 "✅ 合法",
                 f"需求長度：{required_length} mm",
-                f"目前長度：{current_length} mm",
+                f"標準鋼材總長：{current_length} mm",
+                f"尾端調整塊：{tail_adjustment} mm",
+                f"現場處理餘量：{tail_gap} mm",
                 "✅ 所有接頭均符合規範",
             ]
         elif len(violations) == 1:
@@ -2487,7 +2807,73 @@ class SupportInputApp:
             "warnings": warnings,
             "required_length": required_length,
             "current_length": current_length,
+            "tail_adjustment": tail_adjustment,
+            "gap": tail_gap,
         }
+
+    @staticmethod
+    def _format_support_global_analysis_lines(solution):
+        analysis = dict(getattr(solution, "material_ratio_analysis", {}) or {})
+        counts = dict(analysis.get("counts", {}) or {})
+        ratios = dict(analysis.get("ratios", {}) or {})
+        targets = dict(analysis.get("targets", {}) or {})
+        total = int(analysis.get("classified_total", 0) or 0)
+        deviation = float(analysis.get("ratio_deviation", 0.0) or 0.0)
+        weight = float(analysis.get("weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT) or 0.0)
+        penalty = float(analysis.get("penalty", 0.0) or 0.0)
+        min_distance = getattr(solution, "min_jack_distance", None)
+        jack_distance_ok = (
+            min_distance is None
+            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+        )
+
+        def percent(value):
+            return f"{float(value):.2%}"
+
+        min_distance = getattr(solution, "min_jack_distance", None)
+        min_distance_text = (
+            SupportInputApp._format_result_value(min_distance)
+            if min_distance is not None
+            else "無資料"
+        )
+        jack_distance_ok = (
+            min_distance is None
+            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+        )
+        lines = [
+            "",
+            "材料比例",
+            "類別　實際比例　　　　　　目標比例",
+        ]
+        for key, label in (("short", "短料"), ("mid", "中料"), ("long", "長料")):
+            lines.append(
+                f"{label}　{percent(ratios.get(key, 0.0))}"
+                f"（{int(counts.get(key, 0) or 0)}支/{total}支）　"
+                f"{percent(targets.get(key, 0.0))}"
+            )
+        lines.extend([
+            "",
+            "比例偏差：",
+            f"|{percent(ratios.get('short', 0.0))} - {percent(targets.get('short', 0.0))}|",
+            f"+ |{percent(ratios.get('mid', 0.0))} - {percent(targets.get('mid', 0.0))}|",
+            f"+ |{percent(ratios.get('long', 0.0))} - {percent(targets.get('long', 0.0))}|",
+            f"= {deviation:.4f}",
+            "",
+            "材料比例懲罰：",
+            f"{deviation:.4f} × {weight:.0f} = {penalty:.2f}",
+            "",
+            "群組評分",
+            f"Jack Region 懲罰：{SupportInputApp._format_result_value(getattr(solution, 'jack_region_penalty', 0.0), decimals=2)}",
+            f"材料比例懲罰：{SupportInputApp._format_result_value(penalty, decimals=2)}",
+            f"群組懲罰合計：{SupportInputApp._format_result_value(getattr(solution, 'jack_region_penalty', 0.0) + penalty, decimals=2)}",
+            "",
+            "Jack 距離檢查：",
+            f"最小相鄰 Jack 距離：{min_distance_text} mm",
+            f"規定最小距離：{support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm",
+            f"狀態：{'合法' if jack_distance_ok else '不合法'}",
+            f"Material Ratio Weight：{weight:.0f}",
+        ])
+        return lines
 
     @classmethod
     def _format_result_details(cls, result_id, item):
@@ -2535,6 +2921,7 @@ class SupportInputApp:
         reason = str(getattr(result, "reason", "") or "").strip()
         if reason:
             lines.append(f"說明：{reason}")
+        lines.extend(cls._format_support_global_analysis_lines(result))
 
         piece_names = {"steel": "鋼材", "shim": "調整塊", "jack": "千斤頂"}
         for index, plan in enumerate(plans, start=1):
@@ -2579,6 +2966,19 @@ class SupportInputApp:
         if selected_id is None:
             selected = self.results_tree.selection()
             selected_id = selected[0] if selected else None
+        force_open_groups = set()
+        if selected_id:
+            if self._is_result_group_iid(selected_id):
+                force_open_groups.add(selected_id)
+            elif self._is_support_plan_iid(selected_id):
+                zoning, _support_id = self._parse_support_plan_iid(selected_id)
+                force_open_groups.add(self._result_group_iid("support", zoning))
+            elif selected_id in self.result_items:
+                selected_item = self.result_items.get(selected_id)
+                if selected_item:
+                    force_open_groups.add(
+                        self._get_result_tree_info(selected_id, selected_item)["group_iid"]
+                    )
 
         children = self.results_tree.get_children()
         if children:
@@ -2620,7 +3020,7 @@ class SupportInputApp:
                 "end",
                 iid=group_iid,
                 text=group["group_label"],
-                open=group_iid in open_groups,
+                open=group_iid in open_groups or group_iid in force_open_groups,
                 values=(
                     visible_mark,
                     group["type_label"],
@@ -2682,10 +3082,16 @@ class SupportInputApp:
             self.results_tree.selection_set(selected_id)
             self.results_tree.focus(selected_id)
             parent_id = self.results_tree.parent(selected_id)
-            if parent_id and parent_id in open_groups:
+            if parent_id:
                 self.results_tree.item(parent_id, open=True)
+            elif self._is_result_group_iid(selected_id):
+                self.results_tree.item(selected_id, open=True)
 
         self._update_material_summary()
+
+    def _select_results_tab(self):
+        if hasattr(self, "notebook") and hasattr(self, "results_tab"):
+            self.notebook.select(self.results_tab)
 
     def _describe_result_item(self, item):
         result = item.get("result")
@@ -2734,6 +3140,7 @@ class SupportInputApp:
             result = item.get("result")
             if item.get("type") == "waler":
                 plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
+                material_spec = str((result or {}).get("material_spec", "") or "").strip() if isinstance(result, dict) else ""
                 assignments = list(plan.get("assignments", []) or [])
                 material_lengths = [
                     assignment.get("stock_length")
@@ -2745,7 +3152,7 @@ class SupportInputApp:
                 for value in material_lengths:
                     length = self._material_length_key(value)
                     if length is not None:
-                        usage[length] += 1
+                        usage[(material_spec, length)] += 1
                 continue
 
             if item.get("type") == "support":
@@ -2753,10 +3160,11 @@ class SupportInputApp:
                     support_id = str(getattr(plan, "support_id", "") or "").strip()
                     if not self._support_plan_visible(item, support_id):
                         continue
+                    material_spec = str(getattr(plan, "material_spec", "") or "").strip()
                     for _piece_type, value in getattr(plan, "pieces", []) or []:
                         length = self._material_length_key(value)
                         if length is not None:
-                            usage[length] += 1
+                            usage[(material_spec, length)] += 1
         return usage
 
     def _collect_inventory_quantities(self):
@@ -2779,8 +3187,8 @@ class SupportInputApp:
 
         usage = self._collect_visible_material_usage()
         inventory_quantities = self._collect_inventory_quantities()
-        for length in sorted(usage):
-            used_quantity = usage[length]
+        for material_spec, length in sorted(usage):
+            used_quantity = usage[(material_spec, length)]
             inventory_quantity = inventory_quantities.get(length, 0)
             remaining_quantity = inventory_quantity - used_quantity
             tags = ("shortage",) if remaining_quantity < 0 else ()
@@ -2788,6 +3196,7 @@ class SupportInputApp:
                 "",
                 "end",
                 values=(
+                    f"=== {material_spec} ===" if material_spec else "=== 未填材料 ===",
                     self._format_result_value(length),
                     self._format_result_value(used_quantity),
                     self._format_result_value(inventory_quantity),
@@ -2805,13 +3214,20 @@ class SupportInputApp:
             "result": result,
             "visible": True,
         }
+        self._mark_results_updated()
         group_iid = self._get_result_tree_info(result_id, self.result_items[result_id])["group_iid"]
         self._refresh_results_tree(selected_id=group_iid)
+        self._select_results_tab()
         self.update_preview()
 
     def _build_preview(self, parent):
         self._preview_scroll_after_id = None
         self._preview_interaction_artist_states = None
+        self.preview_interaction = CADViewInteractionController()
+        self._preview_pan_pixels_per_data = None
+        self._preview_selection_targets = []
+        self._preview_selected_key = ""
+        self._preview_selection_overlay = []
         self.figure = Figure(figsize=(7, 6), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.ax.set_title("開挖支撐系統輸入預覽")
@@ -2842,8 +3258,6 @@ class SupportInputApp:
             pack_toolbar=False,
             export_callback=self._export_preview_image,
             zoom_getter=self._get_preview_zoom_percent,
-            interaction_start_callback=self._begin_preview_pan_interaction,
-            interaction_end_callback=self._end_preview_interaction,
         )
         self.preview_toolbar.update()
         self.preview_toolbar.pack(side="bottom", fill="x", padx=8, pady=(0, 4))
@@ -2855,10 +3269,9 @@ class SupportInputApp:
             pady=(8, 4),
         )
         self.canvas.mpl_connect("scroll_event", self._on_preview_scroll)
-        self.canvas.mpl_connect(
-            "button_release_event",
-            lambda _event: self.preview_toolbar.sync_zoom_display(),
-        )
+        self.canvas.mpl_connect("button_press_event", self._on_preview_button_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_preview_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_preview_button_release)
         self.preview_toolbar.push_current()
 
     @staticmethod
@@ -3043,17 +3456,246 @@ class SupportInputApp:
             f"{pixel_width} × {pixel_height} px",
         )
 
+    def _register_preview_segment(
+        self,
+        kind,
+        identifier,
+        start,
+        end,
+        *,
+        table_name=None,
+        row_index=None,
+        key=None,
+    ):
+        target_key = key or f"{kind}:{identifier}"
+        self._preview_selection_targets.append(
+            {
+                "key": target_key,
+                "kind": kind,
+                "identifier": str(identifier),
+                "geometry": "segment",
+                "start": (float(start[0]), float(start[1])),
+                "end": (float(end[0]), float(end[1])),
+                "table_name": table_name,
+                "row_index": row_index,
+            }
+        )
+
+    def _register_preview_point(
+        self,
+        kind,
+        identifier,
+        point,
+        *,
+        table_name=None,
+        row_index=None,
+        key=None,
+    ):
+        target_key = key or f"{kind}:{identifier}"
+        self._preview_selection_targets.append(
+            {
+                "key": target_key,
+                "kind": kind,
+                "identifier": str(identifier),
+                "geometry": "point",
+                "point": (float(point[0]), float(point[1])),
+                "table_name": table_name,
+                "row_index": row_index,
+            }
+        )
+
+    @staticmethod
+    def _preview_kind_label(kind):
+        return {
+            "waler": "圍令",
+            "strut": "支撐",
+            "brace": "斜撐",
+            "beam": "托梁",
+            "column": "中間柱",
+            "jack": "Jack",
+        }.get(kind, str(kind))
+
+    def _preview_target_at_event(self, event):
+        if event.inaxes is not self.ax:
+            return None
+        screen_point = float(event.x), float(event.y)
+        point_targets = []
+        segment_targets = []
+        target_by_key = {
+            target["key"]: target for target in self._preview_selection_targets
+        }
+        for target in self._preview_selection_targets:
+            if target["geometry"] == "point":
+                screen = self.ax.transData.transform(target["point"])
+                point_targets.append(
+                    (target["key"], (float(screen[0]), float(screen[1])))
+                )
+            else:
+                start = self.ax.transData.transform(target["start"])
+                end = self.ax.transData.transform(target["end"])
+                segment_targets.append(
+                    (
+                        target["key"],
+                        (float(start[0]), float(start[1])),
+                        (float(end[0]), float(end[1])),
+                    )
+                )
+        point_hits = self.preview_interaction.point_hits(
+            screen_point,
+            point_targets,
+            10.0,
+        )
+        if point_hits:
+            return target_by_key.get(point_hits[0])
+        segment_key = self.preview_interaction.nearest_segment(
+            screen_point,
+            segment_targets,
+            10.0,
+        )
+        return target_by_key.get(segment_key)
+
+    def _draw_preview_selection_highlight(self):
+        for artist in getattr(self, "_preview_selection_overlay", ()):
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._preview_selection_overlay = []
+        selected_key = getattr(self, "_preview_selected_key", "")
+        target = next(
+            (
+                item
+                for item in self._preview_selection_targets
+                if item["key"] == selected_key
+            ),
+            None,
+        )
+        if target is None:
+            if selected_key:
+                self._preview_selected_key = ""
+            return
+        if target["geometry"] == "point":
+            artist = self.ax.scatter(
+                [target["point"][0]],
+                [target["point"][1]],
+                s=150,
+                facecolors="none",
+                edgecolors="#1565c0",
+                linewidths=3,
+                zorder=30,
+            )
+            self._preview_selection_overlay.append(artist)
+        else:
+            artist, = self.ax.plot(
+                [target["start"][0], target["end"][0]],
+                [target["start"][1], target["end"][1]],
+                color="#1565c0",
+                linewidth=7,
+                alpha=0.75,
+                solid_capstyle="round",
+                zorder=30,
+            )
+            self._preview_selection_overlay.append(artist)
+
+    def _select_preview_target(self, target):
+        self._preview_selected_key = target["key"] if target is not None else ""
+        if target is None:
+            self.preview_toolbar.set_message("左鍵選取｜中鍵平移｜滾輪縮放")
+        else:
+            table_name = target.get("table_name")
+            row_index = target.get("row_index")
+            if table_name in self.treeviews and isinstance(row_index, int):
+                self.current_table = table_name
+                expected_tab_text = self.table_tab_labels.get(table_name)
+                if expected_tab_text:
+                    for tab_id in self.notebook.tabs():
+                        if self.notebook.tab(tab_id, "text") == expected_tab_text:
+                            self.notebook.select(tab_id)
+                            break
+                self._select_input_row(table_name, row_index)
+            label = self._preview_kind_label(target["kind"])
+            self.preview_toolbar.set_message(
+                f"已選取 {label} {target['identifier']}｜中鍵平移｜滾輪縮放"
+            )
+        self._draw_preview_selection_highlight()
+        self.canvas.draw_idle()
+
+    def _on_preview_button_press(self, event):
+        if event.inaxes is not self.ax:
+            return
+        if self.preview_interaction.is_select_button(event.button):
+            self._select_preview_target(self._preview_target_at_event(event))
+            return
+        if not self.preview_interaction.is_pan_button(event.button):
+            return
+        if getattr(event, "dblclick", False):
+            return
+        self.preview_interaction.begin_pan(
+            (float(event.x), float(event.y)),
+            (
+                *self.ax.get_xlim(),
+                *self.ax.get_ylim(),
+            ),
+        )
+        x_limits = self.ax.get_xlim()
+        y_limits = self.ax.get_ylim()
+        self._preview_pan_pixels_per_data = (
+            max(
+                float(self.ax.bbox.width)
+                / max(abs(x_limits[1] - x_limits[0]), 1e-12),
+                1e-12,
+            ),
+            max(
+                float(self.ax.bbox.height)
+                / max(abs(y_limits[1] - y_limits[0]), 1e-12),
+                1e-12,
+            ),
+        )
+        self._begin_preview_pan_interaction()
+        try:
+            self.canvas.get_tk_widget().configure(cursor="fleur")
+        except tk.TclError:
+            pass
+
+    def _on_preview_motion(self, event):
+        if not self.preview_interaction.pan_active:
+            return
+        bounds = self.preview_interaction.pan_to(
+            (float(event.x), float(event.y)),
+            self._preview_pan_pixels_per_data,
+            y_axis_screen_down=False,
+        )
+        if bounds is None:
+            return
+        self.ax.set_xlim(bounds[0], bounds[1])
+        self.ax.set_ylim(bounds[2], bounds[3])
+        self.canvas.draw_idle()
+
+    def _on_preview_button_release(self, event):
+        if not self.preview_interaction.pan_active:
+            self.preview_toolbar.sync_zoom_display()
+            return
+        self.preview_interaction.end_pan()
+        self._preview_pan_pixels_per_data = None
+        try:
+            self.canvas.get_tk_widget().configure(cursor="arrow")
+        except tk.TclError:
+            pass
+        self._end_preview_interaction()
+        self.preview_toolbar.push_current()
+        self.preview_toolbar.sync_zoom_display()
+
     def _on_preview_scroll(self, event):
         if event.inaxes is not self.ax:
             return
         if event.xdata is None or event.ydata is None:
             return
 
-        if event.button == "up" or getattr(event, "step", 0) > 0:
-            scale_factor = 0.8
-        elif event.button == "down" or getattr(event, "step", 0) < 0:
-            scale_factor = 1.25
-        else:
+        direction = getattr(event, "step", 0)
+        if not direction:
+            direction = 1 if event.button == "up" else -1 if event.button == "down" else 0
+        scale_factor = self.preview_interaction.scroll_factor(direction)
+        if scale_factor is None:
             return
 
         self._begin_preview_interaction()
@@ -3063,13 +3705,13 @@ class SupportInputApp:
         mouse_x = event.xdata
         mouse_y = event.ydata
 
-        new_x_min = mouse_x - (mouse_x - x_min) * scale_factor
-        new_x_max = mouse_x + (x_max - mouse_x) * scale_factor
-        new_y_min = mouse_y - (mouse_y - y_min) * scale_factor
-        new_y_max = mouse_y + (y_max - mouse_y) * scale_factor
-
-        self.ax.set_xlim(new_x_min, new_x_max)
-        self.ax.set_ylim(new_y_min, new_y_max)
+        bounds = self.preview_interaction.zoom_bounds(
+            (x_min, x_max, y_min, y_max),
+            (mouse_x, mouse_y),
+            scale_factor,
+        )
+        self.ax.set_xlim(bounds[0], bounds[1])
+        self.ax.set_ylim(bounds[2], bounds[3])
         self.canvas.draw_idle()
         self._schedule_preview_scroll_redraw()
 
@@ -3100,6 +3742,186 @@ class SupportInputApp:
             pass
         self._preview_scroll_after_id = None
 
+    def _schedule_cad_event_poll(self):
+        if self._cad_poll_after_id is not None:
+            return
+        try:
+            self._cad_poll_after_id = self.root.after(
+                POLL_INTERVAL_MS,
+                self._poll_cad_event,
+            )
+        except tk.TclError:
+            self._cad_poll_after_id = None
+
+    def _poll_cad_event(self):
+        self._cad_poll_after_id = None
+        try:
+            if self.cad_import_enabled and not getattr(
+                self, "dxf_dialog_active", False
+            ):
+                self.read_cad_event()
+        finally:
+            self._schedule_cad_event_poll()
+
+    def _set_cad_import_status(self, status, *, event=None, error=None):
+        self.cad_import_status = status
+        if event is not None:
+            self.cad_last_event = copy.deepcopy(event)
+        self.cad_last_error = str(error) if error is not None else None
+        self._refresh_cad_import_status()
+
+    def _refresh_cad_import_status(self):
+        if hasattr(self, "cad_import_status_var"):
+            self.cad_import_status_var.set(self.cad_import_status)
+        if hasattr(self, "cad_import_error_var"):
+            self.cad_import_error_var.set(self.cad_last_error or "")
+        if hasattr(self, "cad_import_last_event_var"):
+            if self.cad_last_event is None:
+                text = "尚無匯入紀錄"
+            else:
+                event_type = str(self.cad_last_event.get("type", "")).strip()
+                event_id = str(self.cad_last_event.get("event_id", "")).strip()
+                text = f"{event_type}｜event_id={event_id}"
+            self.cad_import_last_event_var.set(text)
+
+    def _toggle_cad_import(self):
+        self.cad_import_enabled = bool(self.cad_import_enabled_var.get())
+        status = "等待 CAD 事件" if self.cad_import_enabled else "CAD 自動接收已停止"
+        self._set_cad_import_status(status)
+
+    def _import_dxf_file(self):
+        file_path = filedialog.askopenfilename(
+            title="選擇 DXF 檔案",
+            filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
+            parent=self.root,
+        )
+        if not file_path:
+            return
+        try:
+            self.dxf_dialog_active = True
+            try:
+                payload = DXFImportDialog(
+                    self.root,
+                    file_path,
+                    initial_state=self.dxf_last_import_debug,
+                    cad_event_watcher=self.cad_event_watcher,
+                ).show()
+            finally:
+                self.dxf_dialog_active = False
+            if payload is None:
+                return
+            result, mode = payload
+            existing = self._project_rows_by_table() if mode == "append" else None
+            imported = result.to_project_rows(existing)
+            if mode == "append":
+                self.walers = [*self.walers, *imported["walers"]]
+                self.struts = [*self.struts, *imported["struts"]]
+                self.braces = [*self.braces, *imported["braces"]]
+            else:
+                self.walers = imported["walers"]
+                self.struts = imported["struts"]
+                self.braces = imported["braces"]
+
+            # Retain only serializable diagnostics.  No ezdxf Entity crosses
+            # into the application data model or Solver input path.
+            self.dxf_last_import_debug = result.to_debug_dict()
+            for table_name in ("walers", "struts", "braces"):
+                self._refresh_tree(table_name)
+            self._handle_input_data_changed(preserve_view=False)
+            self._set_cad_import_status(
+                f"DXF 匯入成功：圍令 {len(imported['walers'])}、"
+                f"支撐 {len(imported['struts'])}、斜撐 {len(imported['braces'])}、"
+                f"中間柱 {len(imported['columns'])}、托梁 {len(imported['beams'])}、"
+                f"角撐 {len(imported['corner_braces'])}、"
+                f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}"
+            )
+        except (DXFImportError, OSError, ValueError) as exc:
+            self._set_cad_import_status("DXF 匯入失敗", error=exc)
+            messagebox.showerror("DXF 匯入失敗", str(exc), parent=self.root)
+
+    def _manual_read_cad_event(self):
+        imported = self.read_cad_event(report_errors=True)
+        if not imported and self.cad_last_error is None:
+            self._set_cad_import_status("目前沒有待匯入的 CAD 事件")
+
+    def _project_rows_by_table(self):
+        return self._ensure_project_data().geometry_rows()
+
+    def _invalidate_solver_state_after_input_change(self):
+        had_result = bool(self.result_items) or self.project_result is not None
+        self.result_items.clear()
+        self.project_result = None
+        self.last_calculated_time = None
+        self.solver_memory.clear()
+        self.support_candidate_cache.clear()
+        self._refresh_results_tree()
+        if had_result and hasattr(self, "result_text"):
+            self.show_result("結果已失效，請重新計算")
+
+    def _handle_input_data_changed(self, *, preserve_view=True, table_name=None):
+        if table_name in (None, "walers", "struts", "braces"):
+            self._invalidate_solver_state_after_input_change()
+        elif table_name == "inventory":
+            self._update_material_summary()
+        self.update_preview(preserve_view=preserve_view)
+
+    def _select_input_row(self, table_name, index):
+        tree = self.treeviews.get(table_name)
+        if tree is None:
+            return
+        item_id = f"{table_name}_{index}"
+        if item_id not in tree.get_children():
+            return
+        tree.selection_set(item_id)
+        tree.focus(item_id)
+        tree.see(item_id)
+
+    def _apply_cad_event(self, event):
+        table_name, row = self.cad_event_mapper.map_event(
+            event,
+            self._project_rows_by_table(),
+        )
+        rows = getattr(self, table_name)
+        rows.append(row)
+        try:
+            self.cad_event_watcher.acknowledge(event)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            rows.pop()
+            raise
+
+        self._refresh_tree(table_name)
+        self._select_input_row(table_name, len(rows) - 1)
+        self._handle_input_data_changed(preserve_view=False, table_name=table_name)
+        identifier_field = self.table_columns[table_name][0]
+        identifier = str(row.get(identifier_field, "")).strip()
+        self._set_cad_import_status(
+            f"匯入成功：{identifier}",
+            event=event,
+        )
+        return table_name, row
+
+    def read_cad_event(self, *, report_errors=False):
+        try:
+            event = self.cad_event_watcher.check_new_event()
+            if event is None:
+                return False
+            self._apply_cad_event(event)
+            return True
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            self._set_cad_import_status("CAD 事件匯入失敗", error=exc)
+            if report_errors:
+                messagebox.showerror("CAD 匯入失敗", str(exc), parent=self.root)
+            return False
+
+    def _on_main_window_close(self):
+        if self._cad_poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._cad_poll_after_id)
+            except tk.TclError:
+                pass
+            self._cad_poll_after_id = None
+        self.root.destroy()
+
     def _on_tab_changed(self, event):
         selected = self.notebook.tab(self.notebook.select(), "text")
         for table_name, tab_label in self.table_tab_labels.items():
@@ -3111,7 +3933,7 @@ class SupportInputApp:
         for table_name in ("walers", "struts", "braces", "inventory"):
             self._refresh_tree(table_name)
         self._refresh_results_tree()
-        self._refresh_test_case_list()
+        self._refresh_project_case_list()
 
     def _refresh_tree(self, table_name):
         tree = self.treeviews[table_name]
@@ -3261,6 +4083,7 @@ class SupportInputApp:
         tree.set(row_id, column, self._format_display_value(value))
         if table_name == "inventory":
             self._update_material_summary()
+        self._handle_input_data_changed(preserve_view=True, table_name=table_name)
 
     def _item_id_to_index(self, item_id):
         try:
@@ -3299,6 +4122,7 @@ class SupportInputApp:
             new_row["TargetJackRegion"] = 2
         getattr(self, table_name).append(new_row)
         self._refresh_tree(table_name)
+        self._handle_input_data_changed(preserve_view=True, table_name=table_name)
 
     def delete_row(self):
         table_name = self.current_table
@@ -3314,6 +4138,7 @@ class SupportInputApp:
 
         getattr(self, table_name).pop(index)
         self._refresh_tree(table_name)
+        self._handle_input_data_changed(preserve_view=True, table_name=table_name)
 
     def _move_current_table_row(self, direction):
         if self.current_table not in ("walers", "struts", "braces"):
@@ -3338,7 +4163,7 @@ class SupportInputApp:
             tree.focus(moved_item_id)
             tree.see(moved_item_id)
 
-        self.update_preview(preserve_view=True)
+        self._handle_input_data_changed(preserve_view=True, table_name=self.current_table)
 
     def move_selected_row(self, tree, data_list, direction):
         selection = tree.selection()
@@ -3385,14 +4210,6 @@ class SupportInputApp:
                 length = self._line_length(coords[0], coords[1], coords[2], coords[3])
                 if length <= 0:
                     row_errors.append("圍令長度必須大於 0")
-                else:
-                    rounded_length = int(round(length))
-                    remainder = rounded_length % 500
-                    if remainder != 0:
-                        difference = min(remainder, 500 - remainder)
-                        row_warnings.append(
-                            f"⚠ 圍令 {waler_id or row_index} 長度 {rounded_length} mm，差距：{difference} mm"
-                        )
 
             if row_errors:
                 errors.append(("walers", row_index, row_errors))
@@ -3845,6 +4662,9 @@ class SupportInputApp:
     def update_preview(self, preserve_view=False):
         self._cancel_preview_scroll_redraw()
         self._end_preview_interaction(redraw=False)
+        if hasattr(self, "preview_interaction"):
+            self.preview_interaction.end_pan()
+        self._preview_pan_pixels_per_data = None
         preserved_xlim = None
         preserved_ylim = None
         if preserve_view:
@@ -3856,6 +4676,8 @@ class SupportInputApp:
                 preserved_ylim = None
 
         self.ax.clear()
+        self._preview_selection_targets = []
+        self._preview_selection_overlay = []
         self.ax.set_title("開挖支撐系統輸入預覽")
         self.ax.set_xlabel("X")
         self.ax.set_ylabel("Y")
@@ -3874,7 +4696,7 @@ class SupportInputApp:
             if str(row.get("WalerID", "")).strip()
         }
 
-        for row in self.walers:
+        for row_index, row in enumerate(self.walers):
             x1 = self._to_number(row.get("StartX"))
             y1 = self._to_number(row.get("StartY"))
             x2 = self._to_number(row.get("EndX"))
@@ -3882,6 +4704,15 @@ class SupportInputApp:
             if None in (x1, y1, x2, y2):
                 continue
             line, = self.ax.plot([x1, x2], [y1, y2], color="black", linewidth=3, label="圍令" if "圍令" not in plotted_labels else None)
+            waler_id = str(row.get("WalerID", "") or f"W{row_index + 1}")
+            self._register_preview_segment(
+                "waler",
+                waler_id,
+                (x1, y1),
+                (x2, y2),
+                table_name="walers",
+                row_index=row_index,
+            )
             plotted_labels.add("圍令")
             mid_x = (x1 + x2) / 2
             mid_y = (y1 + y2) / 2
@@ -3893,7 +4724,7 @@ class SupportInputApp:
         beam_y = []
         column_x = []
         column_y = []
-        for row in self.struts:
+        for row_index, row in enumerate(self.struts):
             self._migrate_strut_position_fields(row)
             x1 = self._to_number(row.get("StartX"))
             y1 = self._to_number(row.get("StartY"))
@@ -3902,6 +4733,15 @@ class SupportInputApp:
             if None in (x1, y1, x2, y2):
                 continue
             line, = self.ax.plot([x1, x2], [y1, y2], color="black", linewidth=3, label="支撐" if "支撐" not in plotted_labels else None)
+            strut_id = str(row.get("StrutID", "") or f"S{row_index + 1}")
+            self._register_preview_segment(
+                "strut",
+                strut_id,
+                (x1, y1),
+                (x2, y2),
+                table_name="struts",
+                row_index=row_index,
+            )
             plotted_labels.add("支撐")
             mid_x = (x1 + x2) / 2
             mid_y = (y1 + y2) / 2
@@ -3925,6 +4765,15 @@ class SupportInputApp:
                     px, py = point
                     point_x.append(px)
                     point_y.append(py)
+                    point_kind = "beam" if label_name == "Bm" else "column"
+                    self._register_preview_point(
+                        point_kind,
+                        f"{strut_id}@{station_num:g}",
+                        (px, py),
+                        table_name="struts",
+                        row_index=row_index,
+                        key=f"{point_kind}:{strut_id}:{station_num:g}",
+                    )
                     self.ax.text(px, py, label_name, color=color, fontsize=8, verticalalignment="bottom", horizontalalignment="left")
                     all_x.append(px)
                     all_y.append(py)
@@ -4007,7 +4856,7 @@ class SupportInputApp:
             )
             plotted_labels.add("中間柱")
 
-        for row in self.braces:
+        for row_index, row in enumerate(self.braces):
             x1 = self._to_number(row.get("StartX"))
             y1 = self._to_number(row.get("StartY"))
             x2 = self._to_number(row.get("EndX"))
@@ -4015,6 +4864,15 @@ class SupportInputApp:
             if None in (x1, y1, x2, y2):
                 continue
             line, = self.ax.plot([x1, x2], [y1, y2], color="orange", linestyle="--", linewidth=2, label="斜撐" if "斜撐" not in plotted_labels else None)
+            brace_id = str(row.get("BraceID", "") or f"B{row_index + 1}")
+            self._register_preview_segment(
+                "brace",
+                brace_id,
+                (x1, y1),
+                (x2, y2),
+                table_name="braces",
+                row_index=row_index,
+            )
             plotted_labels.add("斜撐")
             mid_x = (x1 + x2) / 2
             mid_y = (y1 + y2) / 2
@@ -4033,7 +4891,9 @@ class SupportInputApp:
         home_xlim = tuple(self.ax.get_xlim())
         home_ylim = tuple(self.ax.get_ylim())
 
-        self.ax.legend()
+        legend_handles, _legend_labels = self.ax.get_legend_handles_labels()
+        if legend_handles:
+            self.ax.legend()
         self.preview_counts_text = self.ax.text(
             0.01,
             0.99,
@@ -4050,6 +4910,7 @@ class SupportInputApp:
             self.ax.set_xlim(preserved_xlim)
             self.ax.set_ylim(preserved_ylim)
 
+        self._draw_preview_selection_highlight()
         self.canvas.draw()
         if hasattr(self, "preview_toolbar"):
             self.preview_toolbar.update()
@@ -4106,7 +4967,8 @@ class SupportInputApp:
                 position += seg
                 joints.append(position)
 
-        boundaries = [0] + joints + [int(round(total_length))]
+        steel_length = sum(segments)
+        boundaries = [0] + joints + [steel_length]
         colors = ["red", "green", "blue", "orange", "purple", "cyan", "magenta", "brown"]
 
         for idx, (seg_len, start_pos, end_pos) in enumerate(zip(segments, boundaries, boundaries[1:])):
@@ -4127,6 +4989,64 @@ class SupportInputApp:
                 ey,
                 seg_len,
                 color=color,
+                fontsize=9,
+            )
+
+        tail_adjustment = int(round(float(plan.get("tail_adjustment", 0) or 0)))
+        tail_gap = int(round(float(plan.get("gap", 0) or 0)))
+
+        def point_at(position):
+            fraction = max(0.0, min(1.0, position / total_length))
+            return (
+                x1 + (x2 - x1) * fraction,
+                y1 + (y2 - y1) * fraction,
+            )
+
+        if tail_adjustment > 0:
+            shim_start = steel_length
+            shim_end = steel_length + tail_adjustment
+            sx, sy = point_at(shim_start)
+            ex, ey = point_at(shim_end)
+            self.ax.plot(
+                [sx, ex],
+                [sy, ey],
+                color="#f9a825",
+                linewidth=8,
+                alpha=0.9,
+                solid_capstyle="butt",
+                zorder=14,
+            )
+            self._draw_segment_length_label(
+                sx,
+                sy,
+                ex,
+                ey,
+                tail_adjustment,
+                color="#9a6700",
+                fontsize=9,
+            )
+
+        if tail_gap > 0:
+            gap_start = steel_length + tail_adjustment
+            gap_end = gap_start + tail_gap
+            sx, sy = point_at(gap_start)
+            ex, ey = point_at(gap_end)
+            self.ax.plot(
+                [sx, ex],
+                [sy, ey],
+                color="#616161",
+                linewidth=4,
+                linestyle="--",
+                alpha=0.9,
+                zorder=14,
+            )
+            self._draw_segment_length_label(
+                sx,
+                sy,
+                ex,
+                ey,
+                tail_gap,
+                color="#424242",
                 fontsize=9,
             )
 
@@ -4268,6 +5188,23 @@ class SupportInputApp:
             if jack_center < 0:
                 continue
             jack_x, jack_y = point_at_station(jack_center)
+            strut_index = next(
+                (
+                    index
+                    for index, row in enumerate(self.struts)
+                    if str(row.get("SupportID") or row.get("StrutID") or "").strip()
+                    == support_id
+                ),
+                None,
+            )
+            self._register_preview_point(
+                "jack",
+                support_id,
+                (jack_x, jack_y),
+                table_name="struts",
+                row_index=strut_index,
+                key=f"jack:{zoning}:{support_id}",
+            )
             self.ax.annotate(
                 f"★{jack_center:.0f}",
                 (jack_x, jack_y),
@@ -4405,6 +5342,12 @@ class SupportInputApp:
         joint_clearance = result.get("joint_clearance", 300)
         min_piece_length = result.get("min_piece_length", 1000)
         max_piece_length = result.get("max_piece_length", 10000)
+        material_spec = str(result.get("material_spec", "") or "").strip()
+        if not material_spec:
+            for row in self.walers:
+                if str(row.get("WalerID", "") or "").strip() == waler_id:
+                    material_spec = str(row.get("material_spec", "") or "").strip()
+                    break
         old_result_ids = [
             result_id
             for result_id, item in self.result_items.items()
@@ -4430,10 +5373,12 @@ class SupportInputApp:
                     "joint_clearance": joint_clearance,
                     "min_piece_length": min_piece_length,
                     "max_piece_length": max_piece_length,
+                    "material_spec": material_spec,
                 },
                 "visible": False,
             }
 
+        self._mark_results_updated()
         self._refresh_results_tree(
             selected_id=self._result_group_iid("waler", waler_id),
         )
@@ -4466,6 +5411,8 @@ class SupportInputApp:
             beam_positions, _ = self._parse_position_list(
                 row.get("BeamPositions", "")
             )
+            # DXF 匯入時這兩個欄位已由 Component Association 逐支撐建立；
+            # Solver 只消費所屬支撐的附屬位置，不再搜尋全域 Column/Beam。
             pile_centers = [
                 int(round(value))
                 for value in column_positions
@@ -4492,6 +5439,7 @@ class SupportInputApp:
                     pile_centers=pile_centers,
                     waler_centers=waler_centers,
                     target_jack_region=target_jack_region,
+                    material_spec=str(row.get("material_spec", "") or "").strip(),
                 )
             )
         return supports
@@ -4536,6 +5484,7 @@ class SupportInputApp:
                 "end_point": (x2, y2),
                 "length": int(round(length)),
                 "forbidden_points": [],
+                "material_spec": str(waler_row.get("material_spec", "") or "").strip(),
             }
 
         for row in self.struts:
@@ -4592,9 +5541,15 @@ class SupportInputApp:
         return waler_inputs
 
     def show_result(self, text):
+        message = str(text or "").rstrip()
+        if not message:
+            return
         self.result_text.configure(state="normal")
-        self.result_text.delete("1.0", "end")
-        self.result_text.insert("end", text)
+        existing = self.result_text.get("1.0", "end-1c")
+        if existing.strip():
+            self.result_text.insert("end", "\n\n" + "-" * 60 + "\n")
+        self.result_text.insert("end", message)
+        self.result_text.see("end")
         self.result_text.configure(state="disabled")
 
     def _set_window_size(self, width, height):
@@ -4872,7 +5827,9 @@ class SupportSolverDialog:
         ttk.Label(settings_frame, text="合法候選保留數").grid(
             row=0, column=2, sticky="e", padx=(8, 4), pady=5
         )
-        self.target_valid_candidate_count_var = tk.StringVar(value="40")
+        self.target_valid_candidate_count_var = tk.StringVar(
+            value=str(support.SUPPORT_DEFAULT_FINAL_CANDIDATE_COUNT)
+        )
         ttk.Spinbox(
             settings_frame,
             from_=1,
@@ -4890,6 +5847,42 @@ class SupportSolverDialog:
             wraplength=360,
             justify="left",
         ).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=5)
+
+        ttk.Label(settings_frame, text="短料目標比例（%）").grid(
+            row=1, column=0, sticky="e", padx=(8, 4), pady=5
+        )
+        self.short_ratio_var = tk.StringVar(
+            value=str(support.SUPPORT_DEFAULT_SHORT_MATERIAL_RATIO)
+        )
+        ttk.Entry(
+            settings_frame,
+            textvariable=self.short_ratio_var,
+            width=8,
+        ).grid(row=1, column=1, sticky="w", padx=(0, 18), pady=5)
+
+        ttk.Label(settings_frame, text="中料目標比例（%）").grid(
+            row=1, column=2, sticky="e", padx=(8, 4), pady=5
+        )
+        self.mid_ratio_var = tk.StringVar(
+            value=str(support.SUPPORT_DEFAULT_MID_MATERIAL_RATIO)
+        )
+        ttk.Entry(
+            settings_frame,
+            textvariable=self.mid_ratio_var,
+            width=8,
+        ).grid(row=1, column=3, sticky="w", padx=(0, 18), pady=5)
+
+        ttk.Label(settings_frame, text="長料目標比例（%）").grid(
+            row=1, column=4, sticky="e", padx=(8, 4), pady=5
+        )
+        self.long_ratio_var = tk.StringVar(
+            value=str(support.SUPPORT_DEFAULT_LONG_MATERIAL_RATIO)
+        )
+        ttk.Entry(
+            settings_frame,
+            textvariable=self.long_ratio_var,
+            width=8,
+        ).grid(row=1, column=5, sticky="w", padx=(0, 8), pady=5)
 
         log_frame = ttk.LabelFrame(frame, text="支撐求解執行訊息")
         log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -4938,10 +5931,13 @@ class SupportSolverDialog:
             target_valid_candidate_count = int(
                 self.target_valid_candidate_count_var.get().strip()
             )
+            short_ratio = float(self.short_ratio_var.get().strip())
+            mid_ratio = float(self.mid_ratio_var.get().strip())
+            long_ratio = float(self.long_ratio_var.get().strip())
         except ValueError:
             messagebox.showerror(
                 "輸入錯誤",
-                "鋼材組合探索數與合法候選保留數必須為整數",
+                "鋼材組合探索數、合法候選保留數與材料比例必須為有效數字",
                 parent=self.dialog,
             )
             return
@@ -4960,20 +5956,41 @@ class SupportSolverDialog:
                 parent=self.dialog,
             )
             return
+        try:
+            material_ratio_targets = support.normalize_material_ratio_targets(
+                short_ratio,
+                mid_ratio,
+                long_ratio,
+            )
+        except ValueError as exc:
+            messagebox.showerror(
+                "輸入錯誤",
+                str(exc),
+                parent=self.dialog,
+            )
+            return
 
         self.result_text.configure(state="normal")
         self.result_text.delete("1.0", "end")
         self.result_text.configure(state="disabled")
         self.solution = None
         self._append_message(
-            f"開始計算分區 {self.zoning}："
-            f"鋼材組合探索數={max_steel_combination_count}，"
-            f"合法候選保留數={target_valid_candidate_count}\n"
+            f"=== 分區 {self.zoning} 支撐配置開始 ===\n"
+            f"每支支撐完整處理 {max_steel_combination_count} 組材料組合；"
+            f"最多保留 {target_valid_candidate_count} 個候選送入全域配置。\n"
+            f"候選保留順序：每 {support.SUPPORT_DEFAULT_JACK_CENTER_BUCKET_SIZE:.0f} mm "
+            f"Jack區間保留 {support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_JACK_BUCKET} 個代表方案，"
+            f"再保留材料型態，剩餘名額依單體分數補入。\n"
         )
         self.run_button.configure(state="disabled")
         thread = threading.Thread(
             target=self._solver_thread,
-            args=(max_steel_combination_count, target_valid_candidate_count),
+            args=(
+                max_steel_combination_count,
+                target_valid_candidate_count,
+                material_ratio_targets,
+                support.SUPPORT_MATERIAL_RATIO_WEIGHT,
+            ),
             daemon=True,
         )
         thread.start()
@@ -5014,27 +6031,72 @@ class SupportSolverDialog:
         self,
         max_steel_combination_count,
         target_valid_candidate_count,
+        material_ratio_targets,
+        material_ratio_weight,
     ):
         candidates_by_support = []
         candidate_statuses = []
 
         for config in self.configs:
-            config_key = support.get_support_config_key(config)
-            cache_key = (
-                config_key,
-                max_steel_combination_count,
-                target_valid_candidate_count,
+            diagnostic_record = {}
+            phase1_beam_width = support.SUPPORT_PHASE1_LAYOUT_BEAM_WIDTH
+            max_layouts_per_combo = support.SUPPORT_PHASE1_MAX_LAYOUTS_PER_COMBO
+            min_processed_steel_combinations = (
+                support.SUPPORT_DEFAULT_MIN_PROCESSED_STEEL_COMBINATIONS
+            )
+            min_candidate_pool_size = support.SUPPORT_DEFAULT_MIN_CANDIDATE_POOL_SIZE
+            min_unique_jack_centers = support.SUPPORT_DEFAULT_MIN_UNIQUE_JACK_CENTERS
+            min_no_under_4000_candidates = (
+                support.SUPPORT_DEFAULT_MIN_NO_UNDER_4000_CANDIDATES
+            )
+            min_unique_material_styles = (
+                support.SUPPORT_DEFAULT_MIN_UNIQUE_MATERIAL_STYLES
+            )
+            jack_center_bucket_size = support.SUPPORT_DEFAULT_JACK_CENTER_BUCKET_SIZE
+            min_candidates_per_jack_bucket = (
+                support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_JACK_BUCKET
+            )
+            min_candidates_per_material_style = (
+                support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_MATERIAL_STYLE
+            )
+            min_retained_no_under_4000_candidates = (
+                support.SUPPORT_DEFAULT_MIN_RETAINED_NO_UNDER_4000_CANDIDATES
+            )
+            final_candidate_count = target_valid_candidate_count
+            cache_key = support.build_support_candidate_cache_key(
+                config,
+                max_length_combinations=max_steel_combination_count,
+                final_candidate_count=final_candidate_count,
+                beam_width=phase1_beam_width,
+                max_layouts_per_combo=max_layouts_per_combo,
+                min_processed_steel_combinations=min_processed_steel_combinations,
+                min_candidate_pool_size=min_candidate_pool_size,
+                min_unique_jack_centers=min_unique_jack_centers,
+                min_no_under_4000_candidates=min_no_under_4000_candidates,
+                min_unique_material_styles=min_unique_material_styles,
+                jack_center_bucket_size=jack_center_bucket_size,
+                min_candidates_per_jack_bucket=min_candidates_per_jack_bucket,
+                min_candidates_per_material_style=min_candidates_per_material_style,
+                min_retained_no_under_4000_candidates=min_retained_no_under_4000_candidates,
             )
             if cache_key not in self.candidate_cache:
                 support.log(f"產生支撐 {config.support_id} 候選解...")
-                diagnostic_record = {}
                 generated_candidates = support.generate_single_support_candidates(
                     config=config,
-                    min_candidates=target_valid_candidate_count,
-                    min_valid_candidates=target_valid_candidate_count,
+                    min_candidates=final_candidate_count,
+                    final_candidate_count=final_candidate_count,
                     max_length_combinations=max_steel_combination_count,
-                    beam_width=50,
-                    max_layouts_per_combo=20,
+                    beam_width=phase1_beam_width,
+                    max_layouts_per_combo=max_layouts_per_combo,
+                    min_processed_steel_combinations=min_processed_steel_combinations,
+                    min_candidate_pool_size=min_candidate_pool_size,
+                    min_unique_jack_centers=min_unique_jack_centers,
+                    min_no_under_4000_candidates=min_no_under_4000_candidates,
+                    min_unique_material_styles=min_unique_material_styles,
+                    jack_center_bucket_size=jack_center_bucket_size,
+                    min_candidates_per_jack_bucket=min_candidates_per_jack_bucket,
+                    min_candidates_per_material_style=min_candidates_per_material_style,
+                    min_retained_no_under_4000_candidates=min_retained_no_under_4000_candidates,
                     diagnostics_out=diagnostic_record,
                 )
                 self.candidate_cache[cache_key] = {
@@ -5057,12 +6119,21 @@ class SupportSolverDialog:
                             "target_valid_candidate_count",
                             target_valid_candidate_count,
                         )
+                        diagnostic_record.setdefault(
+                            "final_candidate_count",
+                            final_candidate_count,
+                        )
+                        diagnostic_record.setdefault(
+                            "min_candidate_pool_size",
+                            min_candidate_pool_size,
+                        )
                         support.log_support_candidate_diagnostics(
                             config,
                             diagnostic_record,
                         )
                 else:
                     candidates = cache_entry
+                    diagnostic_record = {}
 
             valid_candidates = [
                 plan
@@ -5073,6 +6144,7 @@ class SupportSolverDialog:
             candidate_statuses.append({
                 "config": config,
                 "actual_valid_count": actual_valid_count,
+                "diagnostics": diagnostic_record,
                 "sufficient": (
                     actual_valid_count >= target_valid_candidate_count
                 ),
@@ -5081,21 +6153,10 @@ class SupportSolverDialog:
                 support.clone_plan_with_support_id(
                     plan,
                     config.support_id,
+                    material_spec=config.material_spec,
                 )
                 for plan in valid_candidates
             ])
-
-        support.log("=" * 72)
-        support.log(f"分區 {self.zoning} 候選方案總檢查")
-        for status in candidate_statuses:
-            config = status["config"]
-            actual_valid_count = status["actual_valid_count"]
-            state_text = "正常" if status["sufficient"] else "不足"
-            support.log(
-                f"{config.support_id}：合法候選 "
-                f"{actual_valid_count} / "
-                f"需求 {target_valid_candidate_count}，{state_text}"
-            )
 
         shortages = [
             status
@@ -5121,19 +6182,24 @@ class SupportSolverDialog:
             return None
 
         support.log(
-            f"分區 {self.zoning} 全部支撐候選充足，"
-            "開始全域最佳化。"
+            f"候選總檢查：{len(candidate_statuses) - len(shortages)}/"
+            f"{len(candidate_statuses)} 支候選充足，開始全域搭配。"
         )
-        support.log("=" * 72)
-        return support.build_global_solution(
+        solution = support.build_global_solution(
             candidates_by_support=candidates_by_support,
             beam_width=100,
+            material_ratio_targets=material_ratio_targets,
+            material_ratio_weight=material_ratio_weight,
         )
+        solution.candidate_diagnostics = candidate_statuses
+        return solution
 
     def _solver_thread(
         self,
         max_steel_combination_count,
         target_valid_candidate_count,
+        material_ratio_targets,
+        material_ratio_weight,
     ):
         def gui_logger(*args):
             message = " ".join(str(arg) for arg in args)
@@ -5147,6 +6213,8 @@ class SupportSolverDialog:
             solution = self._solve(
                 max_steel_combination_count,
                 target_valid_candidate_count,
+                material_ratio_targets,
+                material_ratio_weight,
             )
             if solution is not None:
                 self.dialog.after(
@@ -5167,38 +6235,162 @@ class SupportSolverDialog:
 
     def _display_solution(self, solution):
         self.solution = solution
+        plans = list(solution.plans)
+        plan_scores = [float(plan.score) for plan in plans]
+        minimum_score = min(plan_scores, default=0.0)
+        maximum_score = max(plan_scores, default=0.0)
+        baseline_plan = next(
+            (plan for plan in plans if abs(float(plan.score) - minimum_score) < 1e-9),
+            None,
+        )
+        baseline_breakdown = dict(getattr(baseline_plan, "breakdown", {}) or {})
+        score_distribution = Counter(round(score, 6) for score in plan_scores)
+        pattern_summary = support.pattern_diversity_summary(plans)
+        min_distance = getattr(solution, "min_jack_distance", None)
+        distance_at_limit = (
+            min_distance is not None
+            and abs(float(min_distance) - support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS) < 1e-9
+        )
         lines = [
             "",
-            f"=== 分區 {self.zoning} 全域最佳配置 ===",
-            f"支撐數量：{len(solution.plans)}",
-            f"總分：{solution.total_score:.1f}",
-            f"是否合法：{'是' if solution.valid else '否'}",
+            f"=== 分區 {self.zoning} 支撐配置完成 ===",
+            f"結果：{'合法' if solution.valid else '不合法'}；"
+            f"成功配置 {sum(plan.valid and not plan.reason for plan in plans)}/{len(plans)} 支",
+            f"單體分數合計：{getattr(solution, 'single_score_total', sum(plan_scores)):.1f}；"
+            f"最低 {minimum_score:.0f}，最高 {maximum_score:.0f}",
+            "分數分布：" + "、".join(
+                f"{score:.0f}分×{count}支"
+                for score, count in sorted(score_distribution.items())
+            ),
+            f"相鄰Jack最小距離："
+            f"{SupportInputApp._format_result_value(min_distance if min_distance is not None else '無資料')} mm"
+            f"（下限 {support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm）",
+            f"材料配置多樣性：{pattern_summary['pattern_kind_count']} 種Pattern；"
+            f"同一Pattern最多使用 {pattern_summary['max_pattern_usage']} 次",
         ]
         if solution.reason:
             lines.append(f"說明：{solution.reason}")
+        if distance_at_limit:
+            lines.append("[注意] 最小Jack距離剛好等於規定下限，結果合法但沒有額外距離餘裕。")
 
-        lines.append("=" * 80)
-        for plan in solution.plans:
-            pieces = ", ".join(
-                f"{kind}:{length}"
-                for kind, length in plan.pieces
+        lines.extend(self._format_global_material_ratio_lines(solution))
+
+        candidate_statuses = list(getattr(solution, "candidate_diagnostics", []) or [])
+        if candidate_statuses:
+            source_totals = Counter()
+            processed_counts = []
+            selected_counts = []
+            pool_counts = []
+            retained_counts = []
+            for status in candidate_statuses:
+                record = dict(status.get("diagnostics", {}) or {})
+                diagnostics = dict(record.get("diagnostics", {}) or {})
+                benchmark = dict(diagnostics.get("candidate_benchmark", {}) or {})
+                source_totals.update(dict(diagnostics.get("selection_counts", {}) or {}))
+                processed_counts.append(int(diagnostics.get("combinations_processed", 0) or 0))
+                selected_counts.append(int(record.get("combination_count", 0) or 0))
+                pool_counts.append(int(benchmark.get("candidate_count_before_topn", 0) or 0))
+                retained_counts.append(int(status.get("actual_valid_count", 0) or 0))
+            fully_processed = all(
+                processed == selected
+                for processed, selected in zip(processed_counts, selected_counts)
+                if selected
+            )
+            retained_text = (
+                f"{retained_counts[0]} 個"
+                if retained_counts and min(retained_counts) == max(retained_counts)
+                else f"{min(retained_counts, default=0)}～{max(retained_counts, default=0)} 個"
             )
             lines.extend([
-                f"支撐 {plan.support_id}",
-                f"  分數：{plan.score:.1f}",
-                f"  合法：{'是' if plan.valid and not plan.reason else '否'}",
-                f"  配置：[{pieces}]",
-                f"  接頭：{plan.joints}",
-                f"  餘長(mm)：{plan.gap}",
-                f"  千斤頂中心：{plan.jack_center:.1f}",
-                f"  千斤頂區域：{plan.jack_region_id}",
+                "",
+                "候選生成摘要",
+                f"材料組合：{'全部完整處理' if fully_processed else '有支撐未完整處理'}；"
+                f"每支候選池 {min(pool_counts, default=0)}～{max(pool_counts, default=0)} 個，"
+                f"最終每支保留 {retained_text}",
+                f"候選來源（{len(candidate_statuses)}支合計）："
+                f"Jack位置 {source_totals.get('selected_by_jack_bucket_guarantee', 0)}、"
+                f"材料型態 {source_totals.get('selected_by_material_style_guarantee', 0)}、"
+                f"分數補入 {source_totals.get('selected_by_score_fill', 0)}",
             ])
+
+        lines.extend(["", "各支撐結果"])
+        for plan in plans:
+            steel_lengths = [
+                int(length)
+                for kind, length in plan.pieces
+                if str(kind).lower() == "steel"
+            ]
+            steel_text = "+".join(str(length) for length in sorted(steel_lengths))
+            plan_status = "正常"
+            if not plan.valid or plan.reason:
+                plan_status = "不合法"
+            elif float(plan.score) > minimum_score:
+                plan_status = "注意"
+            lines.append(
+                f"{plan.support_id}｜{steel_text}｜Jack {plan.jack_center:.0f}（區{plan.jack_region_id}）｜"
+                f"Gap {plan.gap}｜分數 {plan.score:.0f}｜{plan_status}"
+            )
+            if float(plan.score) > minimum_score:
+                extra_breakdown = []
+                labels = (
+                    ("short_penalty", "短料"),
+                    ("joint_penalty", "接頭"),
+                    ("gap_penalty", "Gap"),
+                    ("jack_edge_penalty", "Jack靠邊"),
+                    ("invalid_penalty", "不合法"),
+                )
+                for key, label in labels:
+                    value = float(plan.breakdown.get(key, 0.0) or 0.0)
+                    baseline_value = float(baseline_breakdown.get(key, 0.0) or 0.0)
+                    difference = value - baseline_value
+                    if difference <= 1e-9:
+                        continue
+                    if key == "joint_penalty" and support.SUPPORT_JOINT_PENALTY_WEIGHT:
+                        extra_joint_count = int(round(
+                            difference / support.SUPPORT_JOINT_PENALTY_WEIGHT
+                        ))
+                        extra_breakdown.append(
+                            f"多 {extra_joint_count} 個接頭（+{difference:.0f}）"
+                        )
+                    else:
+                        extra_breakdown.append(f"{label} +{difference:.0f}")
+                difference_text = "、".join(extra_breakdown) or "評分項目組合不同"
+                lines.append(
+                    f"  [注意] 比最低單體分多 {plan.score - minimum_score:.0f}；"
+                    + difference_text
+                )
             if plan.reason:
                 lines.append(f"  說明：{plan.reason}")
-            lines.append("-" * 80)
 
         self.text_writer.write("\n".join(lines) + "\n")
         self.callback(self.zoning, solution)
+
+    @staticmethod
+    def _format_global_material_ratio_lines(solution):
+        analysis = dict(getattr(solution, "material_ratio_analysis", {}) or {})
+        counts = dict(analysis.get("counts", {}) or {})
+        ratios = dict(analysis.get("ratios", {}) or {})
+        targets = dict(analysis.get("targets", {}) or {})
+        total = int(analysis.get("classified_total", 0) or 0)
+        deviation = float(analysis.get("ratio_deviation", 0.0) or 0.0)
+        weight = float(analysis.get("weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT) or 0.0)
+        penalty = float(analysis.get("penalty", 0.0) or 0.0)
+        min_distance = getattr(solution, "min_jack_distance", None)
+        jack_distance_ok = (
+            min_distance is None
+            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+        )
+
+        def percent(value):
+            return f"{float(value):.2%}"
+
+        return [
+            f"材料分類：短 {int(counts.get('short', 0) or 0)}支（{percent(ratios.get('short', 0.0))}）、"
+            f"中 {int(counts.get('mid', 0) or 0)}支（{percent(ratios.get('mid', 0.0))}）、"
+            f"長 {int(counts.get('long', 0) or 0)}支（{percent(ratios.get('long', 0.0))}）",
+            f"群組附加分數：Jack區域 {getattr(solution, 'jack_region_penalty', 0.0):.0f}、"
+            f"材料比例 {penalty:.0f}",
+        ]
 
     def _on_close(self):
         self.dialog.destroy()
@@ -5241,8 +6433,13 @@ class WalerSolverDialog:
         self.solver_key = None
 
         rounded_length = self.length
+        (
+            preview_steel_length,
+            preview_tail_adjustment,
+            preview_tail_gap,
+        ) = wales.resolve_tail_adjustment(rounded_length)
         candidate_joint_count = len(wales.generate_candidate_joint_points(
-            rounded_length,
+            preview_steel_length,
             self.min_piece_length,
             self.candidate_joint_step,
         ))
@@ -5284,6 +6481,7 @@ class WalerSolverDialog:
 
         info_items = [
             ("圍令編號", waler_id, "總長度", f"{format_number(rounded_length)} mm"),
+            ("標準鋼材總長", f"{format_number(preview_steel_length)} mm", "調整塊／餘量", f"{format_number(preview_tail_adjustment)} / {format_number(preview_tail_gap)} mm"),
             ("起點座標", format_point(start_point), "終點座標", format_point(end_point)),
             ("禁止點數量", str(forbidden_count), "候選接頭點數", str(candidate_joint_count)),
             ("接頭安全距離", f"{format_number(self.joint_clearance)} mm", "最小段長", f"{format_number(self.min_piece_length)} mm"),
@@ -5415,6 +6613,7 @@ class WalerSolverDialog:
         purchasable_lengths,
     ):
         return (
+            "waler_tail_adjustment_v1",
             total_length,
             tuple(sorted(forbidden_points)),
             short_ratio,
@@ -5425,6 +6624,7 @@ class WalerSolverDialog:
 
     def _ask_use_memory_result(self, solver_key):
         (
+            _solver_schema,
             total_length,
             forbidden_points,
             short_ratio,
@@ -5694,6 +6894,8 @@ class WalerSolverDialog:
             "joint_clearance": self.joint_clearance,
             "min_piece_length": self.min_piece_length,
             "max_piece_length": self.max_piece_length,
+            "adjustment_lengths": list(wales.WALER_ADJUSTMENT_LENGTHS),
+            "max_gap": wales.WALER_MAX_GAP,
         })
         self._append_message(
             "\n前 5 名已加入結果。請在結果頁勾選方案查看圖面，"

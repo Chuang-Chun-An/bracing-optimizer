@@ -1,7 +1,11 @@
 {
-  "schema_version": 1,
-  "case_name": "Y1A站第二層支撐",
-  "data": {
+  "schema_version": 2,
+  "project_information": {
+    "project_name": "Y1A站第二層支撐",
+    "saved_at": "2026-08-06T11:55:02",
+    "application": "SupportSolver"
+  },
+  "input_data": {
     "walers": [
       {
         "WalerID": "W1",
@@ -9,6 +13,7 @@
         "StartY": 0,
         "EndX": 73500,
         "EndY": 0,
+        "material_spec": "",
         "Remark": "下圍令"
       },
       {
@@ -17,6 +22,7 @@
         "StartY": -327,
         "EndX": 84472,
         "EndY": 21673,
+        "material_spec": "",
         "Remark": "右圍令"
       },
       {
@@ -25,6 +31,7 @@
         "StartY": 21144,
         "EndX": 73500,
         "EndY": 21144,
+        "material_spec": "",
         "Remark": "上圍令"
       },
       {
@@ -33,6 +40,7 @@
         "StartY": -327,
         "EndX": -10972,
         "EndY": 21673,
+        "material_spec": "",
         "Remark": "左圍令"
       }
     ],
@@ -45,14 +53,15 @@
         "StartY": 0,
         "EndX": -7500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S2",
@@ -62,14 +71,15 @@
         "StartY": 0,
         "EndX": 1000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S3",
@@ -79,14 +89,15 @@
         "StartY": 0,
         "EndX": 2000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S4",
@@ -96,14 +107,15 @@
         "StartY": 0,
         "EndX": 7000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S5",
@@ -113,14 +125,15 @@
         "StartY": 0,
         "EndX": 8000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S6",
@@ -130,14 +143,15 @@
         "StartY": 0,
         "EndX": 13000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S7",
@@ -147,14 +161,15 @@
         "StartY": 0,
         "EndX": 14000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S8",
@@ -164,14 +179,15 @@
         "StartY": 0,
         "EndX": 19000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7629,13513",
         "ColumnPositions": "7629,13513",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S9",
@@ -181,14 +197,15 @@
         "StartY": 0,
         "EndX": 20000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7629,13513",
         "ColumnPositions": "7629,13513",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S10",
@@ -198,14 +215,15 @@
         "StartY": 0,
         "EndX": 24000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S11",
@@ -215,14 +233,15 @@
         "StartY": 0,
         "EndX": 25000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S12",
@@ -232,14 +251,15 @@
         "StartY": 0,
         "EndX": 30000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S13",
@@ -249,14 +269,15 @@
         "StartY": 0,
         "EndX": 31000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S14",
@@ -266,14 +287,15 @@
         "StartY": 0,
         "EndX": 36000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S15",
@@ -283,14 +305,15 @@
         "StartY": 0,
         "EndX": 37000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S16",
@@ -300,14 +323,15 @@
         "StartY": 0,
         "EndX": 41500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S17",
@@ -317,14 +341,15 @@
         "StartY": 0,
         "EndX": 42500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S18",
@@ -334,14 +359,15 @@
         "StartY": 0,
         "EndX": 47500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S19",
@@ -351,14 +377,15 @@
         "StartY": 0,
         "EndX": 48500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7622,13522",
         "ColumnPositions": "7622,13522",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S20",
@@ -368,14 +395,15 @@
         "StartY": 0,
         "EndX": 53500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7629,13513",
         "ColumnPositions": "7629,13513",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S21",
@@ -385,14 +413,15 @@
         "StartY": 0,
         "EndX": 54500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7629,13513",
         "ColumnPositions": "7629,13513",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S22",
@@ -402,14 +431,15 @@
         "StartY": 0,
         "EndX": 59500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S23",
@@ -419,14 +449,15 @@
         "StartY": 0,
         "EndX": 60500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S24",
@@ -436,14 +467,15 @@
         "StartY": 0,
         "EndX": 65500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S25",
@@ -453,14 +485,15 @@
         "StartY": 0,
         "EndX": 66500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "7808,13334",
         "ColumnPositions": "7808,13334",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S26",
@@ -470,14 +503,15 @@
         "StartY": 0,
         "EndX": 71500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 1500,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 1500,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S27",
@@ -487,14 +521,15 @@
         "StartY": 0,
         "EndX": 72500,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 1500,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 1500
+        "ToBraceToWalerEndLen": 1500,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       },
       {
         "StrutID": "S28",
@@ -504,20 +539,20 @@
         "StartY": 0,
         "EndX": 81000,
         "EndY": 21144,
+        "material_spec": "",
         "BeamPositions": "8472,12672",
         "ColumnPositions": "8472,12672",
-        "TargetJackRegion": 2,
-        "Zoning": "H1",
         "FromBraceToWalerStartLen": 0,
         "FromBraceToWalerEndLen": 0,
         "ToBraceToWalerStartLen": 0,
-        "ToBraceToWalerEndLen": 0
+        "ToBraceToWalerEndLen": 0,
+        "TargetJackRegion": 2,
+        "Zoning": "H1"
       }
     ],
     "braces": [
       {
         "BraceID": "B1",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W4",
         "StartX": -9181,
@@ -527,7 +562,6 @@
       },
       {
         "BraceID": "B2",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W4",
         "StartX": -6681,
@@ -537,7 +571,6 @@
       },
       {
         "BraceID": "B3",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W4",
         "StartX": -4181,
@@ -547,7 +580,6 @@
       },
       {
         "BraceID": "B4",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W4",
         "StartX": -1681,
@@ -557,7 +589,6 @@
       },
       {
         "BraceID": "B5",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W2",
         "StartX": 75181,
@@ -567,7 +598,6 @@
       },
       {
         "BraceID": "B6",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W2",
         "StartX": 77681,
@@ -577,7 +607,6 @@
       },
       {
         "BraceID": "B7",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W2",
         "StartX": 80181,
@@ -587,7 +616,6 @@
       },
       {
         "BraceID": "B8",
-        "Type": "KneeBrace",
         "FromWaler": "",
         "ToWaler": "W2",
         "StartX": 82681,
@@ -597,7 +625,6 @@
       },
       {
         "BraceID": "B9",
-        "Type": "KneeBrace",
         "FromWaler": "W4",
         "ToWaler": "",
         "StartX": -10972,
@@ -607,7 +634,6 @@
       },
       {
         "BraceID": "B10",
-        "Type": "KneeBrace",
         "FromWaler": "W4",
         "ToWaler": "",
         "StartX": -10972,
@@ -617,7 +643,6 @@
       },
       {
         "BraceID": "B11",
-        "Type": "KneeBrace",
         "FromWaler": "W4",
         "ToWaler": "",
         "StartX": -10972,
@@ -627,7 +652,6 @@
       },
       {
         "BraceID": "B12",
-        "Type": "KneeBrace",
         "FromWaler": "W4",
         "ToWaler": "",
         "StartX": -10972,
@@ -637,7 +661,6 @@
       },
       {
         "BraceID": "B13",
-        "Type": "KneeBrace",
         "FromWaler": "W2",
         "ToWaler": "",
         "StartX": 84472,
@@ -647,7 +670,6 @@
       },
       {
         "BraceID": "B14",
-        "Type": "KneeBrace",
         "FromWaler": "W2",
         "ToWaler": "",
         "StartX": 84472,
@@ -657,7 +679,6 @@
       },
       {
         "BraceID": "B15",
-        "Type": "KneeBrace",
         "FromWaler": "W2",
         "ToWaler": "",
         "StartX": 84472,
@@ -667,7 +688,6 @@
       },
       {
         "BraceID": "B16",
-        "Type": "KneeBrace",
         "FromWaler": "W2",
         "ToWaler": "",
         "StartX": 84472,
@@ -677,252 +697,5 @@
       }
     ]
   },
-  "derived": {
-    "waler_inputs": {
-      "W1": {
-        "start_point": [
-          0,
-          0
-        ],
-        "end_point": [
-          73500,
-          0
-        ],
-        "length": 73500,
-        "forbidden_points": [
-          -500,
-          1000,
-          2000,
-          3500,
-          5500,
-          7000,
-          8000,
-          9500,
-          11500,
-          13000,
-          14000,
-          15500,
-          17500,
-          19000,
-          20000,
-          21500,
-          22500,
-          24000,
-          25000,
-          26500,
-          28500,
-          30000,
-          31000,
-          32500,
-          34500,
-          36000,
-          37000,
-          38500,
-          40000,
-          41500,
-          42500,
-          44000,
-          46000,
-          47500,
-          48500,
-          50000,
-          52000,
-          53500,
-          54500,
-          56000,
-          58000,
-          59500,
-          60500,
-          62000,
-          64000,
-          65500,
-          66500,
-          68000,
-          70000,
-          71500,
-          72500,
-          74000
-        ]
-      },
-      "W2": {
-        "start_point": [
-          84472,
-          -327
-        ],
-        "end_point": [
-          84472,
-          21673
-        ],
-        "length": 22000,
-        "forbidden_points": [
-          2299,
-          4799,
-          7299,
-          9799,
-          11999,
-          14499,
-          16999,
-          19499
-        ]
-      },
-      "W3": {
-        "start_point": [
-          0,
-          21144
-        ],
-        "end_point": [
-          73500,
-          21144
-        ],
-        "length": 73500,
-        "forbidden_points": [
-          -500,
-          1000,
-          2000,
-          3500,
-          5500,
-          7000,
-          8000,
-          9500,
-          11500,
-          13000,
-          14000,
-          15500,
-          17500,
-          19000,
-          20000,
-          21500,
-          22500,
-          24000,
-          25000,
-          26500,
-          28500,
-          30000,
-          31000,
-          32500,
-          34500,
-          36000,
-          37000,
-          38500,
-          40000,
-          41500,
-          42500,
-          44000,
-          46000,
-          47500,
-          48500,
-          50000,
-          52000,
-          53500,
-          54500,
-          56000,
-          58000,
-          59500,
-          60500,
-          62000,
-          64000,
-          65500,
-          66500,
-          68000,
-          70000,
-          71500,
-          72500,
-          74000
-        ]
-      },
-      "W4": {
-        "start_point": [
-          -10972,
-          -327
-        ],
-        "end_point": [
-          -10972,
-          21673
-        ],
-        "length": 22000,
-        "forbidden_points": [
-          2299,
-          4799,
-          7299,
-          9799,
-          11999,
-          14499,
-          16999,
-          19499
-        ]
-      }
-    }
-  },
-  "solver_settings": {
-    "waler": {
-      "generations": 10,
-      "population_size": 120,
-      "short_ratio": 20,
-      "mid_ratio": 50,
-      "long_ratio": 30,
-      "min_piece_length": 1000,
-      "max_piece_length": 10000,
-      "joint_clearance": 300,
-      "candidate_joint_step": 500,
-      "top_n": 5
-    },
-    "support": {
-      "max_steel_combination_count": 100,
-      "target_valid_candidate_count": 40,
-      "beam_width": 100
-    },
-    "export": {
-      "base_figsize": [
-        16,
-        10
-      ],
-      "dpi": 100,
-      "scale_options": [
-        100,
-        200,
-        400,
-        800
-      ],
-      "default_scale": 400
-    }
-  },
-  "parameters": {
-    "support_solver": {
-      "steel_lengths": [
-        1000,
-        1500,
-        2000,
-        2500,
-        3000,
-        3500,
-        4000,
-        4500,
-        5000,
-        5500,
-        6000,
-        6500,
-        7000,
-        7500,
-        8000,
-        8500,
-        9000,
-        9500,
-        10000
-      ],
-      "jack_length": 600,
-      "shim_lengths": [
-        0,
-        100,
-        150,
-        200,
-        300
-      ],
-      "max_gap": 150,
-      "target_gap": 80,
-      "min_end_clear": 1600,
-      "pile_forbidden_half": 730,
-      "waler_forbidden_half": 1130,
-      "min_jack_distance_between_supports": 600
-    }
-  }
+  "result": null
 }

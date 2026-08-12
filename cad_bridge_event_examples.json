@@ -1,0 +1,35 @@
+{
+  "ADDWALER": {
+    "event_id": "example-waler-001",
+    "type": "waler",
+    "data": {
+      "StartX": 1000,
+      "StartY": 2000,
+      "EndX": 13000,
+      "EndY": 2000
+    }
+  },
+  "ADDSTRUT": {
+    "event_id": "example-strut-001",
+    "type": "strut",
+    "data": {
+      "StartX": 0,
+      "StartY": 0,
+      "EndX": 12000,
+      "EndY": 0,
+      "BeamPositions": "3500,7000,10500",
+      "ColumnPositions": "5000,10000",
+      "TargetJackRegion": 2
+    }
+  },
+  "ADDBRACE": {
+    "event_id": "example-brace-001",
+    "type": "brace",
+    "data": {
+      "StartX": 2500,
+      "StartY": 1000,
+      "EndX": 6500,
+      "EndY": 4500
+    }
+  }
+}

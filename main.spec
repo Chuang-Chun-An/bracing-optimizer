@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import shutil
+from pathlib import Path
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('data', 'data'), ('picture', 'picture')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +38,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+shutil.copy2(
+    Path(SPECPATH) / "cad_builder.lsp",
+    Path(DISTPATH) / "cad_builder.lsp",
 )

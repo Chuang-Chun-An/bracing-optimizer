@@ -1,11 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import shutil
+from pathlib import Path
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('picture', 'picture')],
+    datas=[('data', 'data'), ('picture', 'picture')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -19,9 +22,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='SupportSolver',
     debug=False,
     bootloader_ignore_signals=False,
@@ -35,4 +37,27 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='SupportSolver',
+)
+
+output_dir = Path(DISTPATH) / "SupportSolver"
+
+shutil.copy2(
+    Path(SPECPATH) / "cad_builder.lsp",
+    output_dir / "cad_builder.lsp",
+)
+
+shutil.copytree(
+    Path(SPECPATH) / "test_cases",
+    output_dir / "test_cases",
+    dirs_exist_ok=True,
 )

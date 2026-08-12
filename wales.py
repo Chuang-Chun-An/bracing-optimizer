@@ -14,6 +14,66 @@ allocate_total_time = 0.0
 DEBUG = False
 logger = print
 
+WALER_ADJUSTMENT_LENGTHS = (0, 100, 150, 200, 300)
+WALER_MAX_GAP = 199
+
+
+def resolve_tail_adjustment(
+    required_length: int,
+    *,
+    steel_length: Optional[int] = None,
+    adjustment_lengths: Tuple[int, ...] = WALER_ADJUSTMENT_LENGTHS,
+    max_gap: int = WALER_MAX_GAP,
+    steel_step: int = 500,
+) -> Tuple[int, int, int]:
+    """Return ``(steel_length, adjustment, gap)`` for a Waler tail.
+
+    Formal Waler steel remains on the standard material grid.  One adjustment
+    block is placed after the final steel member and the remaining 0..max_gap
+    millimetres are left for field treatment.
+    """
+
+    required_length = int(round(required_length))
+    if required_length < 0:
+        raise ValueError("required_length must not be negative")
+    if required_length == 0:
+        return 0, 0, 0
+    if max_gap < 0:
+        raise ValueError("max_gap must not be negative")
+    if steel_step <= 0:
+        raise ValueError("steel_step must be positive")
+
+    normalized_adjustments = tuple(
+        sorted({int(round(value)) for value in adjustment_lengths if value >= 0})
+    )
+    if not normalized_adjustments:
+        raise ValueError("at least one adjustment length is required")
+
+    options: List[Tuple[int, int, int]] = []
+    if steel_length is None:
+        for adjustment in normalized_adjustments:
+            for gap in range(max_gap + 1):
+                target = required_length - adjustment - gap
+                if target >= 0 and target % steel_step == 0:
+                    options.append((target, adjustment, gap))
+    else:
+        target = int(round(steel_length))
+        for adjustment in normalized_adjustments:
+            gap = required_length - target - adjustment
+            if 0 <= gap <= max_gap:
+                options.append((target, adjustment, gap))
+
+    if not options:
+        raise ValueError(
+            "Waler length cannot be completed by one adjustment block "
+            f"with a 0..{max_gap} mm field remainder"
+        )
+
+    # Prefer the smallest field remainder; when it is equal, use the smaller
+    # adjustment block.  With the standard list and max_gap=199 every 500 mm
+    # residue has at least one legal option.
+    return min(options, key=lambda item: (item[2], item[1], -item[0]))
+
 
 def debug_print(*args) -> None:
     if DEBUG:
@@ -53,6 +113,11 @@ class Config:
     joint_clearance_to_support: int = 300
     candidate_joint_step: int = 500
     purchasable_lengths: List[int] = field(default_factory=list)
+    adjustment_lengths: Tuple[int, ...] = WALER_ADJUSTMENT_LENGTHS
+    max_gap: int = WALER_MAX_GAP
+    steel_target_length: int = field(init=False)
+    tail_adjustment: int = field(init=False)
+    tail_gap: int = field(init=False)
 
     # 短/中/長段分類範圍
     short_segment_min: int = 4000
@@ -79,9 +144,20 @@ class Config:
     tournament_k: int = 4
 
     def __post_init__(self) -> None:
+        (
+            self.steel_target_length,
+            self.tail_adjustment,
+            self.tail_gap,
+        ) = resolve_tail_adjustment(
+            self.total_length,
+            adjustment_lengths=self.adjustment_lengths,
+            max_gap=self.max_gap,
+            steel_step=self.candidate_joint_step,
+        )
+
         if not self.candidate_joint_points:
             self.candidate_joint_points = generate_candidate_joint_points(
-                self.total_length,
+                self.steel_target_length,
                 self.min_piece_length,
                 self.candidate_joint_step,
             )
@@ -420,7 +496,7 @@ def decode_individual(individual: List[int], cfg: Config) -> Tuple[List[int], Li
     selected_joints = sorted(set(selected_joints))
 
     # 加入終點，方便算 segment
-    all_points = [0] + selected_joints + [cfg.total_length]
+    all_points = [0] + selected_joints + [cfg.steel_target_length]
 
     segments = []
     for i in range(len(all_points) - 1):
@@ -440,6 +516,11 @@ def validate_segments(joints: List[int], segments: List[int], cfg: Config) -> Tu
 
     # 本工程不允許裁切材料，因此每段長度必須剛好等於可用材料長度。
     allowed_lengths = set(cfg.purchasable_lengths)
+
+    if sum(segments) != cfg.steel_target_length:
+        errors.append(
+            "steel segment total does not match the resolved Waler steel length"
+        )
 
     # 接頭距支撐限制
     for joint in joints:
@@ -713,7 +794,7 @@ def repair_individual(individual: List[int], cfg: Config, max_iters: int = 80) -
         return [1 if p in joint_set else 0 for p in cfg.candidate_joint_points]
 
     def get_points(selected_joints: List[int]) -> List[int]:
-        return [0] + selected_joints + [cfg.total_length]
+        return [0] + selected_joints + [cfg.steel_target_length]
 
     def get_segments(selected_joints: List[int]) -> List[int]:
         pts = get_points(selected_joints)
@@ -919,7 +1000,7 @@ def is_joint_path_feasible(cfg: Config) -> bool:
         for p in cfg.candidate_joint_points
         if is_joint_allowed(p, cfg)
     ]
-    nodes = [0] + sorted(valid_points) + [cfg.total_length]
+    nodes = [0] + sorted(valid_points) + [cfg.steel_target_length]
     allowed_lengths = set(cfg.purchasable_lengths)
 
     visited = [False] * len(nodes)
@@ -948,7 +1029,7 @@ def find_valid_joint_sequence(cfg: Config, randomize: bool = False) -> Optional[
         for p in cfg.candidate_joint_points
         if is_joint_allowed(p, cfg)
     )
-    target = cfg.total_length
+    target = cfg.steel_target_length
     nodes = [0] + points + [target]
     n = len(nodes)
 
@@ -1237,7 +1318,23 @@ def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
 
     results = list(unique.values())
     results.sort(key=lambda x: x["score"])
-    top_results = results[: cfg.top_n]
+    top_results = []
+    for item in results[: cfg.top_n]:
+        enriched = dict(item)
+        pieces = [
+            ("steel", length)
+            for length in item.get("segments", [])
+        ]
+        if cfg.tail_adjustment > 0:
+            pieces.append(("shim", cfg.tail_adjustment))
+        enriched.update(
+            required_length=cfg.total_length,
+            steel_length=cfg.steel_target_length,
+            tail_adjustment=cfg.tail_adjustment,
+            gap=cfg.tail_gap,
+            pieces=pieces,
+        )
+        top_results.append(enriched)
     if top_results:
         logger(
             f"最終方案摘要：方案數={len(top_results)}，"
@@ -1285,7 +1382,7 @@ def build_neighbors(cfg: Config) -> Tuple[List[int], List[List[int]]]:
     neighbors[i]: 從 nodes[i] 出發，可以合法跳到哪些下一個節點索引
     """
     points = sorted(cfg.candidate_joint_points)
-    target = cfg.total_length
+    target = cfg.steel_target_length
     nodes = [0] + points + [target]
     n = len(nodes)
 

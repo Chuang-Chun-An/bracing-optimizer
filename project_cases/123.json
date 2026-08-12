@@ -1,7 +1,11 @@
 {
-  "schema_version": 1,
-  "case_name": "123",
-  "data": {
+  "schema_version": 2,
+  "project_information": {
+    "project_name": "123",
+    "saved_at": "2026-08-06T11:55:02",
+    "application": "SupportSolver"
+  },
+  "input_data": {
     "walers": [
       {
         "WalerID": "W1",
@@ -9,6 +13,7 @@
         "StartY": 0,
         "EndX": 18205,
         "EndY": 0,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -17,6 +22,7 @@
         "StartY": 1150,
         "EndX": 155650,
         "EndY": 1150,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -25,6 +31,7 @@
         "StartY": 1100,
         "EndX": 199905,
         "EndY": 1100,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -33,6 +40,7 @@
         "StartY": 1582,
         "EndX": 200330,
         "EndY": -43340,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -41,6 +49,7 @@
         "StartY": -42940,
         "EndX": 229470,
         "EndY": -42940,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -49,6 +58,7 @@
         "StartY": -43340,
         "EndX": 229070,
         "EndY": 18800,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -57,6 +67,7 @@
         "StartY": 18400,
         "EndX": 229070,
         "EndY": 18400,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -65,6 +76,7 @@
         "StartY": 17300,
         "EndX": 215835,
         "EndY": 17300,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -73,6 +85,7 @@
         "StartY": 17250,
         "EndX": 155650,
         "EndY": 17250,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -81,6 +94,7 @@
         "StartY": 18400,
         "EndX": 18205,
         "EndY": 18400,
+        "material_spec": "",
         "Remark": ""
       },
       {
@@ -89,6 +103,7 @@
         "StartY": -400,
         "EndX": 0,
         "EndY": 18800,
+        "material_spec": "",
         "Remark": ""
       }
     ],
@@ -101,6 +116,7 @@
         "StartY": 0,
         "EndX": 4400,
         "EndY": 18400,
+        "material_spec": "",
         "BeamPositions": "7600,10800",
         "ColumnPositions": "7600,10800",
         "FromBraceToWalerStartLen": 1500,
@@ -118,6 +134,7 @@
         "StartY": 0,
         "EndX": 13100,
         "EndY": 18400,
+        "material_spec": "",
         "BeamPositions": "7600,10800",
         "ColumnPositions": "7600,10800",
         "FromBraceToWalerStartLen": 1500,
@@ -135,6 +152,7 @@
         "StartY": 0,
         "EndX": 14100,
         "EndY": 18400,
+        "material_spec": "",
         "BeamPositions": "7600,10800",
         "ColumnPositions": "7600,10800",
         "FromBraceToWalerStartLen": 0,
@@ -152,6 +170,7 @@
         "StartY": 1150,
         "EndX": 20100,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -169,6 +188,7 @@
         "StartY": 1150,
         "EndX": 25600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -186,6 +206,7 @@
         "StartY": 1150,
         "EndX": 31600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -203,6 +224,7 @@
         "StartY": 1150,
         "EndX": 37600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -220,6 +242,7 @@
         "StartY": 1150,
         "EndX": 42600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -237,6 +260,7 @@
         "StartY": 1150,
         "EndX": 48600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -254,6 +278,7 @@
         "StartY": 1150,
         "EndX": 53600,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5650,10350",
         "ColumnPositions": "5650,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -271,6 +296,7 @@
         "StartY": 1150,
         "EndX": 59100,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5950,10350",
         "ColumnPositions": "5950,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -288,6 +314,7 @@
         "StartY": 1150,
         "EndX": 64900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5950,10350",
         "ColumnPositions": "5950,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -305,6 +332,7 @@
         "StartY": 1150,
         "EndX": 70900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5950,10350",
         "ColumnPositions": "5950,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -322,6 +350,7 @@
         "StartY": 1150,
         "EndX": 76100,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5950,10350",
         "ColumnPositions": "5950,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -339,6 +368,7 @@
         "StartY": 1150,
         "EndX": 82100,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5950,10350",
         "ColumnPositions": "5950,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -356,6 +386,7 @@
         "StartY": 1150,
         "EndX": 87900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -373,6 +404,7 @@
         "StartY": 1150,
         "EndX": 93900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -390,6 +422,7 @@
         "StartY": 1150,
         "EndX": 98900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -407,6 +440,7 @@
         "StartY": 1150,
         "EndX": 104400,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10350",
         "ColumnPositions": "5350,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -424,6 +458,7 @@
         "StartY": 1150,
         "EndX": 109900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5553,10350",
         "ColumnPositions": "5553,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -441,6 +476,7 @@
         "StartY": 1150,
         "EndX": 114900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5150,10350",
         "ColumnPositions": "5150,10350",
         "FromBraceToWalerStartLen": 1500,
@@ -458,6 +494,7 @@
         "StartY": 1150,
         "EndX": 119900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -475,6 +512,7 @@
         "StartY": 1150,
         "EndX": 125900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -492,6 +530,7 @@
         "StartY": 1150,
         "EndX": 130900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -509,6 +548,7 @@
         "StartY": 1150,
         "EndX": 136900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -526,6 +566,7 @@
         "StartY": 1150,
         "EndX": 141900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -543,6 +584,7 @@
         "StartY": 1150,
         "EndX": 147900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -560,6 +602,7 @@
         "StartY": 1150,
         "EndX": 152900,
         "EndY": 17250,
+        "material_spec": "",
         "BeamPositions": "5350,10750",
         "ColumnPositions": "5350,10750",
         "FromBraceToWalerStartLen": 1500,
@@ -577,6 +620,7 @@
         "StartY": 1100,
         "EndX": 158400,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10400",
         "ColumnPositions": "5200,10400",
         "FromBraceToWalerStartLen": 1500,
@@ -594,6 +638,7 @@
         "StartY": 1100,
         "EndX": 164400,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10400",
         "ColumnPositions": "5200,10400",
         "FromBraceToWalerStartLen": 1500,
@@ -611,6 +656,7 @@
         "StartY": 1100,
         "EndX": 169900,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10200",
         "ColumnPositions": "5200,10200",
         "FromBraceToWalerStartLen": 1500,
@@ -628,6 +674,7 @@
         "StartY": 1100,
         "EndX": 175400,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10200",
         "ColumnPositions": "5200,10200",
         "FromBraceToWalerStartLen": 1500,
@@ -645,6 +692,7 @@
         "StartY": 1100,
         "EndX": 181400,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10200",
         "ColumnPositions": "5200,10200",
         "FromBraceToWalerStartLen": 1500,
@@ -662,6 +710,7 @@
         "StartY": 1100,
         "EndX": 187400,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10200",
         "ColumnPositions": "5200,10200",
         "FromBraceToWalerStartLen": 1500,
@@ -679,6 +728,7 @@
         "StartY": 1100,
         "EndX": 193100,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10200",
         "ColumnPositions": "5200,10200",
         "FromBraceToWalerStartLen": 1500,
@@ -696,6 +746,7 @@
         "StartY": 1100,
         "EndX": 197970,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "5200,10400",
         "ColumnPositions": "5200,10400",
         "FromBraceToWalerStartLen": 1500,
@@ -713,6 +764,7 @@
         "StartY": -42940,
         "EndX": 203470,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "3600,9100,14600,20100,25600,31100,36300,41600,49240,54340",
         "ColumnPositions": "4100,9600,15100,20600,26100,31600,36800,41100,49240,54340",
         "FromBraceToWalerStartLen": 1500,
@@ -730,6 +782,7 @@
         "StartY": -42940,
         "EndX": 208970,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "3600,9100,14600,20100,25600,31100,36300,41600,49240,54340",
         "ColumnPositions": "4100,9600,15100,20600,26100,31600,36800,41100,49240,54340",
         "FromBraceToWalerStartLen": 1500,
@@ -747,6 +800,7 @@
         "StartY": -42940,
         "EndX": 213970,
         "EndY": 17300,
+        "material_spec": "",
         "BeamPositions": "3600,9100,14600,20100,25600,31100,36300,41600,49240,54340",
         "ColumnPositions": "4100,9600,15100,20600,26100,31600,36800,41100,49240,54340",
         "FromBraceToWalerStartLen": 1500,
@@ -764,6 +818,7 @@
         "StartY": -42940,
         "EndX": 219970,
         "EndY": 18400,
+        "material_spec": "",
         "BeamPositions": "3600,9100,14600,20100,25600,31100,36300,41600,49240,54340",
         "ColumnPositions": "4100,9600,15100,20600,26100,31600,36800,41100,49240,54340",
         "FromBraceToWalerStartLen": 1500,
@@ -781,6 +836,7 @@
         "StartY": -42940,
         "EndX": 225770,
         "EndY": 18400,
+        "material_spec": "",
         "BeamPositions": "3600,9100,14600,20100,25600,31100,36300,41600,49640,54940",
         "ColumnPositions": "4100,9600,15100,20600,26100,31600,36800,41100,49640,54940",
         "FromBraceToWalerStartLen": 1500,
@@ -798,6 +854,7 @@
         "StartY": -39340,
         "EndX": 229070,
         "EndY": -39340,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -815,6 +872,7 @@
         "StartY": -33840,
         "EndX": 229070,
         "EndY": -33840,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -832,6 +890,7 @@
         "StartY": -28300,
         "EndX": 229070,
         "EndY": -28300,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -849,6 +908,7 @@
         "StartY": -22840,
         "EndX": 229070,
         "EndY": -22840,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -866,6 +926,7 @@
         "StartY": -17340,
         "EndX": 229070,
         "EndY": -17340,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -883,6 +944,7 @@
         "StartY": -11840,
         "EndX": 229070,
         "EndY": -11840,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -900,6 +962,7 @@
         "StartY": -6640,
         "EndX": 229070,
         "EndY": -6640,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 1500,
@@ -917,6 +980,7 @@
         "StartY": -1340,
         "EndX": 229070,
         "EndY": -1340,
+        "material_spec": "",
         "BeamPositions": "3140,8640,13640,19640,25440",
         "ColumnPositions": "3640,9140,14140,19140,24940",
         "FromBraceToWalerStartLen": 0,
@@ -934,6 +998,7 @@
         "StartY": -513,
         "EndX": 229070,
         "EndY": 3160,
+        "material_spec": "",
         "BeamPositions": "",
         "ColumnPositions": "",
         "FromBraceToWalerStartLen": 1500,
@@ -947,7 +1012,6 @@
     "braces": [
       {
         "BraceID": "B1",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W10",
         "StartX": 0,
@@ -957,7 +1021,6 @@
       },
       {
         "BraceID": "B2",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W10",
         "StartX": 0,
@@ -967,7 +1030,6 @@
       },
       {
         "BraceID": "B3",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W10",
         "StartX": 0,
@@ -977,7 +1039,6 @@
       },
       {
         "BraceID": "B4",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W10",
         "StartX": 0,
@@ -987,7 +1048,6 @@
       },
       {
         "BraceID": "B5",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W1",
         "StartX": 0,
@@ -997,7 +1057,6 @@
       },
       {
         "BraceID": "B6",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W1",
         "StartX": 0,
@@ -1007,7 +1066,6 @@
       },
       {
         "BraceID": "B7",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W1",
         "StartX": 0,
@@ -1017,7 +1075,6 @@
       },
       {
         "BraceID": "B8",
-        "Type": "斜撐",
         "FromWaler": "W11",
         "ToWaler": "W1",
         "StartX": 0,
@@ -1027,7 +1084,6 @@
       },
       {
         "BraceID": "B9",
-        "Type": "斜撐",
         "FromWaler": "W7",
         "ToWaler": "W6",
         "StartX": 217970,
@@ -1037,7 +1093,6 @@
       },
       {
         "BraceID": "B10",
-        "Type": "斜撐",
         "FromWaler": "W7",
         "ToWaler": "W6",
         "StartX": 220270,
@@ -1047,7 +1102,6 @@
       },
       {
         "BraceID": "B11",
-        "Type": "斜撐",
         "FromWaler": "W7",
         "ToWaler": "W6",
         "StartX": 222570,
@@ -1057,7 +1111,6 @@
       },
       {
         "BraceID": "B12",
-        "Type": "斜撐",
         "FromWaler": "W7",
         "ToWaler": "W6",
         "StartX": 224870,
@@ -1067,7 +1120,6 @@
       },
       {
         "BraceID": "B13",
-        "Type": "斜撐",
         "FromWaler": "W7",
         "ToWaler": "W6",
         "StartX": 227170,
@@ -1077,543 +1129,5 @@
       }
     ]
   },
-  "derived": {
-    "waler_inputs": {
-      "W1": {
-        "start_point": [
-          0,
-          0
-        ],
-        "end_point": [
-          18205,
-          0
-        ],
-        "length": 18205,
-        "forbidden_points": [
-          1600,
-          2900,
-          3900,
-          4400,
-          5900,
-          6200,
-          8500,
-          11600,
-          13100,
-          14100,
-          15600
-        ]
-      },
-      "W2": {
-        "start_point": [
-          18205,
-          1150
-        ],
-        "end_point": [
-          155650,
-          1150
-        ],
-        "length": 137445,
-        "forbidden_points": [
-          395,
-          1895,
-          3395,
-          5895,
-          7395,
-          8895,
-          11895,
-          13395,
-          14895,
-          17895,
-          19395,
-          20895,
-          22895,
-          24395,
-          25895,
-          28895,
-          30395,
-          31895,
-          33895,
-          35395,
-          36895,
-          39395,
-          40895,
-          42395,
-          45195,
-          46695,
-          48195,
-          51195,
-          52695,
-          54195,
-          56395,
-          57895,
-          59395,
-          62395,
-          63895,
-          65395,
-          68195,
-          69695,
-          71195,
-          74195,
-          75695,
-          77195,
-          79195,
-          80695,
-          82195,
-          84695,
-          86195,
-          87695,
-          90195,
-          91695,
-          93195,
-          95195,
-          96695,
-          98195,
-          100195,
-          101695,
-          103195,
-          106195,
-          107695,
-          109195,
-          111195,
-          112695,
-          114195,
-          117195,
-          118695,
-          120195,
-          122195,
-          123695,
-          125195,
-          128195,
-          129695,
-          131195,
-          133195,
-          134695,
-          136195
-        ]
-      },
-      "W3": {
-        "start_point": [
-          155650,
-          1100
-        ],
-        "end_point": [
-          199905,
-          1100
-        ],
-        "length": 44255,
-        "forbidden_points": [
-          1250,
-          2750,
-          4250,
-          7250,
-          8750,
-          10250,
-          12750,
-          14250,
-          15750,
-          18250,
-          19750,
-          21250,
-          24250,
-          25750,
-          27250,
-          30250,
-          31750,
-          33250,
-          35950,
-          37450,
-          38950,
-          40820,
-          42320,
-          43820
-        ]
-      },
-      "W4": {
-        "start_point": [
-          200330,
-          1582
-        ],
-        "end_point": [
-          200330,
-          -43340
-        ],
-        "length": 44922,
-        "forbidden_points": [
-          595,
-          2095,
-          2922,
-          4422,
-          6722,
-          8222,
-          9722,
-          11922,
-          13422,
-          14922,
-          17422,
-          18922,
-          20422,
-          22922,
-          24422,
-          25922,
-          28382,
-          29882,
-          31382,
-          33922,
-          35422,
-          36922,
-          39422,
-          40922,
-          42422
-        ]
-      },
-      "W5": {
-        "start_point": [
-          199930,
-          -42940
-        ],
-        "end_point": [
-          229470,
-          -42940
-        ],
-        "length": 29540,
-        "forbidden_points": [
-          2040,
-          3540,
-          5040,
-          7540,
-          9040,
-          10540,
-          12540,
-          14040,
-          15540,
-          18540,
-          20040,
-          21540,
-          24340,
-          25840,
-          27340
-        ]
-      },
-      "W6": {
-        "start_point": [
-          229070,
-          -43340
-        ],
-        "end_point": [
-          229070,
-          18800
-        ],
-        "length": 62140,
-        "forbidden_points": [
-          2500,
-          4000,
-          5500,
-          8000,
-          9500,
-          11000,
-          13540,
-          15040,
-          16540,
-          19000,
-          20500,
-          22000,
-          24500,
-          26000,
-          27500,
-          30000,
-          31500,
-          33000,
-          35200,
-          36700,
-          38200,
-          40500,
-          42000,
-          43500,
-          45000,
-          46500,
-          48000,
-          50640,
-          52940,
-          55240,
-          57540,
-          59840
-        ]
-      },
-      "W7": {
-        "start_point": [
-          215835,
-          18400
-        ],
-        "end_point": [
-          229070,
-          18400
-        ],
-        "length": 13235,
-        "forbidden_points": [
-          2135,
-          2635,
-          4135,
-          4435,
-          5635,
-          6735,
-          8435,
-          9035,
-          9935,
-          11335,
-          11435
-        ]
-      },
-      "W8": {
-        "start_point": [
-          155650,
-          17300
-        ],
-        "end_point": [
-          215835,
-          17300
-        ],
-        "length": 60185,
-        "forbidden_points": [
-          1250,
-          2750,
-          4250,
-          7250,
-          8750,
-          10250,
-          12750,
-          14250,
-          15750,
-          18250,
-          19750,
-          21250,
-          24250,
-          25750,
-          27250,
-          30250,
-          31750,
-          33250,
-          35950,
-          37450,
-          38950,
-          40820,
-          42320,
-          43820,
-          46320,
-          47820,
-          49320,
-          51820,
-          53320,
-          54820,
-          56820,
-          58320,
-          59820
-        ]
-      },
-      "W9": {
-        "start_point": [
-          18205,
-          17250
-        ],
-        "end_point": [
-          155650,
-          17250
-        ],
-        "length": 137445,
-        "forbidden_points": [
-          395,
-          1895,
-          3395,
-          5895,
-          7395,
-          8895,
-          11895,
-          13395,
-          14895,
-          17895,
-          19395,
-          20895,
-          22895,
-          24395,
-          25895,
-          28895,
-          30395,
-          31895,
-          33895,
-          35395,
-          36895,
-          39395,
-          40895,
-          42395,
-          45195,
-          46695,
-          48195,
-          51195,
-          52695,
-          54195,
-          56395,
-          57895,
-          59395,
-          62395,
-          63895,
-          65395,
-          68195,
-          69695,
-          71195,
-          74195,
-          75695,
-          77195,
-          79195,
-          80695,
-          82195,
-          84695,
-          86195,
-          87695,
-          90195,
-          91695,
-          93195,
-          95195,
-          96695,
-          98195,
-          100195,
-          101695,
-          103195,
-          106195,
-          107695,
-          109195,
-          111195,
-          112695,
-          114195,
-          117195,
-          118695,
-          120195,
-          122195,
-          123695,
-          125195,
-          128195,
-          129695,
-          131195,
-          133195,
-          134695,
-          136195
-        ]
-      },
-      "W10": {
-        "start_point": [
-          0,
-          18400
-        ],
-        "end_point": [
-          18205,
-          18400
-        ],
-        "length": 18205,
-        "forbidden_points": [
-          1600,
-          2900,
-          3900,
-          4400,
-          5900,
-          6200,
-          8500,
-          11600,
-          13100,
-          14100,
-          15600
-        ]
-      },
-      "W11": {
-        "start_point": [
-          0,
-          -400
-        ],
-        "end_point": [
-          0,
-          18800
-        ],
-        "length": 19200,
-        "forbidden_points": [
-          2000,
-          4300,
-          6600,
-          8900,
-          10300,
-          12600,
-          14900,
-          17200
-        ]
-      }
-    }
-  },
-  "solver_settings": {
-    "waler": {
-      "generations": 10,
-      "population_size": 120,
-      "short_ratio": 20,
-      "mid_ratio": 50,
-      "long_ratio": 30,
-      "min_piece_length": 1000,
-      "max_piece_length": 10000,
-      "joint_clearance": 300,
-      "candidate_joint_step": 500,
-      "top_n": 5
-    },
-    "support": {
-      "max_steel_combination_count": 100,
-      "target_valid_candidate_count": 40,
-      "beam_width": 100
-    },
-    "export": {
-      "base_figsize": [
-        16,
-        10
-      ],
-      "dpi": 100,
-      "scale_options": [
-        100,
-        200,
-        400,
-        800
-      ],
-      "default_scale": 400
-    }
-  },
-  "parameters": {
-    "support_solver": {
-      "steel_lengths": [
-        1000,
-        1500,
-        2000,
-        2500,
-        3000,
-        3500,
-        4000,
-        4500,
-        5000,
-        5500,
-        6000,
-        6500,
-        7000,
-        7500,
-        8000,
-        8500,
-        9000,
-        9500,
-        10000
-      ],
-      "jack_length": 600,
-      "shim_lengths": [
-        0,
-        100,
-        150,
-        200,
-        300
-      ],
-      "max_gap": 150,
-      "target_gap": 80,
-      "min_end_clear": 1600,
-      "pile_forbidden_half": 730,
-      "waler_forbidden_half": 1130,
-      "min_jack_distance_between_supports": 600
-    }
-  }
+  "result": null
 }
