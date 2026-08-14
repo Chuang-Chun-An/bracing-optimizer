@@ -1,0 +1,3129 @@
+{
+  "ezdxf_version": "1.4.4",
+  "cases": [
+    {
+      "case": "01_original_source",
+      "path": "C:\\Users\\ChunAn\\support_distribution_uv\\project_cases\\Y1A站第一層支撐\\source\\source.dxf",
+      "size_bytes": 7388788,
+      "dxfversion": "AC1032",
+      "encoding": "cp950",
+      "counts": {
+        "entitydb": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "APPID": 33,
+          "ARC": 785,
+          "ATTDEF": 14,
+          "ATTRIB": 22,
+          "BLOCK": 353,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "BLOCK_RECORD": 353,
+          "CELLSTYLEMAP": 1,
+          "CIRCLE": 564,
+          "DICTIONARY": 279,
+          "DICTIONARYVAR": 9,
+          "DIMASSOC": 32,
+          "DIMENSION": 240,
+          "DIMSTYLE": 9,
+          "ELLIPSE": 1,
+          "ENDBLK": 353,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "HATCH": 95,
+          "INSERT": 236,
+          "LAYER": 123,
+          "LAYOUT": 2,
+          "LEADER": 5,
+          "LINE": 15377,
+          "LTYPE": 19,
+          "LWPOLYLINE": 801,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINE": 20,
+          "MLINESTYLE": 3,
+          "MTEXT": 312,
+          "PLOTSETTINGS": 4,
+          "POINT": 720,
+          "SCALE": 17,
+          "SEQEND": 236,
+          "SOLID": 402,
+          "SORTENTSTABLE": 23,
+          "SPLINE": 1,
+          "STYLE": 15,
+          "SUN": 3,
+          "TABLE": 9,
+          "TABLESTYLE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2,
+          "VISUALSTYLE": 24,
+          "VPORT": 1,
+          "XRECORD": 147
+        },
+        "modelspace": {
+          "CIRCLE": 3,
+          "DIMENSION": 92,
+          "HATCH": 20,
+          "INSERT": 79,
+          "LEADER": 5,
+          "LINE": 64,
+          "LWPOLYLINE": 46,
+          "MLINE": 20,
+          "MTEXT": 1,
+          "SOLID": 2,
+          "TEXT": 38
+        },
+        "block_content": {
+          "ARC": 785,
+          "ATTDEF": 14,
+          "CIRCLE": 564,
+          "DIMENSION": 240,
+          "ELLIPSE": 1,
+          "HATCH": 95,
+          "INSERT": 236,
+          "LEADER": 5,
+          "LINE": 15377,
+          "LWPOLYLINE": 801,
+          "MLINE": 20,
+          "MTEXT": 312,
+          "POINT": 720,
+          "SOLID": 402,
+          "SPLINE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2
+        },
+        "objects": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "CELLSTYLEMAP": 1,
+          "DICTIONARY": 279,
+          "DICTIONARYVAR": 9,
+          "DIMASSOC": 32,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "LAYOUT": 2,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINESTYLE": 3,
+          "PLOTSETTINGS": 4,
+          "SCALE": 17,
+          "SORTENTSTABLE": 23,
+          "SUN": 3,
+          "TABLESTYLE": 1,
+          "VISUALSTYLE": 24,
+          "XRECORD": 147
+        }
+      },
+      "dictionary": {
+        "total": 279,
+        "by_owner_type": {
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "BLOCK_RECORD": 37,
+          "DICTIONARY": 89,
+          "DIMENSION": 32,
+          "INSERT": 15,
+          "LAYER": 81,
+          "MATERIAL": 1,
+          "MISSING": 1,
+          "MTEXT": 1,
+          "TABLE": 1,
+          "TABLESTYLE": 1,
+          "TEXT": 18
+        },
+        "entry_keys": {
+          "1": 15,
+          "2dWireframe": 1,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "A0": 1,
+          "A1": 1,
+          "A1-PDF": 1,
+          "A2": 1,
+          "A3": 1,
+          "A3-PDF": 1,
+          "A3-POLT": 1,
+          "A4": 1,
+          "A5": 1,
+          "A6": 1,
+          "A7": 1,
+          "A8": 1,
+          "A9": 1,
+          "ACAD_ASSOCNETWORK": 4,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACAD_COLOR": 1,
+          "ACAD_DETAILVIEWSTYLE": 1,
+          "ACAD_DGNDEFINITIONS": 1,
+          "ACAD_DIMASSOC": 32,
+          "ACAD_DWFDEFINITIONS": 1,
+          "ACAD_ENHANCEDBLOCK": 15,
+          "ACAD_ENHANCEDBLOCKDATA": 15,
+          "ACAD_FIELD": 15,
+          "ACAD_FIELDLIST": 1,
+          "ACAD_GROUP": 1,
+          "ACAD_IMAGE_DICT": 1,
+          "ACAD_LAYERSTATES": 1,
+          "ACAD_LAYOUT": 1,
+          "ACAD_MATERIAL": 1,
+          "ACAD_MLEADERSTYLE": 1,
+          "ACAD_MLINESTYLE": 1,
+          "ACAD_PDFDEFINITIONS": 1,
+          "ACAD_PLOTSETTINGS": 1,
+          "ACAD_PLOTSTYLENAME": 1,
+          "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP": 1,
+          "ACAD_SCALELIST": 1,
+          "ACAD_SECTIONVIEWSTYLE": 1,
+          "ACAD_SORTENTS": 23,
+          "ACAD_TABLESTYLE": 1,
+          "ACAD_VISUALSTYLE": 1,
+          "ACDB_ANNOTATIONSCALES": 3,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "AEC_CLASSIFICATION_SYSTEM_DEFS": 1,
+          "AEC_PROPERTY_SET_DEFS": 1,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "ASE_INDEX_DICTIONARY": 1,
+          "AcDbBlockRepresentation": 15,
+          "AcDbContextDataManager": 3,
+          "AcDbDynamicBlockRoundTripPurgePreventer": 15,
+          "AcDbRepData": 15,
+          "AcDbVariableDictionary": 1,
+          "AcadDim": 1,
+          "AppDataCache": 15,
+          "B0": 1,
+          "B1": 1,
+          "B2": 1,
+          "B3": 1,
+          "B4": 1,
+          "B5": 1,
+          "B6": 1,
+          "Basic": 1,
+          "Brighten": 1,
+          "ByBlock": 1,
+          "ByLayer": 1,
+          "CANNOSCALE": 1,
+          "CMLEADERSTYLE": 1,
+          "CTABLESTYLE": 1,
+          "CVIEWDETAILSTYLE": 1,
+          "CVIEWSECTIONSTYLE": 1,
+          "ColorChange": 1,
+          "Conceptual": 1,
+          "DIMLAYER": 1,
+          "Dim": 1,
+          "EdgeColorOff": 1,
+          "FBXASSET": 1,
+          "Facepattern": 1,
+          "Flat": 1,
+          "FlatWithEdges": 1,
+          "Global": 1,
+          "Gouraud": 1,
+          "GouraudWithEdges": 1,
+          "HPCOLOR": 1,
+          "Hidden": 1,
+          "JitterOff": 1,
+          "Linepattern": 1,
+          "MSLTSCALE": 1,
+          "Metric50": 2,
+          "Model": 1,
+          "OverhangOff": 1,
+          "Realistic": 1,
+          "Shaded": 1,
+          "Shaded with edges": 1,
+          "Shades of Gray": 1,
+          "Sketchy": 1,
+          "Standard": 3,
+          "TEXT": 15,
+          "Thicken": 1,
+          "Wireframe": 1,
+          "X-Ray": 1,
+          "XCLIPFRAME": 1,
+          "_LAYISO_STATE": 1,
+          "中間樁": 1,
+          "影印出圖 3f": 1,
+          "槽鐵": 1,
+          "配置1": 1
+        }
+      },
+      "xrecord": {
+        "total": 147,
+        "by_dictionary_key": {
+          "1": 15,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "AcadDim": 1,
+          "FBXASSET": 1,
+          "_LAYISO_STATE": 1
+        },
+        "by_layer_resolution": {
+          "not layer-owned": 66,
+          "present": 81
+        }
+      },
+      "layer_table_entry_count": 106,
+      "duplicate_layer_records": {
+        "Defpoints": [
+          {
+            "handle": "23D",
+            "name": "Defpoints"
+          },
+          {
+            "handle": "CD2E4",
+            "name": "Defpoints"
+          }
+        ],
+        "A-WALL-PATT": [
+          {
+            "handle": "5D3B0",
+            "name": "A-WALL-PATT"
+          },
+          {
+            "handle": "CD94C",
+            "name": "A-WALL-PATT"
+          }
+        ],
+        "S-GRID-IDEN": [
+          {
+            "handle": "5D3B7",
+            "name": "S-GRID-IDEN"
+          },
+          {
+            "handle": "CD3CB",
+            "name": "S-GRID-IDEN"
+          }
+        ],
+        "ES-中間柱LINE線": [
+          {
+            "handle": "63E74",
+            "name": "ES-中間柱LINE線"
+          },
+          {
+            "handle": "CD57A",
+            "name": "ES-中間柱LINE線"
+          }
+        ],
+        "DIM-軸線X": [
+          {
+            "handle": "6420B",
+            "name": "DIM-軸線X"
+          },
+          {
+            "handle": "CD2F1",
+            "name": "DIM-軸線X"
+          }
+        ],
+        "ES-圍令背填": [
+          {
+            "handle": "6E528",
+            "name": "ES-圍令背填"
+          },
+          {
+            "handle": "CD51F",
+            "name": "ES-圍令背填"
+          }
+        ],
+        "ES-C380x100": [
+          {
+            "handle": "6FFAA",
+            "name": "ES-C380x100"
+          },
+          {
+            "handle": "CD909",
+            "name": "ES-C380x100"
+          }
+        ],
+        "ES-支撐DIM": [
+          {
+            "handle": "76B3A",
+            "name": "ES-支撐DIM"
+          },
+          {
+            "handle": "CD904",
+            "name": "ES-支撐DIM"
+          }
+        ],
+        "ES-大斜撐_支撐350x350": [
+          {
+            "handle": "77780",
+            "name": "ES-大斜撐_支撐350x350"
+          },
+          {
+            "handle": "CDA18",
+            "name": "ES-大斜撐_支撐350x350"
+          }
+        ],
+        "ES-圍令L1H414x405": [
+          {
+            "handle": "7A661",
+            "name": "ES-圍令L1H414x405"
+          },
+          {
+            "handle": "CF1A8",
+            "name": "ES-圍令L1H414x405"
+          }
+        ],
+        "ES-圍令L1H428x407": [
+          {
+            "handle": "7A66B",
+            "name": "ES-圍令L1H428x407"
+          },
+          {
+            "handle": "CF1AC",
+            "name": "ES-圍令L1H428x407"
+          }
+        ],
+        "ES-中間樁NO": [
+          {
+            "handle": "7CB81",
+            "name": "ES-中間樁NO"
+          },
+          {
+            "handle": "CD56F",
+            "name": "ES-中間樁NO"
+          }
+        ],
+        "ES-C250x90": [
+          {
+            "handle": "7CB90",
+            "name": "ES-C250x90"
+          },
+          {
+            "handle": "CD565",
+            "name": "ES-C250x90"
+          }
+        ],
+        "S": [
+          {
+            "handle": "98AA0",
+            "name": "S"
+          },
+          {
+            "handle": "CEA6C",
+            "name": "S"
+          }
+        ],
+        "ES-圍令RC": [
+          {
+            "handle": "A0E70",
+            "name": "ES-圍令RC"
+          },
+          {
+            "handle": "CE845",
+            "name": "ES-圍令RC"
+          }
+        ],
+        "dw": [
+          {
+            "handle": "B42AA",
+            "name": "dw"
+          },
+          {
+            "handle": "CF0E4",
+            "name": "dw"
+          }
+        ],
+        "A-ANNO-NOTE": [
+          {
+            "handle": "BD3ED",
+            "name": "A-ANNO-NOTE"
+          },
+          {
+            "handle": "CF66E",
+            "name": "A-ANNO-NOTE"
+          }
+        ]
+      },
+      "audit": {
+        "error_count": 0,
+        "fix_count": 0,
+        "issue_types": {},
+        "errors": [],
+        "fixes": [],
+        "post_audit_dictionary_total": 279,
+        "post_audit_xrecord_total": 147
+      }
+    },
+    {
+      "case": "02_immediate_saveas",
+      "path": "C:\\Users\\ChunAn\\support_distribution_uv\\tmp\\dxf_minimal_repro\\02_immediate_saveas.dxf",
+      "size_bytes": 6512094,
+      "dxfversion": "AC1032",
+      "encoding": "cp950",
+      "counts": {
+        "entitydb": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "APPID": 34,
+          "ARC": 785,
+          "ATTDEF": 14,
+          "ATTRIB": 22,
+          "BLOCK": 353,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "BLOCK_RECORD": 353,
+          "CELLSTYLEMAP": 1,
+          "CIRCLE": 564,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "DIMENSION": 240,
+          "DIMSTYLE": 9,
+          "ELLIPSE": 1,
+          "ENDBLK": 353,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "HATCH": 95,
+          "INSERT": 236,
+          "LAYER": 106,
+          "LAYOUT": 2,
+          "LEADER": 5,
+          "LINE": 15377,
+          "LTYPE": 19,
+          "LWPOLYLINE": 801,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINE": 20,
+          "MLINESTYLE": 3,
+          "MTEXT": 312,
+          "PLOTSETTINGS": 4,
+          "POINT": 720,
+          "SCALE": 17,
+          "SEQEND": 236,
+          "SOLID": 402,
+          "SORTENTSTABLE": 23,
+          "SPLINE": 1,
+          "STYLE": 15,
+          "SUN": 3,
+          "TABLE": 9,
+          "TABLESTYLE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2,
+          "VISUALSTYLE": 24,
+          "VPORT": 1,
+          "XRECORD": 147
+        },
+        "modelspace": {
+          "CIRCLE": 3,
+          "DIMENSION": 92,
+          "HATCH": 20,
+          "INSERT": 79,
+          "LEADER": 5,
+          "LINE": 64,
+          "LWPOLYLINE": 46,
+          "MLINE": 20,
+          "MTEXT": 1,
+          "SOLID": 2,
+          "TEXT": 38
+        },
+        "block_content": {
+          "ARC": 785,
+          "ATTDEF": 14,
+          "CIRCLE": 564,
+          "DIMENSION": 240,
+          "ELLIPSE": 1,
+          "HATCH": 95,
+          "INSERT": 236,
+          "LEADER": 5,
+          "LINE": 15377,
+          "LWPOLYLINE": 801,
+          "MLINE": 20,
+          "MTEXT": 312,
+          "POINT": 720,
+          "SOLID": 402,
+          "SPLINE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2
+        },
+        "objects": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "CELLSTYLEMAP": 1,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "LAYOUT": 2,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINESTYLE": 3,
+          "PLOTSETTINGS": 4,
+          "SCALE": 17,
+          "SORTENTSTABLE": 23,
+          "SUN": 3,
+          "TABLESTYLE": 1,
+          "VISUALSTYLE": 24,
+          "XRECORD": 147
+        }
+      },
+      "dictionary": {
+        "total": 280,
+        "by_owner_type": {
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "BLOCK_RECORD": 37,
+          "DICTIONARY": 90,
+          "DIMENSION": 32,
+          "INSERT": 15,
+          "LAYER": 69,
+          "MATERIAL": 1,
+          "MISSING": 13,
+          "MTEXT": 1,
+          "TABLE": 1,
+          "TABLESTYLE": 1,
+          "TEXT": 18
+        },
+        "entry_keys": {
+          "1": 15,
+          "2dWireframe": 1,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "A0": 1,
+          "A1": 1,
+          "A1-PDF": 1,
+          "A2": 1,
+          "A3": 1,
+          "A3-PDF": 1,
+          "A3-POLT": 1,
+          "A4": 1,
+          "A5": 1,
+          "A6": 1,
+          "A7": 1,
+          "A8": 1,
+          "A9": 1,
+          "ACAD_ASSOCNETWORK": 4,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACAD_COLOR": 1,
+          "ACAD_DETAILVIEWSTYLE": 1,
+          "ACAD_DGNDEFINITIONS": 1,
+          "ACAD_DIMASSOC": 32,
+          "ACAD_DWFDEFINITIONS": 1,
+          "ACAD_ENHANCEDBLOCK": 15,
+          "ACAD_ENHANCEDBLOCKDATA": 15,
+          "ACAD_FIELD": 15,
+          "ACAD_FIELDLIST": 1,
+          "ACAD_GROUP": 1,
+          "ACAD_IMAGE_DICT": 1,
+          "ACAD_LAYERSTATES": 1,
+          "ACAD_LAYOUT": 1,
+          "ACAD_MATERIAL": 1,
+          "ACAD_MLEADERSTYLE": 1,
+          "ACAD_MLINESTYLE": 1,
+          "ACAD_PDFDEFINITIONS": 1,
+          "ACAD_PLOTSETTINGS": 1,
+          "ACAD_PLOTSTYLENAME": 1,
+          "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP": 1,
+          "ACAD_SCALELIST": 1,
+          "ACAD_SECTIONVIEWSTYLE": 1,
+          "ACAD_SORTENTS": 23,
+          "ACAD_TABLESTYLE": 1,
+          "ACAD_VISUALSTYLE": 1,
+          "ACDB_ANNOTATIONSCALES": 3,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "AEC_CLASSIFICATION_SYSTEM_DEFS": 1,
+          "AEC_PROPERTY_SET_DEFS": 1,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "ASE_INDEX_DICTIONARY": 1,
+          "AcDbBlockRepresentation": 15,
+          "AcDbContextDataManager": 3,
+          "AcDbDynamicBlockRoundTripPurgePreventer": 15,
+          "AcDbRepData": 15,
+          "AcDbVariableDictionary": 1,
+          "AcadDim": 1,
+          "AppDataCache": 15,
+          "B0": 1,
+          "B1": 1,
+          "B2": 1,
+          "B3": 1,
+          "B4": 1,
+          "B5": 1,
+          "B6": 1,
+          "Basic": 1,
+          "Brighten": 1,
+          "ByBlock": 1,
+          "ByLayer": 1,
+          "CANNOSCALE": 1,
+          "CMLEADERSTYLE": 1,
+          "CTABLESTYLE": 1,
+          "CVIEWDETAILSTYLE": 1,
+          "CVIEWSECTIONSTYLE": 1,
+          "ColorChange": 1,
+          "Conceptual": 1,
+          "DIMLAYER": 1,
+          "Dim": 1,
+          "EZDXF_META": 1,
+          "EdgeColorOff": 1,
+          "FBXASSET": 1,
+          "Facepattern": 1,
+          "Flat": 1,
+          "FlatWithEdges": 1,
+          "Global": 1,
+          "Gouraud": 1,
+          "GouraudWithEdges": 1,
+          "HPCOLOR": 1,
+          "Hidden": 1,
+          "JitterOff": 1,
+          "Linepattern": 1,
+          "MSLTSCALE": 1,
+          "Metric50": 2,
+          "Model": 1,
+          "OverhangOff": 1,
+          "Realistic": 1,
+          "Shaded": 1,
+          "Shaded with edges": 1,
+          "Shades of Gray": 1,
+          "Sketchy": 1,
+          "Standard": 3,
+          "TEXT": 15,
+          "Thicken": 1,
+          "WRITTEN_BY_EZDXF": 1,
+          "Wireframe": 1,
+          "X-Ray": 1,
+          "XCLIPFRAME": 1,
+          "_LAYISO_STATE": 1,
+          "中間樁": 1,
+          "影印出圖 3f": 1,
+          "槽鐵": 1,
+          "配置1": 1
+        }
+      },
+      "xrecord": {
+        "total": 147,
+        "by_dictionary_key": {
+          "1": 15,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "AcadDim": 1,
+          "FBXASSET": 1,
+          "_LAYISO_STATE": 1
+        },
+        "by_layer_resolution": {
+          "missing_after_saveas": 12,
+          "not layer-owned": 66,
+          "present": 69
+        }
+      },
+      "layer_table_entry_count": 106,
+      "duplicate_layer_records": {},
+      "audit": {
+        "error_count": 0,
+        "fix_count": 12,
+        "issue_types": {
+          "fix:INVALID_OWNER_HANDLE": 12
+        },
+        "errors": [],
+        "fixes": [
+          {
+            "handle": "4704B",
+            "owner": "4704A",
+            "dictionary_handle": "4704A",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "23D",
+            "layer_name": "Defpoints",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "4704A",
+                "type": "DICTIONARY",
+                "owner": "23D"
+              },
+              {
+                "handle": "23D",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#4704B) entity with invalid owner handle #4704A.",
+            "reported_owner": "4704A"
+          },
+          {
+            "handle": "63E76",
+            "owner": "63E75",
+            "dictionary_handle": "63E75",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "63E74",
+            "layer_name": "ES-中間柱LINE線",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "63E75",
+                "type": "DICTIONARY",
+                "owner": "63E74"
+              },
+              {
+                "handle": "63E74",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#63E76) entity with invalid owner handle #63E75.",
+            "reported_owner": "63E75"
+          },
+          {
+            "handle": "6420D",
+            "owner": "6420C",
+            "dictionary_handle": "6420C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6420B",
+            "layer_name": "DIM-軸線X",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6420C",
+                "type": "DICTIONARY",
+                "owner": "6420B"
+              },
+              {
+                "handle": "6420B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6420D) entity with invalid owner handle #6420C.",
+            "reported_owner": "6420C"
+          },
+          {
+            "handle": "6E52A",
+            "owner": "6E529",
+            "dictionary_handle": "6E529",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6E528",
+            "layer_name": "ES-圍令背填",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6E529",
+                "type": "DICTIONARY",
+                "owner": "6E528"
+              },
+              {
+                "handle": "6E528",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6E52A) entity with invalid owner handle #6E529.",
+            "reported_owner": "6E529"
+          },
+          {
+            "handle": "6FFAC",
+            "owner": "6FFAB",
+            "dictionary_handle": "6FFAB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6FFAA",
+            "layer_name": "ES-C380x100",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6FFAB",
+                "type": "DICTIONARY",
+                "owner": "6FFAA"
+              },
+              {
+                "handle": "6FFAA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6FFAC) entity with invalid owner handle #6FFAB.",
+            "reported_owner": "6FFAB"
+          },
+          {
+            "handle": "76B3C",
+            "owner": "76B3B",
+            "dictionary_handle": "76B3B",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "76B3A",
+            "layer_name": "ES-支撐DIM",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "76B3B",
+                "type": "DICTIONARY",
+                "owner": "76B3A"
+              },
+              {
+                "handle": "76B3A",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#76B3C) entity with invalid owner handle #76B3B.",
+            "reported_owner": "76B3B"
+          },
+          {
+            "handle": "77782",
+            "owner": "77781",
+            "dictionary_handle": "77781",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "77780",
+            "layer_name": "ES-大斜撐_支撐350x350",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "77781",
+                "type": "DICTIONARY",
+                "owner": "77780"
+              },
+              {
+                "handle": "77780",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#77782) entity with invalid owner handle #77781.",
+            "reported_owner": "77781"
+          },
+          {
+            "handle": "7A663",
+            "owner": "7A662",
+            "dictionary_handle": "7A662",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A661",
+            "layer_name": "ES-圍令L1H414x405",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A662",
+                "type": "DICTIONARY",
+                "owner": "7A661"
+              },
+              {
+                "handle": "7A661",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A663) entity with invalid owner handle #7A662.",
+            "reported_owner": "7A662"
+          },
+          {
+            "handle": "7A66D",
+            "owner": "7A66C",
+            "dictionary_handle": "7A66C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A66B",
+            "layer_name": "ES-圍令L1H428x407",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A66C",
+                "type": "DICTIONARY",
+                "owner": "7A66B"
+              },
+              {
+                "handle": "7A66B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A66D) entity with invalid owner handle #7A66C.",
+            "reported_owner": "7A66C"
+          },
+          {
+            "handle": "7CB83",
+            "owner": "7CB82",
+            "dictionary_handle": "7CB82",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB81",
+            "layer_name": "ES-中間樁NO",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB82",
+                "type": "DICTIONARY",
+                "owner": "7CB81"
+              },
+              {
+                "handle": "7CB81",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB83) entity with invalid owner handle #7CB82.",
+            "reported_owner": "7CB82"
+          },
+          {
+            "handle": "7CB92",
+            "owner": "7CB91",
+            "dictionary_handle": "7CB91",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB90",
+            "layer_name": "ES-C250x90",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB91",
+                "type": "DICTIONARY",
+                "owner": "7CB90"
+              },
+              {
+                "handle": "7CB90",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB92) entity with invalid owner handle #7CB91.",
+            "reported_owner": "7CB91"
+          },
+          {
+            "handle": "B42AC",
+            "owner": "B42AB",
+            "dictionary_handle": "B42AB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "B42AA",
+            "layer_name": "dw",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "B42AB",
+                "type": "DICTIONARY",
+                "owner": "B42AA"
+              },
+              {
+                "handle": "B42AA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#B42AC) entity with invalid owner handle #B42AB.",
+            "reported_owner": "B42AB"
+          }
+        ],
+        "post_audit_dictionary_total": 268,
+        "post_audit_xrecord_total": 135
+      }
+    },
+    {
+      "case": "03_add_one_dimension",
+      "path": "C:\\Users\\ChunAn\\support_distribution_uv\\tmp\\dxf_minimal_repro\\03_add_one_dimension.dxf",
+      "size_bytes": 6515078,
+      "dxfversion": "AC1032",
+      "encoding": "cp950",
+      "counts": {
+        "entitydb": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "APPID": 34,
+          "ARC": 785,
+          "ATTDEF": 14,
+          "ATTRIB": 22,
+          "BLOCK": 355,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "BLOCK_RECORD": 355,
+          "CELLSTYLEMAP": 1,
+          "CIRCLE": 564,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "DIMENSION": 241,
+          "DIMSTYLE": 9,
+          "ELLIPSE": 1,
+          "ENDBLK": 355,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "HATCH": 95,
+          "INSERT": 238,
+          "LAYER": 106,
+          "LAYOUT": 2,
+          "LEADER": 5,
+          "LINE": 15381,
+          "LTYPE": 19,
+          "LWPOLYLINE": 801,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINE": 20,
+          "MLINESTYLE": 3,
+          "MTEXT": 313,
+          "PLOTSETTINGS": 4,
+          "POINT": 723,
+          "SCALE": 17,
+          "SEQEND": 238,
+          "SOLID": 403,
+          "SORTENTSTABLE": 23,
+          "SPLINE": 1,
+          "STYLE": 15,
+          "SUN": 3,
+          "TABLE": 9,
+          "TABLESTYLE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2,
+          "VISUALSTYLE": 24,
+          "VPORT": 1,
+          "XRECORD": 147
+        },
+        "modelspace": {
+          "CIRCLE": 3,
+          "DIMENSION": 93,
+          "HATCH": 20,
+          "INSERT": 79,
+          "LEADER": 5,
+          "LINE": 64,
+          "LWPOLYLINE": 46,
+          "MLINE": 20,
+          "MTEXT": 1,
+          "SOLID": 2,
+          "TEXT": 38
+        },
+        "block_content": {
+          "ARC": 785,
+          "ATTDEF": 14,
+          "CIRCLE": 564,
+          "DIMENSION": 241,
+          "ELLIPSE": 1,
+          "HATCH": 95,
+          "INSERT": 238,
+          "LEADER": 5,
+          "LINE": 15381,
+          "LWPOLYLINE": 801,
+          "MLINE": 20,
+          "MTEXT": 313,
+          "POINT": 723,
+          "SOLID": 403,
+          "SPLINE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2
+        },
+        "objects": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "CELLSTYLEMAP": 1,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "LAYOUT": 2,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINESTYLE": 3,
+          "PLOTSETTINGS": 4,
+          "SCALE": 17,
+          "SORTENTSTABLE": 23,
+          "SUN": 3,
+          "TABLESTYLE": 1,
+          "VISUALSTYLE": 24,
+          "XRECORD": 147
+        }
+      },
+      "dictionary": {
+        "total": 280,
+        "by_owner_type": {
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "BLOCK_RECORD": 37,
+          "DICTIONARY": 90,
+          "DIMENSION": 32,
+          "INSERT": 15,
+          "LAYER": 69,
+          "MATERIAL": 1,
+          "MISSING": 13,
+          "MTEXT": 1,
+          "TABLE": 1,
+          "TABLESTYLE": 1,
+          "TEXT": 18
+        },
+        "entry_keys": {
+          "1": 15,
+          "2dWireframe": 1,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "A0": 1,
+          "A1": 1,
+          "A1-PDF": 1,
+          "A2": 1,
+          "A3": 1,
+          "A3-PDF": 1,
+          "A3-POLT": 1,
+          "A4": 1,
+          "A5": 1,
+          "A6": 1,
+          "A7": 1,
+          "A8": 1,
+          "A9": 1,
+          "ACAD_ASSOCNETWORK": 4,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACAD_COLOR": 1,
+          "ACAD_DETAILVIEWSTYLE": 1,
+          "ACAD_DGNDEFINITIONS": 1,
+          "ACAD_DIMASSOC": 32,
+          "ACAD_DWFDEFINITIONS": 1,
+          "ACAD_ENHANCEDBLOCK": 15,
+          "ACAD_ENHANCEDBLOCKDATA": 15,
+          "ACAD_FIELD": 15,
+          "ACAD_FIELDLIST": 1,
+          "ACAD_GROUP": 1,
+          "ACAD_IMAGE_DICT": 1,
+          "ACAD_LAYERSTATES": 1,
+          "ACAD_LAYOUT": 1,
+          "ACAD_MATERIAL": 1,
+          "ACAD_MLEADERSTYLE": 1,
+          "ACAD_MLINESTYLE": 1,
+          "ACAD_PDFDEFINITIONS": 1,
+          "ACAD_PLOTSETTINGS": 1,
+          "ACAD_PLOTSTYLENAME": 1,
+          "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP": 1,
+          "ACAD_SCALELIST": 1,
+          "ACAD_SECTIONVIEWSTYLE": 1,
+          "ACAD_SORTENTS": 23,
+          "ACAD_TABLESTYLE": 1,
+          "ACAD_VISUALSTYLE": 1,
+          "ACDB_ANNOTATIONSCALES": 3,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "AEC_CLASSIFICATION_SYSTEM_DEFS": 1,
+          "AEC_PROPERTY_SET_DEFS": 1,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "ASE_INDEX_DICTIONARY": 1,
+          "AcDbBlockRepresentation": 15,
+          "AcDbContextDataManager": 3,
+          "AcDbDynamicBlockRoundTripPurgePreventer": 15,
+          "AcDbRepData": 15,
+          "AcDbVariableDictionary": 1,
+          "AcadDim": 1,
+          "AppDataCache": 15,
+          "B0": 1,
+          "B1": 1,
+          "B2": 1,
+          "B3": 1,
+          "B4": 1,
+          "B5": 1,
+          "B6": 1,
+          "Basic": 1,
+          "Brighten": 1,
+          "ByBlock": 1,
+          "ByLayer": 1,
+          "CANNOSCALE": 1,
+          "CMLEADERSTYLE": 1,
+          "CTABLESTYLE": 1,
+          "CVIEWDETAILSTYLE": 1,
+          "CVIEWSECTIONSTYLE": 1,
+          "ColorChange": 1,
+          "Conceptual": 1,
+          "DIMLAYER": 1,
+          "Dim": 1,
+          "EZDXF_META": 1,
+          "EdgeColorOff": 1,
+          "FBXASSET": 1,
+          "Facepattern": 1,
+          "Flat": 1,
+          "FlatWithEdges": 1,
+          "Global": 1,
+          "Gouraud": 1,
+          "GouraudWithEdges": 1,
+          "HPCOLOR": 1,
+          "Hidden": 1,
+          "JitterOff": 1,
+          "Linepattern": 1,
+          "MSLTSCALE": 1,
+          "Metric50": 2,
+          "Model": 1,
+          "OverhangOff": 1,
+          "Realistic": 1,
+          "Shaded": 1,
+          "Shaded with edges": 1,
+          "Shades of Gray": 1,
+          "Sketchy": 1,
+          "Standard": 3,
+          "TEXT": 15,
+          "Thicken": 1,
+          "WRITTEN_BY_EZDXF": 1,
+          "Wireframe": 1,
+          "X-Ray": 1,
+          "XCLIPFRAME": 1,
+          "_LAYISO_STATE": 1,
+          "中間樁": 1,
+          "影印出圖 3f": 1,
+          "槽鐵": 1,
+          "配置1": 1
+        }
+      },
+      "xrecord": {
+        "total": 147,
+        "by_dictionary_key": {
+          "1": 15,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "AcadDim": 1,
+          "FBXASSET": 1,
+          "_LAYISO_STATE": 1
+        },
+        "by_layer_resolution": {
+          "missing_after_saveas": 12,
+          "not layer-owned": 66,
+          "present": 69
+        }
+      },
+      "layer_table_entry_count": 106,
+      "duplicate_layer_records": {},
+      "audit": {
+        "error_count": 0,
+        "fix_count": 12,
+        "issue_types": {
+          "fix:INVALID_OWNER_HANDLE": 12
+        },
+        "errors": [],
+        "fixes": [
+          {
+            "handle": "4704B",
+            "owner": "4704A",
+            "dictionary_handle": "4704A",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "23D",
+            "layer_name": "Defpoints",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "4704A",
+                "type": "DICTIONARY",
+                "owner": "23D"
+              },
+              {
+                "handle": "23D",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#4704B) entity with invalid owner handle #4704A.",
+            "reported_owner": "4704A"
+          },
+          {
+            "handle": "63E76",
+            "owner": "63E75",
+            "dictionary_handle": "63E75",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "63E74",
+            "layer_name": "ES-中間柱LINE線",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "63E75",
+                "type": "DICTIONARY",
+                "owner": "63E74"
+              },
+              {
+                "handle": "63E74",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#63E76) entity with invalid owner handle #63E75.",
+            "reported_owner": "63E75"
+          },
+          {
+            "handle": "6420D",
+            "owner": "6420C",
+            "dictionary_handle": "6420C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6420B",
+            "layer_name": "DIM-軸線X",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6420C",
+                "type": "DICTIONARY",
+                "owner": "6420B"
+              },
+              {
+                "handle": "6420B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6420D) entity with invalid owner handle #6420C.",
+            "reported_owner": "6420C"
+          },
+          {
+            "handle": "6E52A",
+            "owner": "6E529",
+            "dictionary_handle": "6E529",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6E528",
+            "layer_name": "ES-圍令背填",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6E529",
+                "type": "DICTIONARY",
+                "owner": "6E528"
+              },
+              {
+                "handle": "6E528",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6E52A) entity with invalid owner handle #6E529.",
+            "reported_owner": "6E529"
+          },
+          {
+            "handle": "6FFAC",
+            "owner": "6FFAB",
+            "dictionary_handle": "6FFAB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6FFAA",
+            "layer_name": "ES-C380x100",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6FFAB",
+                "type": "DICTIONARY",
+                "owner": "6FFAA"
+              },
+              {
+                "handle": "6FFAA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6FFAC) entity with invalid owner handle #6FFAB.",
+            "reported_owner": "6FFAB"
+          },
+          {
+            "handle": "76B3C",
+            "owner": "76B3B",
+            "dictionary_handle": "76B3B",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "76B3A",
+            "layer_name": "ES-支撐DIM",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "76B3B",
+                "type": "DICTIONARY",
+                "owner": "76B3A"
+              },
+              {
+                "handle": "76B3A",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#76B3C) entity with invalid owner handle #76B3B.",
+            "reported_owner": "76B3B"
+          },
+          {
+            "handle": "77782",
+            "owner": "77781",
+            "dictionary_handle": "77781",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "77780",
+            "layer_name": "ES-大斜撐_支撐350x350",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "77781",
+                "type": "DICTIONARY",
+                "owner": "77780"
+              },
+              {
+                "handle": "77780",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#77782) entity with invalid owner handle #77781.",
+            "reported_owner": "77781"
+          },
+          {
+            "handle": "7A663",
+            "owner": "7A662",
+            "dictionary_handle": "7A662",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A661",
+            "layer_name": "ES-圍令L1H414x405",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A662",
+                "type": "DICTIONARY",
+                "owner": "7A661"
+              },
+              {
+                "handle": "7A661",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A663) entity with invalid owner handle #7A662.",
+            "reported_owner": "7A662"
+          },
+          {
+            "handle": "7A66D",
+            "owner": "7A66C",
+            "dictionary_handle": "7A66C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A66B",
+            "layer_name": "ES-圍令L1H428x407",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A66C",
+                "type": "DICTIONARY",
+                "owner": "7A66B"
+              },
+              {
+                "handle": "7A66B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A66D) entity with invalid owner handle #7A66C.",
+            "reported_owner": "7A66C"
+          },
+          {
+            "handle": "7CB83",
+            "owner": "7CB82",
+            "dictionary_handle": "7CB82",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB81",
+            "layer_name": "ES-中間樁NO",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB82",
+                "type": "DICTIONARY",
+                "owner": "7CB81"
+              },
+              {
+                "handle": "7CB81",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB83) entity with invalid owner handle #7CB82.",
+            "reported_owner": "7CB82"
+          },
+          {
+            "handle": "7CB92",
+            "owner": "7CB91",
+            "dictionary_handle": "7CB91",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB90",
+            "layer_name": "ES-C250x90",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB91",
+                "type": "DICTIONARY",
+                "owner": "7CB90"
+              },
+              {
+                "handle": "7CB90",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB92) entity with invalid owner handle #7CB91.",
+            "reported_owner": "7CB91"
+          },
+          {
+            "handle": "B42AC",
+            "owner": "B42AB",
+            "dictionary_handle": "B42AB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "B42AA",
+            "layer_name": "dw",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "B42AB",
+                "type": "DICTIONARY",
+                "owner": "B42AA"
+              },
+              {
+                "handle": "B42AA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#B42AC) entity with invalid owner handle #B42AB.",
+            "reported_owner": "B42AB"
+          }
+        ],
+        "post_audit_dictionary_total": 268,
+        "post_audit_xrecord_total": 135
+      }
+    },
+    {
+      "case": "04_add_jack_block",
+      "path": "C:\\Users\\ChunAn\\support_distribution_uv\\tmp\\dxf_minimal_repro\\04_add_jack_block.dxf",
+      "size_bytes": 6525796,
+      "dxfversion": "AC1032",
+      "encoding": "cp950",
+      "counts": {
+        "entitydb": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "APPID": 34,
+          "ARC": 785,
+          "ATTDEF": 14,
+          "ATTRIB": 22,
+          "BLOCK": 354,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "BLOCK_RECORD": 354,
+          "CELLSTYLEMAP": 1,
+          "CIRCLE": 565,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "DIMENSION": 240,
+          "DIMSTYLE": 9,
+          "ELLIPSE": 1,
+          "ENDBLK": 354,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "HATCH": 95,
+          "INSERT": 237,
+          "LAYER": 106,
+          "LAYOUT": 2,
+          "LEADER": 5,
+          "LINE": 15448,
+          "LTYPE": 19,
+          "LWPOLYLINE": 801,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINE": 20,
+          "MLINESTYLE": 3,
+          "MTEXT": 312,
+          "PLOTSETTINGS": 4,
+          "POINT": 720,
+          "SCALE": 17,
+          "SEQEND": 237,
+          "SOLID": 402,
+          "SORTENTSTABLE": 23,
+          "SPLINE": 1,
+          "STYLE": 15,
+          "SUN": 3,
+          "TABLE": 9,
+          "TABLESTYLE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2,
+          "VISUALSTYLE": 24,
+          "VPORT": 1,
+          "XRECORD": 147
+        },
+        "modelspace": {
+          "CIRCLE": 3,
+          "DIMENSION": 92,
+          "HATCH": 20,
+          "INSERT": 80,
+          "LEADER": 5,
+          "LINE": 64,
+          "LWPOLYLINE": 46,
+          "MLINE": 20,
+          "MTEXT": 1,
+          "SOLID": 2,
+          "TEXT": 38
+        },
+        "block_content": {
+          "ARC": 785,
+          "ATTDEF": 14,
+          "CIRCLE": 565,
+          "DIMENSION": 240,
+          "ELLIPSE": 1,
+          "HATCH": 95,
+          "INSERT": 237,
+          "LEADER": 5,
+          "LINE": 15448,
+          "LWPOLYLINE": 801,
+          "MLINE": 20,
+          "MTEXT": 312,
+          "POINT": 720,
+          "SOLID": 402,
+          "SPLINE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2
+        },
+        "objects": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "CELLSTYLEMAP": 1,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "LAYOUT": 2,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINESTYLE": 3,
+          "PLOTSETTINGS": 4,
+          "SCALE": 17,
+          "SORTENTSTABLE": 23,
+          "SUN": 3,
+          "TABLESTYLE": 1,
+          "VISUALSTYLE": 24,
+          "XRECORD": 147
+        }
+      },
+      "dictionary": {
+        "total": 280,
+        "by_owner_type": {
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "BLOCK_RECORD": 37,
+          "DICTIONARY": 90,
+          "DIMENSION": 32,
+          "INSERT": 15,
+          "LAYER": 69,
+          "MATERIAL": 1,
+          "MISSING": 13,
+          "MTEXT": 1,
+          "TABLE": 1,
+          "TABLESTYLE": 1,
+          "TEXT": 18
+        },
+        "entry_keys": {
+          "1": 15,
+          "2dWireframe": 1,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "A0": 1,
+          "A1": 1,
+          "A1-PDF": 1,
+          "A2": 1,
+          "A3": 1,
+          "A3-PDF": 1,
+          "A3-POLT": 1,
+          "A4": 1,
+          "A5": 1,
+          "A6": 1,
+          "A7": 1,
+          "A8": 1,
+          "A9": 1,
+          "ACAD_ASSOCNETWORK": 4,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACAD_COLOR": 1,
+          "ACAD_DETAILVIEWSTYLE": 1,
+          "ACAD_DGNDEFINITIONS": 1,
+          "ACAD_DIMASSOC": 32,
+          "ACAD_DWFDEFINITIONS": 1,
+          "ACAD_ENHANCEDBLOCK": 15,
+          "ACAD_ENHANCEDBLOCKDATA": 15,
+          "ACAD_FIELD": 15,
+          "ACAD_FIELDLIST": 1,
+          "ACAD_GROUP": 1,
+          "ACAD_IMAGE_DICT": 1,
+          "ACAD_LAYERSTATES": 1,
+          "ACAD_LAYOUT": 1,
+          "ACAD_MATERIAL": 1,
+          "ACAD_MLEADERSTYLE": 1,
+          "ACAD_MLINESTYLE": 1,
+          "ACAD_PDFDEFINITIONS": 1,
+          "ACAD_PLOTSETTINGS": 1,
+          "ACAD_PLOTSTYLENAME": 1,
+          "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP": 1,
+          "ACAD_SCALELIST": 1,
+          "ACAD_SECTIONVIEWSTYLE": 1,
+          "ACAD_SORTENTS": 23,
+          "ACAD_TABLESTYLE": 1,
+          "ACAD_VISUALSTYLE": 1,
+          "ACDB_ANNOTATIONSCALES": 3,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "AEC_CLASSIFICATION_SYSTEM_DEFS": 1,
+          "AEC_PROPERTY_SET_DEFS": 1,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "ASE_INDEX_DICTIONARY": 1,
+          "AcDbBlockRepresentation": 15,
+          "AcDbContextDataManager": 3,
+          "AcDbDynamicBlockRoundTripPurgePreventer": 15,
+          "AcDbRepData": 15,
+          "AcDbVariableDictionary": 1,
+          "AcadDim": 1,
+          "AppDataCache": 15,
+          "B0": 1,
+          "B1": 1,
+          "B2": 1,
+          "B3": 1,
+          "B4": 1,
+          "B5": 1,
+          "B6": 1,
+          "Basic": 1,
+          "Brighten": 1,
+          "ByBlock": 1,
+          "ByLayer": 1,
+          "CANNOSCALE": 1,
+          "CMLEADERSTYLE": 1,
+          "CTABLESTYLE": 1,
+          "CVIEWDETAILSTYLE": 1,
+          "CVIEWSECTIONSTYLE": 1,
+          "ColorChange": 1,
+          "Conceptual": 1,
+          "DIMLAYER": 1,
+          "Dim": 1,
+          "EZDXF_META": 1,
+          "EdgeColorOff": 1,
+          "FBXASSET": 1,
+          "Facepattern": 1,
+          "Flat": 1,
+          "FlatWithEdges": 1,
+          "Global": 1,
+          "Gouraud": 1,
+          "GouraudWithEdges": 1,
+          "HPCOLOR": 1,
+          "Hidden": 1,
+          "JitterOff": 1,
+          "Linepattern": 1,
+          "MSLTSCALE": 1,
+          "Metric50": 2,
+          "Model": 1,
+          "OverhangOff": 1,
+          "Realistic": 1,
+          "Shaded": 1,
+          "Shaded with edges": 1,
+          "Shades of Gray": 1,
+          "Sketchy": 1,
+          "Standard": 3,
+          "TEXT": 15,
+          "Thicken": 1,
+          "WRITTEN_BY_EZDXF": 1,
+          "Wireframe": 1,
+          "X-Ray": 1,
+          "XCLIPFRAME": 1,
+          "_LAYISO_STATE": 1,
+          "中間樁": 1,
+          "影印出圖 3f": 1,
+          "槽鐵": 1,
+          "配置1": 1
+        }
+      },
+      "xrecord": {
+        "total": 147,
+        "by_dictionary_key": {
+          "1": 15,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "AcadDim": 1,
+          "FBXASSET": 1,
+          "_LAYISO_STATE": 1
+        },
+        "by_layer_resolution": {
+          "missing_after_saveas": 12,
+          "not layer-owned": 66,
+          "present": 69
+        }
+      },
+      "layer_table_entry_count": 106,
+      "duplicate_layer_records": {},
+      "audit": {
+        "error_count": 0,
+        "fix_count": 12,
+        "issue_types": {
+          "fix:INVALID_OWNER_HANDLE": 12
+        },
+        "errors": [],
+        "fixes": [
+          {
+            "handle": "4704B",
+            "owner": "4704A",
+            "dictionary_handle": "4704A",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "23D",
+            "layer_name": "Defpoints",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "4704A",
+                "type": "DICTIONARY",
+                "owner": "23D"
+              },
+              {
+                "handle": "23D",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#4704B) entity with invalid owner handle #4704A.",
+            "reported_owner": "4704A"
+          },
+          {
+            "handle": "63E76",
+            "owner": "63E75",
+            "dictionary_handle": "63E75",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "63E74",
+            "layer_name": "ES-中間柱LINE線",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "63E75",
+                "type": "DICTIONARY",
+                "owner": "63E74"
+              },
+              {
+                "handle": "63E74",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#63E76) entity with invalid owner handle #63E75.",
+            "reported_owner": "63E75"
+          },
+          {
+            "handle": "6420D",
+            "owner": "6420C",
+            "dictionary_handle": "6420C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6420B",
+            "layer_name": "DIM-軸線X",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6420C",
+                "type": "DICTIONARY",
+                "owner": "6420B"
+              },
+              {
+                "handle": "6420B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6420D) entity with invalid owner handle #6420C.",
+            "reported_owner": "6420C"
+          },
+          {
+            "handle": "6E52A",
+            "owner": "6E529",
+            "dictionary_handle": "6E529",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6E528",
+            "layer_name": "ES-圍令背填",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6E529",
+                "type": "DICTIONARY",
+                "owner": "6E528"
+              },
+              {
+                "handle": "6E528",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6E52A) entity with invalid owner handle #6E529.",
+            "reported_owner": "6E529"
+          },
+          {
+            "handle": "6FFAC",
+            "owner": "6FFAB",
+            "dictionary_handle": "6FFAB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6FFAA",
+            "layer_name": "ES-C380x100",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6FFAB",
+                "type": "DICTIONARY",
+                "owner": "6FFAA"
+              },
+              {
+                "handle": "6FFAA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6FFAC) entity with invalid owner handle #6FFAB.",
+            "reported_owner": "6FFAB"
+          },
+          {
+            "handle": "76B3C",
+            "owner": "76B3B",
+            "dictionary_handle": "76B3B",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "76B3A",
+            "layer_name": "ES-支撐DIM",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "76B3B",
+                "type": "DICTIONARY",
+                "owner": "76B3A"
+              },
+              {
+                "handle": "76B3A",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#76B3C) entity with invalid owner handle #76B3B.",
+            "reported_owner": "76B3B"
+          },
+          {
+            "handle": "77782",
+            "owner": "77781",
+            "dictionary_handle": "77781",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "77780",
+            "layer_name": "ES-大斜撐_支撐350x350",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "77781",
+                "type": "DICTIONARY",
+                "owner": "77780"
+              },
+              {
+                "handle": "77780",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#77782) entity with invalid owner handle #77781.",
+            "reported_owner": "77781"
+          },
+          {
+            "handle": "7A663",
+            "owner": "7A662",
+            "dictionary_handle": "7A662",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A661",
+            "layer_name": "ES-圍令L1H414x405",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A662",
+                "type": "DICTIONARY",
+                "owner": "7A661"
+              },
+              {
+                "handle": "7A661",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A663) entity with invalid owner handle #7A662.",
+            "reported_owner": "7A662"
+          },
+          {
+            "handle": "7A66D",
+            "owner": "7A66C",
+            "dictionary_handle": "7A66C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A66B",
+            "layer_name": "ES-圍令L1H428x407",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A66C",
+                "type": "DICTIONARY",
+                "owner": "7A66B"
+              },
+              {
+                "handle": "7A66B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A66D) entity with invalid owner handle #7A66C.",
+            "reported_owner": "7A66C"
+          },
+          {
+            "handle": "7CB83",
+            "owner": "7CB82",
+            "dictionary_handle": "7CB82",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB81",
+            "layer_name": "ES-中間樁NO",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB82",
+                "type": "DICTIONARY",
+                "owner": "7CB81"
+              },
+              {
+                "handle": "7CB81",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB83) entity with invalid owner handle #7CB82.",
+            "reported_owner": "7CB82"
+          },
+          {
+            "handle": "7CB92",
+            "owner": "7CB91",
+            "dictionary_handle": "7CB91",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB90",
+            "layer_name": "ES-C250x90",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB91",
+                "type": "DICTIONARY",
+                "owner": "7CB90"
+              },
+              {
+                "handle": "7CB90",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB92) entity with invalid owner handle #7CB91.",
+            "reported_owner": "7CB91"
+          },
+          {
+            "handle": "B42AC",
+            "owner": "B42AB",
+            "dictionary_handle": "B42AB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "B42AA",
+            "layer_name": "dw",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "B42AB",
+                "type": "DICTIONARY",
+                "owner": "B42AA"
+              },
+              {
+                "handle": "B42AA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#B42AC) entity with invalid owner handle #B42AB.",
+            "reported_owner": "B42AB"
+          }
+        ],
+        "post_audit_dictionary_total": 268,
+        "post_audit_xrecord_total": 135
+      }
+    },
+    {
+      "case": "05_full_export",
+      "path": "C:\\Users\\ChunAn\\support_distribution_uv\\source_配置標註.dxf",
+      "size_bytes": 6849061,
+      "dxfversion": "AC1032",
+      "encoding": "cp950",
+      "counts": {
+        "entitydb": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "APPID": 35,
+          "ARC": 785,
+          "ATTDEF": 14,
+          "ATTRIB": 22,
+          "BLOCK": 467,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "BLOCK_RECORD": 467,
+          "CELLSTYLEMAP": 1,
+          "CIRCLE": 565,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "DIMENSION": 352,
+          "DIMSTYLE": 10,
+          "ELLIPSE": 1,
+          "ENDBLK": 467,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "HATCH": 95,
+          "INSERT": 475,
+          "LAYER": 106,
+          "LAYOUT": 2,
+          "LEADER": 5,
+          "LINE": 15930,
+          "LTYPE": 19,
+          "LWPOLYLINE": 801,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINE": 20,
+          "MLINESTYLE": 3,
+          "MTEXT": 424,
+          "PLOTSETTINGS": 4,
+          "POINT": 1056,
+          "SCALE": 17,
+          "SEQEND": 475,
+          "SOLID": 403,
+          "SORTENTSTABLE": 23,
+          "SPLINE": 1,
+          "STYLE": 15,
+          "SUN": 3,
+          "TABLE": 9,
+          "TABLESTYLE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2,
+          "VISUALSTYLE": 24,
+          "VPORT": 1,
+          "XRECORD": 147
+        },
+        "modelspace": {
+          "CIRCLE": 3,
+          "DIMENSION": 204,
+          "HATCH": 20,
+          "INSERT": 94,
+          "LEADER": 5,
+          "LINE": 64,
+          "LWPOLYLINE": 46,
+          "MLINE": 20,
+          "MTEXT": 1,
+          "SOLID": 2,
+          "TEXT": 38
+        },
+        "block_content": {
+          "ARC": 785,
+          "ATTDEF": 14,
+          "CIRCLE": 565,
+          "DIMENSION": 352,
+          "ELLIPSE": 1,
+          "HATCH": 95,
+          "INSERT": 475,
+          "LEADER": 5,
+          "LINE": 15930,
+          "LWPOLYLINE": 801,
+          "MLINE": 20,
+          "MTEXT": 424,
+          "POINT": 1056,
+          "SOLID": 403,
+          "SPLINE": 1,
+          "TEXT": 762,
+          "VIEWPORT": 2
+        },
+        "objects": {
+          "ACAD_EVALUATION_GRAPH": 15,
+          "ACDBASSOCACTION": 7,
+          "ACDBASSOCARRAYACTIONBODY": 7,
+          "ACDBASSOCDEPENDENCY": 21,
+          "ACDBASSOCEDGEACTIONPARAM": 3,
+          "ACDBASSOCNETWORK": 2,
+          "ACDBASSOCVERTEXACTIONPARAM": 21,
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBDICTIONARYWDFLT": 1,
+          "ACDBPLACEHOLDER": 3,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "ACDB_BLOCKREPRESENTATION_DATA": 15,
+          "ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION": 15,
+          "BLOCKGRIPLOCATIONCOMPONENT": 30,
+          "BLOCKLINEARGRIP": 14,
+          "BLOCKLINEARPARAMETER": 14,
+          "BLOCKMOVEACTION": 3,
+          "BLOCKSTRETCHACTION": 28,
+          "BLOCKVISIBILITYGRIP": 1,
+          "BLOCKVISIBILITYPARAMETER": 1,
+          "CELLSTYLEMAP": 1,
+          "DICTIONARY": 280,
+          "DICTIONARYVAR": 10,
+          "DIMASSOC": 32,
+          "FIELD": 30,
+          "FIELDLIST": 1,
+          "LAYOUT": 2,
+          "MATERIAL": 3,
+          "MLEADERSTYLE": 1,
+          "MLINESTYLE": 3,
+          "PLOTSETTINGS": 4,
+          "SCALE": 17,
+          "SORTENTSTABLE": 23,
+          "SUN": 3,
+          "TABLESTYLE": 1,
+          "VISUALSTYLE": 24,
+          "XRECORD": 147
+        }
+      },
+      "dictionary": {
+        "total": 280,
+        "by_owner_type": {
+          "ACDBDETAILVIEWSTYLE": 1,
+          "ACDBSECTIONVIEWSTYLE": 1,
+          "BLOCK_RECORD": 37,
+          "DICTIONARY": 90,
+          "DIMENSION": 32,
+          "INSERT": 15,
+          "LAYER": 69,
+          "MATERIAL": 1,
+          "MISSING": 13,
+          "MTEXT": 1,
+          "TABLE": 1,
+          "TABLESTYLE": 1,
+          "TEXT": 18
+        },
+        "entry_keys": {
+          "1": 15,
+          "2dWireframe": 1,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "A0": 1,
+          "A1": 1,
+          "A1-PDF": 1,
+          "A2": 1,
+          "A3": 1,
+          "A3-PDF": 1,
+          "A3-POLT": 1,
+          "A4": 1,
+          "A5": 1,
+          "A6": 1,
+          "A7": 1,
+          "A8": 1,
+          "A9": 1,
+          "ACAD_ASSOCNETWORK": 4,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACAD_COLOR": 1,
+          "ACAD_DETAILVIEWSTYLE": 1,
+          "ACAD_DGNDEFINITIONS": 1,
+          "ACAD_DIMASSOC": 32,
+          "ACAD_DWFDEFINITIONS": 1,
+          "ACAD_ENHANCEDBLOCK": 15,
+          "ACAD_ENHANCEDBLOCKDATA": 15,
+          "ACAD_FIELD": 15,
+          "ACAD_FIELDLIST": 1,
+          "ACAD_GROUP": 1,
+          "ACAD_IMAGE_DICT": 1,
+          "ACAD_LAYERSTATES": 1,
+          "ACAD_LAYOUT": 1,
+          "ACAD_MATERIAL": 1,
+          "ACAD_MLEADERSTYLE": 1,
+          "ACAD_MLINESTYLE": 1,
+          "ACAD_PDFDEFINITIONS": 1,
+          "ACAD_PLOTSETTINGS": 1,
+          "ACAD_PLOTSTYLENAME": 1,
+          "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP": 1,
+          "ACAD_SCALELIST": 1,
+          "ACAD_SECTIONVIEWSTYLE": 1,
+          "ACAD_SORTENTS": 23,
+          "ACAD_TABLESTYLE": 1,
+          "ACAD_VISUALSTYLE": 1,
+          "ACDB_ANNOTATIONSCALES": 3,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "AEC_CLASSIFICATION_SYSTEM_DEFS": 1,
+          "AEC_PROPERTY_SET_DEFS": 1,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "ASE_INDEX_DICTIONARY": 1,
+          "AcDbBlockRepresentation": 15,
+          "AcDbContextDataManager": 3,
+          "AcDbDynamicBlockRoundTripPurgePreventer": 15,
+          "AcDbRepData": 15,
+          "AcDbVariableDictionary": 1,
+          "AcadDim": 1,
+          "AppDataCache": 15,
+          "B0": 1,
+          "B1": 1,
+          "B2": 1,
+          "B3": 1,
+          "B4": 1,
+          "B5": 1,
+          "B6": 1,
+          "Basic": 1,
+          "Brighten": 1,
+          "ByBlock": 1,
+          "ByLayer": 1,
+          "CANNOSCALE": 1,
+          "CMLEADERSTYLE": 1,
+          "CTABLESTYLE": 1,
+          "CVIEWDETAILSTYLE": 1,
+          "CVIEWSECTIONSTYLE": 1,
+          "ColorChange": 1,
+          "Conceptual": 1,
+          "DIMLAYER": 1,
+          "Dim": 1,
+          "EZDXF_META": 1,
+          "EdgeColorOff": 1,
+          "FBXASSET": 1,
+          "Facepattern": 1,
+          "Flat": 1,
+          "FlatWithEdges": 1,
+          "Global": 1,
+          "Gouraud": 1,
+          "GouraudWithEdges": 1,
+          "HPCOLOR": 1,
+          "Hidden": 1,
+          "JitterOff": 1,
+          "Linepattern": 1,
+          "MSLTSCALE": 1,
+          "Metric50": 2,
+          "Model": 1,
+          "OverhangOff": 1,
+          "Realistic": 1,
+          "Shaded": 1,
+          "Shaded with edges": 1,
+          "Shades of Gray": 1,
+          "Sketchy": 1,
+          "Standard": 3,
+          "TEXT": 15,
+          "Thicken": 1,
+          "WRITTEN_BY_EZDXF": 1,
+          "Wireframe": 1,
+          "X-Ray": 1,
+          "XCLIPFRAME": 1,
+          "_LAYISO_STATE": 1,
+          "中間樁": 1,
+          "影印出圖 3f": 1,
+          "槽鐵": 1,
+          "配置1": 1
+        }
+      },
+      "xrecord": {
+        "total": 147,
+        "by_dictionary_key": {
+          "1": 15,
+          "5": 15,
+          "6": 15,
+          "7": 15,
+          "ACAD_CIP_PREVIOUS_PRODUCT_INFO": 1,
+          "ACDB_RECOMPOSE_DATA": 1,
+          "ADSK_XREC_LAYER_RECONCILED": 81,
+          "ASEBlockHierarchyIndexRecord": 1,
+          "AcadDim": 1,
+          "FBXASSET": 1,
+          "_LAYISO_STATE": 1
+        },
+        "by_layer_resolution": {
+          "missing_after_saveas": 12,
+          "not layer-owned": 66,
+          "present": 69
+        }
+      },
+      "layer_table_entry_count": 106,
+      "duplicate_layer_records": {},
+      "audit": {
+        "error_count": 0,
+        "fix_count": 12,
+        "issue_types": {
+          "fix:INVALID_OWNER_HANDLE": 12
+        },
+        "errors": [],
+        "fixes": [
+          {
+            "handle": "4704B",
+            "owner": "4704A",
+            "dictionary_handle": "4704A",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "23D",
+            "layer_name": "Defpoints",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "4704A",
+                "type": "DICTIONARY",
+                "owner": "23D"
+              },
+              {
+                "handle": "23D",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#4704B) entity with invalid owner handle #4704A.",
+            "reported_owner": "4704A"
+          },
+          {
+            "handle": "63E76",
+            "owner": "63E75",
+            "dictionary_handle": "63E75",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "63E74",
+            "layer_name": "ES-中間柱LINE線",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "63E75",
+                "type": "DICTIONARY",
+                "owner": "63E74"
+              },
+              {
+                "handle": "63E74",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#63E76) entity with invalid owner handle #63E75.",
+            "reported_owner": "63E75"
+          },
+          {
+            "handle": "6420D",
+            "owner": "6420C",
+            "dictionary_handle": "6420C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6420B",
+            "layer_name": "DIM-軸線X",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6420C",
+                "type": "DICTIONARY",
+                "owner": "6420B"
+              },
+              {
+                "handle": "6420B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6420D) entity with invalid owner handle #6420C.",
+            "reported_owner": "6420C"
+          },
+          {
+            "handle": "6E52A",
+            "owner": "6E529",
+            "dictionary_handle": "6E529",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6E528",
+            "layer_name": "ES-圍令背填",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6E529",
+                "type": "DICTIONARY",
+                "owner": "6E528"
+              },
+              {
+                "handle": "6E528",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6E52A) entity with invalid owner handle #6E529.",
+            "reported_owner": "6E529"
+          },
+          {
+            "handle": "6FFAC",
+            "owner": "6FFAB",
+            "dictionary_handle": "6FFAB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "6FFAA",
+            "layer_name": "ES-C380x100",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "6FFAB",
+                "type": "DICTIONARY",
+                "owner": "6FFAA"
+              },
+              {
+                "handle": "6FFAA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#6FFAC) entity with invalid owner handle #6FFAB.",
+            "reported_owner": "6FFAB"
+          },
+          {
+            "handle": "76B3C",
+            "owner": "76B3B",
+            "dictionary_handle": "76B3B",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "76B3A",
+            "layer_name": "ES-支撐DIM",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "76B3B",
+                "type": "DICTIONARY",
+                "owner": "76B3A"
+              },
+              {
+                "handle": "76B3A",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#76B3C) entity with invalid owner handle #76B3B.",
+            "reported_owner": "76B3B"
+          },
+          {
+            "handle": "77782",
+            "owner": "77781",
+            "dictionary_handle": "77781",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "77780",
+            "layer_name": "ES-大斜撐_支撐350x350",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "77781",
+                "type": "DICTIONARY",
+                "owner": "77780"
+              },
+              {
+                "handle": "77780",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#77782) entity with invalid owner handle #77781.",
+            "reported_owner": "77781"
+          },
+          {
+            "handle": "7A663",
+            "owner": "7A662",
+            "dictionary_handle": "7A662",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A661",
+            "layer_name": "ES-圍令L1H414x405",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A662",
+                "type": "DICTIONARY",
+                "owner": "7A661"
+              },
+              {
+                "handle": "7A661",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A663) entity with invalid owner handle #7A662.",
+            "reported_owner": "7A662"
+          },
+          {
+            "handle": "7A66D",
+            "owner": "7A66C",
+            "dictionary_handle": "7A66C",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7A66B",
+            "layer_name": "ES-圍令L1H428x407",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7A66C",
+                "type": "DICTIONARY",
+                "owner": "7A66B"
+              },
+              {
+                "handle": "7A66B",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7A66D) entity with invalid owner handle #7A66C.",
+            "reported_owner": "7A66C"
+          },
+          {
+            "handle": "7CB83",
+            "owner": "7CB82",
+            "dictionary_handle": "7CB82",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB81",
+            "layer_name": "ES-中間樁NO",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB82",
+                "type": "DICTIONARY",
+                "owner": "7CB81"
+              },
+              {
+                "handle": "7CB81",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB83) entity with invalid owner handle #7CB82.",
+            "reported_owner": "7CB82"
+          },
+          {
+            "handle": "7CB92",
+            "owner": "7CB91",
+            "dictionary_handle": "7CB91",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "7CB90",
+            "layer_name": "ES-C250x90",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "7CB91",
+                "type": "DICTIONARY",
+                "owner": "7CB90"
+              },
+              {
+                "handle": "7CB90",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#7CB92) entity with invalid owner handle #7CB91.",
+            "reported_owner": "7CB91"
+          },
+          {
+            "handle": "B42AC",
+            "owner": "B42AB",
+            "dictionary_handle": "B42AB",
+            "dictionary_key": "ADSK_XREC_LAYER_RECONCILED",
+            "layer_handle": "B42AA",
+            "layer_name": "dw",
+            "layer_status": "missing_after_saveas",
+            "owner_chain": [
+              {
+                "handle": "B42AB",
+                "type": "DICTIONARY",
+                "owner": "B42AA"
+              },
+              {
+                "handle": "B42AA",
+                "type": "MISSING",
+                "owner": null
+              }
+            ],
+            "code": 202,
+            "error_type": "INVALID_OWNER_HANDLE",
+            "message": "Deleted XRECORD(#B42AC) entity with invalid owner handle #B42AB.",
+            "reported_owner": "B42AB"
+          }
+        ],
+        "post_audit_dictionary_total": 268,
+        "post_audit_xrecord_total": 135
+      }
+    }
+  ],
+  "deltas_from_original": {
+    "01_original_source": {
+      "entitydb": {},
+      "modelspace": {},
+      "block_content": {},
+      "objects": {},
+      "dictionary_by_owner_type": {},
+      "dictionary_entry_keys": {},
+      "xrecord_by_dictionary_key": {},
+      "xrecord_by_layer_resolution": {}
+    },
+    "02_immediate_saveas": {
+      "entitydb": {
+        "APPID": 1,
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1,
+        "LAYER": -17
+      },
+      "modelspace": {},
+      "block_content": {},
+      "objects": {
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1
+      },
+      "dictionary_by_owner_type": {
+        "DICTIONARY": 1,
+        "LAYER": -12,
+        "MISSING": 12
+      },
+      "dictionary_entry_keys": {
+        "EZDXF_META": 1,
+        "WRITTEN_BY_EZDXF": 1
+      },
+      "xrecord_by_dictionary_key": {},
+      "xrecord_by_layer_resolution": {
+        "missing_after_saveas": 12,
+        "present": -12
+      }
+    },
+    "03_add_one_dimension": {
+      "entitydb": {
+        "APPID": 1,
+        "BLOCK": 2,
+        "BLOCK_RECORD": 2,
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1,
+        "DIMENSION": 1,
+        "ENDBLK": 2,
+        "INSERT": 2,
+        "LAYER": -17,
+        "LINE": 4,
+        "MTEXT": 1,
+        "POINT": 3,
+        "SEQEND": 2,
+        "SOLID": 1
+      },
+      "modelspace": {
+        "DIMENSION": 1
+      },
+      "block_content": {
+        "DIMENSION": 1,
+        "INSERT": 2,
+        "LINE": 4,
+        "MTEXT": 1,
+        "POINT": 3,
+        "SOLID": 1
+      },
+      "objects": {
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1
+      },
+      "dictionary_by_owner_type": {
+        "DICTIONARY": 1,
+        "LAYER": -12,
+        "MISSING": 12
+      },
+      "dictionary_entry_keys": {
+        "EZDXF_META": 1,
+        "WRITTEN_BY_EZDXF": 1
+      },
+      "xrecord_by_dictionary_key": {},
+      "xrecord_by_layer_resolution": {
+        "missing_after_saveas": 12,
+        "present": -12
+      }
+    },
+    "04_add_jack_block": {
+      "entitydb": {
+        "APPID": 1,
+        "BLOCK": 1,
+        "BLOCK_RECORD": 1,
+        "CIRCLE": 1,
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1,
+        "ENDBLK": 1,
+        "INSERT": 1,
+        "LAYER": -17,
+        "LINE": 71,
+        "SEQEND": 1
+      },
+      "modelspace": {
+        "INSERT": 1
+      },
+      "block_content": {
+        "CIRCLE": 1,
+        "INSERT": 1,
+        "LINE": 71
+      },
+      "objects": {
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1
+      },
+      "dictionary_by_owner_type": {
+        "DICTIONARY": 1,
+        "LAYER": -12,
+        "MISSING": 12
+      },
+      "dictionary_entry_keys": {
+        "EZDXF_META": 1,
+        "WRITTEN_BY_EZDXF": 1
+      },
+      "xrecord_by_dictionary_key": {},
+      "xrecord_by_layer_resolution": {
+        "missing_after_saveas": 12,
+        "present": -12
+      }
+    },
+    "05_full_export": {
+      "entitydb": {
+        "APPID": 2,
+        "BLOCK": 114,
+        "BLOCK_RECORD": 114,
+        "CIRCLE": 1,
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1,
+        "DIMENSION": 112,
+        "DIMSTYLE": 1,
+        "ENDBLK": 114,
+        "INSERT": 239,
+        "LAYER": -17,
+        "LINE": 553,
+        "MTEXT": 112,
+        "POINT": 336,
+        "SEQEND": 239,
+        "SOLID": 1
+      },
+      "modelspace": {
+        "DIMENSION": 112,
+        "INSERT": 15
+      },
+      "block_content": {
+        "CIRCLE": 1,
+        "DIMENSION": 112,
+        "INSERT": 239,
+        "LINE": 553,
+        "MTEXT": 112,
+        "POINT": 336,
+        "SOLID": 1
+      },
+      "objects": {
+        "DICTIONARY": 1,
+        "DICTIONARYVAR": 1
+      },
+      "dictionary_by_owner_type": {
+        "DICTIONARY": 1,
+        "LAYER": -12,
+        "MISSING": 12
+      },
+      "dictionary_entry_keys": {
+        "EZDXF_META": 1,
+        "WRITTEN_BY_EZDXF": 1
+      },
+      "xrecord_by_dictionary_key": {},
+      "xrecord_by_layer_resolution": {
+        "missing_after_saveas": 12,
+        "present": -12
+      }
+    }
+  }
+}

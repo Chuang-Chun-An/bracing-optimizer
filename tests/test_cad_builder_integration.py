@@ -410,7 +410,7 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(
             set(payload["input_data"]),
-            {"walers", "struts", "braces"},
+            {"walers", "struts", "braces", "inventory", "material_specs"},
         )
         self.assertIsNone(payload["result"])
         self.assertNotIn("supports", payload)

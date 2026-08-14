@@ -29,6 +29,17 @@ class DXFAssetTests(unittest.TestCase):
         self.assertAlmostEqual(extents.extmax.x, 600.0, places=6)
         self.assertAlmostEqual(extents.extmax.y, 150.0, places=6)
 
+    def test_main_application_bundles_include_the_jack_asset(self):
+        project_root = Path(__file__).resolve().parents[1]
+        for filename in (
+            "main.spec",
+            "SupportSolver.spec",
+            "SupportOptimizer.spec",
+        ):
+            content = (project_root / filename).read_text(encoding="utf-8")
+            with self.subTest(spec=filename):
+                self.assertIn("assets/dxf", content)
+
 
 if __name__ == "__main__":
     unittest.main()

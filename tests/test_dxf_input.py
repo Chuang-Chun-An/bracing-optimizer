@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ezdxf
+from cad_view_interaction import CADViewport
 
 from DXFinput import (
     CandidatePoint,
@@ -22,6 +23,7 @@ from DXFinput import (
     RenderScheduler,
     SelectionController,
     SelectionState,
+    SourceText,
     Strut,
     Column,
     add_cad_candidate_points,
@@ -30,8 +32,10 @@ from DXFinput import (
     apply_coordinate_system,
     build_problem_records,
     build_validation_overview,
+    coordinate_system_from_candidate,
     fit_window_geometry_to_work_areas,
     import_dxf,
+    normalize_project_coordinate,
     parse_coordinate_origin,
     read_dxf_layers,
     rectangle_centerline,
@@ -323,6 +327,83 @@ class DXFInputRecognitionTests(unittest.TestCase):
             debug["layer_assignments"],
         )
         self.assertEqual(debug["summary"]["auxiliary_geometry"], 1)
+
+    def test_auxiliary_source_text_supports_nested_blocks_and_stays_preview_only(self):
+        doc = self.new_doc()
+        doc.layers.add("AUXILIARY")
+        model = doc.modelspace()
+        self.add_horizontal_walers(model)
+        self.add_default_strut_and_brace(model)
+        model.add_text(
+            "Direct TEXT",
+            dxfattribs={"layer": "AUXILIARY", "insert": (100, 200)},
+        )
+        model.add_mtext(
+            "Direct MTEXT",
+            dxfattribs={"layer": "AUXILIARY", "insert": (200, 300)},
+        )
+
+        attributed = doc.blocks.new("ATTRIBUTED_TEXT")
+        attributed.add_attdef(
+            "AXIS",
+            insert=(10, 20),
+            text="Default axis",
+            dxfattribs={"layer": "AUXILIARY"},
+        )
+        nested = doc.blocks.new("NESTED_TEXT")
+        attributed_ref = nested.add_blockref(
+            "ATTRIBUTED_TEXT",
+            (1000, 2000),
+            dxfattribs={"layer": "AUXILIARY"},
+        )
+        attributed_ref.add_auto_attribs({"AXIS": "A-1"})
+        model.add_blockref(
+            "NESTED_TEXT",
+            (3000, 4000),
+            dxfattribs={"layer": "AUXILIARY"},
+        )
+
+        definition = doc.blocks.new("UNBOUND_DEFINITION")
+        definition.add_attdef(
+            "NOTE",
+            insert=(30, 40),
+            text="Unbound ATTDEF",
+            dxfattribs={"layer": "AUXILIARY"},
+        )
+        model.add_blockref(
+            "UNBOUND_DEFINITION",
+            (5000, 6000),
+            dxfattribs={"layer": "AUXILIARY"},
+        )
+
+        self.counter += 1
+        path = Path(self.temp_dir.name) / f"source_text_{self.counter}.dxf"
+        doc.saveas(path)
+        result = import_dxf(
+            path,
+            layer_roles={
+                "WALER": "waler",
+                "STRUT": "strut",
+                "BRACE": "brace",
+                "AUXILIARY": "auxiliary",
+            },
+        )
+
+        self.assertEqual(
+            {item.source_entity_type for item in result.source_texts},
+            {"TEXT", "MTEXT", "ATTRIB", "ATTDEF"},
+        )
+        by_text = {item.text: item for item in result.source_texts}
+        self.assertEqual(by_text["A-1"].position, (4010.0, 6020.0))
+        self.assertEqual(
+            by_text["Unbound ATTDEF"].position,
+            (5030.0, 6040.0),
+        )
+        self.assertTrue(
+            all(item.role == "auxiliary" for item in result.source_texts)
+        )
+        self.assertNotIn("source_texts", result.to_project_rows())
+        self.assertNotIn("source_texts", result.to_debug_dict())
 
     def test_rectangle_waler_and_four_line_waler_each_make_one_model(self):
         doc = self.new_doc()
@@ -1301,6 +1382,50 @@ class DXFInputRecognitionTests(unittest.TestCase):
             },
         )
 
+    def test_project_rows_normalize_coordinates_to_one_millimetre_only_at_boundary(self):
+        doc = self.new_doc()
+        model = doc.modelspace()
+        self.add_horizontal_walers(model)
+        self.add_default_strut_and_brace(model)
+        world_result, _path = self.convert(doc)
+        local_result = apply_coordinate_system(
+            world_result,
+            CoordinateSystem("local", 100.4, -200.4, "selected_candidate_point"),
+        )
+
+        member = local_result.struts[0]
+        self.assertAlmostEqual(member.local_start[0], 399.6)
+        self.assertAlmostEqual(member.local_start[1], 200.4)
+        row = local_result.to_project_rows()["struts"][0]
+        self.assertEqual((row["StartX"], row["StartY"]), (400, 200))
+        self.assertIsInstance(row["StartX"], int)
+
+    def test_selected_candidate_uses_exact_world_point_as_local_origin(self):
+        candidate = CandidatePoint(
+            id="P01",
+            component_id="W1",
+            world_point=(338238.2870494365, -725295.5694823606),
+            local_point=(0.0, 0.0),
+            point_type="endpoint",
+            label="正式起點",
+        )
+
+        coordinate_system = coordinate_system_from_candidate(candidate)
+
+        self.assertEqual(coordinate_system.mode, "local")
+        self.assertEqual(coordinate_system.source, "selected_candidate_point")
+        self.assertEqual(
+            (coordinate_system.origin_x, coordinate_system.origin_y),
+            candidate.world_point,
+        )
+        self.assertEqual(coordinate_system.transform(candidate.world_point), (0.0, 0.0))
+
+    def test_one_millimetre_normalization_rounds_half_away_from_zero(self):
+        self.assertEqual(normalize_project_coordinate(10.49), 10)
+        self.assertEqual(normalize_project_coordinate(10.5), 11)
+        self.assertEqual(normalize_project_coordinate(-10.49), -10)
+        self.assertEqual(normalize_project_coordinate(-10.5), -11)
+
     def test_coordinate_origin_validation_messages(self):
         with self.assertRaisesRegex(DXFImportError, "請輸入原點座標"):
             parse_coordinate_origin("", "20")
@@ -1429,6 +1554,79 @@ class _FakeCanvas:
 
 
 class DXFSelectionArchitectureTests(unittest.TestCase):
+    def test_source_text_uses_local_origin_and_auxiliary_visibility_layer(self):
+        canvas = _FakeCanvas()
+        scene = PreviewScene()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.result = SimpleNamespace(
+            coordinate_system=CoordinateSystem("local", 100.0, 200.0)
+        )
+        dialog.preview_renderer = PreviewRenderer(canvas, scene)
+        dialog.preview_viewport = CADViewport(
+            view_bounds=(-10.0, 10.0, -10.0, 10.0),
+            canvas_width=200.0,
+            canvas_height=200.0,
+        )
+
+        dialog._draw_source_text_layer(
+            (
+                SourceText(
+                    "auxiliary",
+                    "TEXT_HANDLE",
+                    "Axis A",
+                    (100.0, 200.0),
+                    1.0,
+                    0.0,
+                    "AUXILIARY",
+                    "TEXT",
+                ),
+            )
+        )
+
+        self.assertEqual(len(canvas.items), 1)
+        item = next(iter(canvas.items.values()))
+        self.assertEqual(item["coordinates"], (100.0, 100.0))
+        self.assertEqual(item["tags"], ("auxiliary_geometry",))
+        self.assertEqual(scene.auxiliary_geometry_items, [1])
+        self.assertEqual(scene.source_handle_items["TEXT_HANDLE"], [1])
+
+    def test_form_wheel_direction_supports_windows_and_linux_events(self):
+        self.assertEqual(
+            DXFImportDialog._form_wheel_units(SimpleNamespace(delta=120)),
+            -1,
+        )
+        self.assertEqual(
+            DXFImportDialog._form_wheel_units(SimpleNamespace(delta=-120)),
+            1,
+        )
+        self.assertEqual(
+            DXFImportDialog._form_wheel_units(SimpleNamespace(num=4, delta=0)),
+            -1,
+        )
+        self.assertEqual(
+            DXFImportDialog._form_wheel_units(SimpleNamespace(num=5, delta=0)),
+            1,
+        )
+
+    def test_form_scroll_routing_detects_inner_widget_boundaries(self):
+        class Scrollable:
+            def __init__(self, first, last):
+                self.view = first, last
+
+            def yview(self):
+                return self.view
+
+        at_top = Scrollable(0.0, 0.4)
+        in_middle = Scrollable(0.3, 0.7)
+        at_bottom = Scrollable(0.6, 1.0)
+
+        self.assertFalse(DXFImportDialog._widget_can_scroll(at_top, -1))
+        self.assertTrue(DXFImportDialog._widget_can_scroll(at_top, 1))
+        self.assertTrue(DXFImportDialog._widget_can_scroll(in_middle, -1))
+        self.assertTrue(DXFImportDialog._widget_can_scroll(in_middle, 1))
+        self.assertTrue(DXFImportDialog._widget_can_scroll(at_bottom, -1))
+        self.assertFalse(DXFImportDialog._widget_can_scroll(at_bottom, 1))
+
     @staticmethod
     def candidate(identifier, x, y, recommended_for=()):
         return CandidatePoint(
@@ -1480,6 +1678,7 @@ class DXFSelectionArchitectureTests(unittest.TestCase):
         dirty.clear()
         self.assertTrue(controller.select_candidate_point("P03", "canvas"))
         self.assertEqual(state.selected_candidate_point_id, "P03")
+        self.assertEqual(state.selected_candidate_source, "canvas")
         self.assertEqual(state.pending_start_point_id, "P01")
         self.assertEqual(state.pending_end_point_id, "P02")
         self.assertFalse(dirty[-1] & RenderDirty.FULL_SCENE)
@@ -1488,6 +1687,9 @@ class DXFSelectionArchitectureTests(unittest.TestCase):
         revision = state.revision
         self.assertFalse(controller.select_candidate_point("P03", "candidate_tree"))
         self.assertEqual(state.revision, revision)
+        self.assertEqual(state.selected_candidate_source, "candidate_tree")
+        controller.set_hovered_candidate("P02")
+        self.assertEqual(state.selected_candidate_source, "candidate_tree")
 
     def test_hover_pending_and_formal_selection_are_separate(self):
         member, _store, state, _dirty, controller = self.make_controller()

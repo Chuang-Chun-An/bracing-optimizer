@@ -2,6 +2,7 @@ import copy
 import json
 import math
 import queue
+import shutil
 import sys
 import threading
 from collections import Counter
@@ -12,6 +13,7 @@ from typing import Dict, List, Optional
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
+import ezdxf
 import wales
 
 import matplotlib
@@ -29,10 +31,26 @@ from cad_builder import (
     CadEventMapper,
     TempEventWatcher,
 )
+from project_data import DEFAULT_MATERIAL_SPECS
 from project_data import TABLE_COLUMNS as PROJECT_TABLE_COLUMNS
 from project_data import ProjectDataModel
 from DXFinput import DXFImportDialog, DXFImportError
 from cad_view_interaction import CADViewInteractionController
+from dxf_result_export import (
+    DXFResultExportError,
+    ExportPiece,
+    MemberExportPlan,
+    build_member_bindings,
+    export_results_to_dxf,
+)
+from project_persistence import (
+    DxfAssetManager,
+    DxfCompatibilityChecker,
+    DxfStatus,
+    PROJECT_SCHEMA_VERSION,
+    ProjectPersistenceError,
+    ProjectSerializer,
+)
 
 
 RESOURCE_DIR = Path(__file__).resolve().parent
@@ -173,6 +191,7 @@ def calculate_ascii_art_font_size(line_count, max_width):
 
 
 class SupportInputApp:
+    WINDOW_TITLE = "開挖支撐系統幾何資料輸入介面"
     EXPORT_BASE_FIGSIZE = (16, 10)
     EXPORT_DPI = 100
     EXPORT_SCALE_OPTIONS = (100, 200, 400, 800)
@@ -184,6 +203,45 @@ class SupportInputApp:
         ("ToBraceToWalerStartLen", "終點角撐長度(往圍令起點)"),
         ("ToBraceToWalerEndLen", "終點角撐長度(往圍令終點)"),
     )
+
+    def _project_display_name(self):
+        path = getattr(self, "current_project_path", None)
+        if path is None:
+            return "未命名專案"
+        path = Path(path)
+        return path.parent.name if path.name == "project.json" else path.stem
+
+    def _project_is_saved(self):
+        return (
+            getattr(self, "current_project_path", None) is not None
+            and not getattr(self, "project_dirty", False)
+        )
+
+    def _update_window_title(self):
+        dirty = " *" if getattr(self, "project_dirty", False) else ""
+        title = f"{self.WINDOW_TITLE} - {self._project_display_name()}{dirty}"
+        root = getattr(self, "root", None)
+        if root is not None and hasattr(root, "title"):
+            root.title(title)
+        self._refresh_project_status_display()
+
+    def _mark_project_dirty(self, reason=""):
+        self.project_dirty = True
+        if reason:
+            self.project_dirty_reason = str(reason)
+        self._update_window_title()
+
+    def _clear_project_dirty(self):
+        self.project_dirty = False
+        self.project_dirty_reason = ""
+        self._update_window_title()
+
+    def _ensure_project_services(self):
+        if not hasattr(self, "dxf_asset_manager"):
+            self.dxf_asset_manager = DxfAssetManager()
+        if not hasattr(self, "dxf_compatibility_checker"):
+            self.dxf_compatibility_checker = DxfCompatibilityChecker()
+        return self.dxf_asset_manager
 
     def _ensure_project_data(self):
         model = self.__dict__.get("project_data")
@@ -224,9 +282,17 @@ class SupportInputApp:
     def inventory(self, rows):
         self._ensure_project_data().replace_table("inventory", rows)
 
+    @property
+    def material_specs(self):
+        return self._ensure_project_data().material_specs
+
+    @material_specs.setter
+    def material_specs(self, rows):
+        self._ensure_project_data().replace_table("material_specs", rows)
+
     def __init__(self, root):
         self.root = root
-        self.root.title("開挖支撐系統幾何資料輸入介面")
+        self.root.title(self.WINDOW_TITLE)
         self._set_window_size(1600, 900)
 
         self.project_data = ProjectDataModel()
@@ -234,6 +300,15 @@ class SupportInputApp:
         self.project_result = None
         self.last_calculated_time = None
         self.current_project_path = None
+        self.project_dirty = False
+        self.project_dirty_reason = ""
+        self.dxf_asset = None
+        self.dxf_asset_manager = DxfAssetManager()
+        self.dxf_compatibility_checker = DxfCompatibilityChecker()
+        self.dxf_asset_status_report = self.dxf_asset_manager.inspect(
+            None, None, None
+        )
+        self.last_dxf_compatibility_report = None
         self.solver_memory = {}
         self.support_candidate_cache = {}
         self.cad_event_mapper = CadEventMapper()
@@ -261,6 +336,7 @@ class SupportInputApp:
             "struts": "支撐",
             "braces": "斜撐",
             "inventory": "庫存",
+            "material_specs": "材料規格",
         }
 
         self.table_column_labels = {
@@ -310,6 +386,11 @@ class SupportInputApp:
                 "Length": "料長(mm)",
                 "Qty": "庫存數量",
             },
+            "material_specs": {
+                "No": "列號",
+                "Usage": "用途",
+                "Spec": "材料規格",
+            },
         }
 
         self.numeric_columns = {
@@ -327,6 +408,7 @@ class SupportInputApp:
             ],
             "braces": ["StartX", "StartY", "EndX", "EndY"],
             "inventory": ["Length", "Qty"],
+            "material_specs": [],
         }
 
         self.treeviews = {}
@@ -357,6 +439,10 @@ class SupportInputApp:
         self._create_table_tab("struts", self.table_tab_labels["struts"])
         self._create_table_tab("braces", self.table_tab_labels["braces"])
         self._create_table_tab("inventory", self.table_tab_labels["inventory"])
+        self._create_table_tab(
+            "material_specs",
+            self.table_tab_labels["material_specs"],
+        )
         self._create_cad_import_tab()
         self._create_project_cases_tab()
         self._create_results_tab()
@@ -560,13 +646,28 @@ class SupportInputApp:
         button_frame.pack(fill="x", padx=8, pady=(0, 8))
         ttk.Button(
             button_frame,
-            text="載入專案",
+            text="新增專案",
+            command=self._new_project,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            button_frame,
+            text="開啟專案",
             command=self._load_selected_project_case,
         ).pack(side="left", padx=(0, 6))
         ttk.Button(
             button_frame,
-            text="儲存目前資料為專案",
-            command=self._save_current_project_case_from_prompt,
+            text="儲存專案",
+            command=self._save_current_project,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            button_frame,
+            text="另存新專案",
+            command=self._save_project_as,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            button_frame,
+            text="重新連結 DXF",
+            command=self._relink_dxf,
         ).pack(side="left", padx=(0, 6))
         ttk.Button(
             button_frame,
@@ -574,7 +675,18 @@ class SupportInputApp:
             command=self._delete_selected_project_case,
         ).pack(side="left", padx=(0, 6))
 
+        status_frame = ttk.LabelFrame(frame, text="專案與 DXF 狀態")
+        status_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self.project_asset_status_var = tk.StringVar(value="")
+        ttk.Label(
+            status_frame,
+            textvariable=self.project_asset_status_var,
+            justify="left",
+            wraplength=900,
+        ).pack(fill="x", padx=8, pady=8)
+
         self._refresh_project_case_list()
+        self._refresh_project_status_display()
 
     def _create_results_tab(self):
         frame = ttk.Frame(self.notebook)
@@ -650,6 +762,11 @@ class SupportInputApp:
             result_action_frame,
             text="刪除方案",
             command=self._delete_selected_result_plan,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            result_action_frame,
+            text="匯出支撐配置成果DXF",
+            command=self._export_visible_results_to_dxf,
         ).pack(side="left", padx=(0, 6))
 
         material_frame = ttk.LabelFrame(frame, text="材料統計")
@@ -786,7 +903,20 @@ class SupportInputApp:
 
     def _project_case_json_files(self):
         self.project_cases_dir.mkdir(exist_ok=True)
-        return sorted(self.project_cases_dir.glob("*.json"), key=lambda path: path.stem)
+        managed = {
+            path.parent.name: path
+            for path in self.project_cases_dir.glob("*/project.json")
+            if path.is_file()
+        }
+        legacy = {
+            path.stem: path
+            for path in self.project_cases_dir.glob("*.json")
+            if path.is_file() and path.stem not in managed
+        }
+        return [
+            {**legacy, **managed}[name]
+            for name in sorted({*legacy, *managed})
+        ]
 
     @staticmethod
     def _sanitize_project_case_name(project_name):
@@ -804,13 +934,27 @@ class SupportInputApp:
         })
         return name.translate(translation).strip()
 
-    def _project_case_path(self, project_name):
+    def _managed_project_case_path(self, project_name):
         safe_name = self._sanitize_project_case_name(project_name)
         if not safe_name:
             return None
         if safe_name.lower().endswith(".json"):
             safe_name = safe_name[:-5]
-        return self.project_cases_dir / f"{safe_name}.json"
+        return self.project_cases_dir / safe_name / "project.json"
+
+    def _project_case_path(self, project_name):
+        managed = self._managed_project_case_path(project_name)
+        if managed is None:
+            return None
+        if managed.is_file():
+            return managed
+        legacy = self.project_cases_dir / f"{managed.parent.name}.json"
+        return legacy if legacy.is_file() else managed
+
+    @staticmethod
+    def _project_case_name_from_path(path):
+        path = Path(path)
+        return path.parent.name if path.name == "project.json" else path.stem
 
     def _refresh_project_case_list(self, selected_name=None, select_first=False):
         if not hasattr(self, "project_case_listbox"):
@@ -818,8 +962,9 @@ class SupportInputApp:
         self.project_case_listbox.delete(0, "end")
         selected_index = None
         for index, path in enumerate(self._project_case_json_files()):
-            self.project_case_listbox.insert("end", path.stem)
-            if selected_name is not None and path.stem == selected_name:
+            display_name = self._project_case_name_from_path(path)
+            self.project_case_listbox.insert("end", display_name)
+            if selected_name is not None and display_name == selected_name:
                 selected_index = index
         if selected_index is None and select_first and self.project_case_listbox.size() > 0:
             selected_index = 0
@@ -835,10 +980,72 @@ class SupportInputApp:
             return None
         return self.project_case_listbox.get(selection[0])
 
+    def _refresh_project_status_display(self):
+        variable = getattr(self, "project_asset_status_var", None)
+        if variable is None:
+            return
+        report = getattr(self, "dxf_asset_status_report", None)
+        status_labels = {
+            DxfStatus.READY: "可使用",
+            DxfStatus.RUNTIME_READY: "已匯入，尚未保存管理副本",
+            DxfStatus.VERIFIED_PENDING_SAVE: "重新連結已驗證，尚未儲存",
+            DxfStatus.MANAGED_COPY_MODIFIED: "管理副本內容異常",
+            DxfStatus.SOURCE_MODIFIED: "原始來源已修改",
+            DxfStatus.MISSING: "管理副本遺失",
+            DxfStatus.RELINK_REQUIRED: "需要重新連結",
+            DxfStatus.BINDING_REQUIRED: "需要重新建立構件綁定",
+            DxfStatus.LEGACY_NO_STATE: "舊專案缺少 DXF 綁定資訊",
+            DxfStatus.INCOMPATIBLE: "DXF 與工程資料不相容",
+            DxfStatus.GEOMETRY_COMPATIBLE: "幾何相容，等待確認",
+            DxfStatus.NO_DXF: "未建立 DXF 關聯",
+        }
+        lines = [
+            f"專案：{self._project_display_name()}",
+            f"是否儲存：{'是' if self._project_is_saved() else '否'}",
+        ]
+        if report is None:
+            lines.append("DXF 狀態：尚未檢查")
+        else:
+            lines.extend([
+                f"DXF 狀態：{status_labels.get(report.status, report.status.value)}",
+                f"管理副本：{'存在' if report.managed_exists else '找不到或尚未建立'}",
+                f"原始來源：{'存在' if report.original_exists else '找不到或未記錄'}",
+                f"狀態說明：{report.summary}",
+            ])
+            lines.extend(report.messages)
+        compatibility = getattr(self, "last_dxf_compatibility_report", None)
+        if compatibility is not None:
+            lines.append(
+                "重新連結相容性："
+                + status_labels.get(compatibility.status, compatibility.status.value)
+            )
+            lines.append(
+                "構件匹配："
+                f"{len(compatibility.matches)}/{compatibility.total_saved_components}"
+            )
+            lines.append(
+                "需要人工處理："
+                + (", ".join(compatibility.binding_required_ids) or "無")
+            )
+            if compatibility.incompatible_items:
+                lines.append(
+                    "不相容項目：" + "；".join(compatibility.incompatible_items)
+                )
+        lines.append(
+            f"Solver 結果：{'已保留，未重新計算' if self.result_items else '目前無結果'}"
+        )
+        variable.set("\n".join(lines))
+
     def _load_selected_project_case(self):
         project_name = self._selected_project_case_name()
         if not project_name:
             messagebox.showwarning("載入專案", "請先選擇要載入的專案。")
+            return
+        if getattr(self, "project_dirty", False) and not messagebox.askyesno(
+            "尚未儲存",
+            "目前專案有尚未儲存的變更，確定要開啟另一個專案嗎？",
+            parent=self.root,
+        ):
             return
         try:
             self.load_project_case(project_name)
@@ -866,10 +1073,18 @@ class SupportInputApp:
             )
             return
 
-        if target_path.parent != project_cases_dir or target_path.suffix.lower() != ".json":
+        is_legacy = (
+            target_path.parent == project_cases_dir
+            and target_path.suffix.lower() == ".json"
+        )
+        is_managed = (
+            target_path.name == "project.json"
+            and target_path.parent.parent == project_cases_dir
+        )
+        if not (is_legacy or is_managed):
             messagebox.showerror(
                 "刪除專案",
-                f"無法刪除：\n{path}\n\n原因：\n只能刪除 project_cases 資料夾內的 JSON 檔案。",
+                f"無法刪除：\n{path}\n\n原因：\n目標不是有效的專案檔案。",
             )
             return
 
@@ -886,7 +1101,10 @@ class SupportInputApp:
             return
 
         try:
-            target_path.unlink()
+            if is_managed:
+                shutil.rmtree(target_path.parent)
+            else:
+                target_path.unlink()
         except Exception as exc:
             messagebox.showerror(
                 "刪除專案",
@@ -897,9 +1115,9 @@ class SupportInputApp:
         self._refresh_project_case_list(select_first=True)
         messagebox.showinfo("刪除專案", f"已刪除專案：\n{project_name}")
 
-    def _save_current_project_case_from_prompt(self):
+    def _save_project_as(self):
         project_name = simpledialog.askstring(
-            "儲存專案",
+            "另存新專案",
             "專案名稱：",
             parent=self.root,
         )
@@ -917,7 +1135,8 @@ class SupportInputApp:
         if path.exists():
             confirmed = messagebox.askyesno(
                 "覆蓋專案",
-                f"專案「{path.stem}」已存在。\n是否覆蓋？",
+                f"專案「{project_name}」已存在。\n是否覆蓋？",
+                parent=self.root,
             )
             if not confirmed:
                 return
@@ -928,8 +1147,188 @@ class SupportInputApp:
             messagebox.showerror("儲存專案失敗", str(exc))
             return
 
-        self._refresh_project_case_list(selected_name=saved_path.stem)
+        saved_name = self._project_case_name_from_path(saved_path)
+        self._refresh_project_case_list(selected_name=saved_name)
         messagebox.showinfo("儲存專案", f"已儲存：\n{saved_path}")
+        return saved_path
+
+    def _save_current_project_case_from_prompt(self):
+        """Backward-compatible command name used by older tests/extensions."""
+
+        return self._save_project_as()
+
+    def _save_current_project(self):
+        current = getattr(self, "current_project_path", None)
+        if current is None:
+            return self._save_project_as()
+        project_name = self._project_case_name_from_path(current)
+        try:
+            saved_path = self.save_project_case(project_name)
+        except Exception as exc:
+            messagebox.showerror("儲存專案失敗", str(exc), parent=self.root)
+            return None
+        self._refresh_project_case_list(selected_name=project_name)
+        messagebox.showinfo("儲存專案", f"已儲存：\n{saved_path}", parent=self.root)
+        return saved_path
+
+    def _new_project(self):
+        if getattr(self, "project_dirty", False) and not messagebox.askyesno(
+            "尚未儲存",
+            "目前專案有尚未儲存的變更，確定要建立新專案嗎？",
+            parent=self.root,
+        ):
+            return
+        self.project_data = ProjectDataModel(inventory=self._load_default_inventory())
+        self.result_items.clear()
+        self.project_result = None
+        self.last_calculated_time = None
+        self.current_project_path = None
+        self.dxf_last_import_debug = None
+        self.dxf_asset = None
+        self.dxf_asset_status_report = self._ensure_project_services().inspect(
+            None, None, None
+        )
+        self.last_dxf_compatibility_report = None
+        self.solver_memory.clear()
+        self.support_candidate_cache.clear()
+        for table_name in (
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+            "material_specs",
+        ):
+            self._refresh_tree(table_name)
+        self._refresh_results_tree()
+        self.update_preview()
+        self._clear_project_dirty()
+
+    def _relink_dxf(self):
+        file_path = filedialog.askopenfilename(
+            title="重新連結 DXF",
+            filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
+            parent=self.root,
+        )
+        if not file_path:
+            return
+        manager = self._ensure_project_services()
+        saved_state = getattr(self, "dxf_last_import_debug", None)
+        try:
+            candidate_info = manager.file_info(file_path)
+            expected_hash = str(
+                (getattr(self, "dxf_asset", None) or {}).get("sha256", "") or ""
+            )
+            if not expected_hash:
+                current_report = getattr(self, "dxf_asset_status_report", None)
+                if current_report is not None and current_report.active_source is not None:
+                    expected_hash = current_report.active_source.sha256
+
+            if (
+                expected_hash
+                and candidate_info.sha256 == expected_hash
+                and isinstance(saved_state, dict)
+            ):
+                relinked_state = copy.deepcopy(saved_state)
+                relinked_state["source_path"] = str(Path(file_path).resolve())
+                compatibility = None
+                summary = "重新連結 DXF 與專案記錄完全一致"
+            else:
+                self.dxf_dialog_active = True
+                try:
+                    payload = DXFImportDialog(
+                        self.root,
+                        file_path,
+                        initial_state=saved_state,
+                        cad_event_watcher=self.cad_event_watcher,
+                    ).show()
+                finally:
+                    self.dxf_dialog_active = False
+                if payload is None:
+                    return
+                candidate_result, _unused_mode = payload
+                candidate_state = candidate_result.to_debug_dict()
+                input_data = self._project_rows_by_table()
+                if isinstance(saved_state, dict):
+                    compatibility = self.dxf_compatibility_checker.compare(
+                        saved_state,
+                        candidate_state,
+                        input_data,
+                    )
+                    if compatibility.compatible:
+                        relinked_state = (
+                            self.dxf_compatibility_checker.merge_source_references(
+                                saved_state,
+                                candidate_state,
+                                compatibility,
+                                source_path=file_path,
+                            )
+                        )
+                    else:
+                        relinked_state = None
+                else:
+                    compatibility = (
+                        self.dxf_compatibility_checker.compare_candidate_to_solver(
+                            candidate_state,
+                            input_data,
+                        )
+                    )
+                    if compatibility.compatible:
+                        relinked_state = (
+                            self.dxf_compatibility_checker.adopt_candidate_state_for_solver(
+                                candidate_state,
+                                compatibility,
+                                source_path=file_path,
+                            )
+                        )
+                    else:
+                        relinked_state = None
+                self.last_dxf_compatibility_report = compatibility
+                self._refresh_project_status_display()
+                if relinked_state is None:
+                    details = "\n".join(compatibility.summary_lines())
+                    self.dxf_asset_status_report = manager.rejected_relink_report(
+                        file_path,
+                        status=compatibility.status,
+                        messages=compatibility.summary_lines(),
+                    )
+                    self._refresh_project_status_display()
+                    self._set_cad_import_status(
+                        "DXF 重新連結尚未通過",
+                        error=details,
+                    )
+                    self.show_result(
+                        "DXF 重新連結未套用；原專案、Solver 結果與材料配置均未變更。\n"
+                        + details
+                    )
+                    return
+                summary = "DXF 幾何相容性已確認"
+
+            self.dxf_last_import_debug = relinked_state
+            self.dxf_asset_status_report = manager.accepted_relink_report(
+                file_path,
+                summary=summary,
+            )
+            self.last_dxf_compatibility_report = compatibility
+            self._mark_project_dirty("DXF 已重新連結，尚未保存管理副本")
+            self._set_cad_import_status("DXF 重新連結成功，等待儲存專案")
+            detail_lines = (
+                compatibility.summary_lines()
+                if compatibility is not None
+                else ("SHA-256 完全一致",)
+            )
+            self.show_result(
+                "DXF 重新連結已驗證；Solver 結果、材料配置與既有人工修正均已保留。\n"
+                + "\n".join(detail_lines)
+                + "\n請儲存專案以更新 source/source.dxf。"
+            )
+        except (
+            DXFImportError,
+            ProjectPersistenceError,
+            OSError,
+            ValueError,
+        ) as exc:
+            self._set_cad_import_status("DXF 重新連結失敗", error=exc)
+            self.show_result(f"DXF 重新連結失敗：{exc}")
 
     def _load_default_inventory(self):
         path = getattr(self, "default_inventory_path", None)
@@ -947,32 +1346,107 @@ class SupportInputApp:
         return copy.deepcopy(inventory)
 
     def save_project_case(self, project_name):
-        path = self._project_case_path(project_name)
+        path = self._managed_project_case_path(project_name)
         if path is None:
             raise ValueError("專案名稱不可空白。")
         payload = self._build_project_payload(path)
-        self.project_cases_dir.mkdir(exist_ok=True)
-        path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        manager = self._ensure_project_services()
+        active_source = self._active_dxf_source_for_save()
+        current_path = getattr(self, "current_project_path", None)
+        is_save_as = (
+            current_path is not None
+            and Path(current_path).resolve() != Path(path).resolve()
         )
-        self.current_project_path = path
+        if is_save_as and getattr(self, "dxf_asset", None) is not None and active_source is None:
+            raise ProjectPersistenceError(
+                "另存新專案失敗",
+                "目前 DXF 管理副本不可用，請先重新連結 DXF，避免建立不完整的新專案。",
+            )
+        result = manager.save_project(
+            path,
+            payload,
+            active_source=active_source,
+            existing_asset=getattr(self, "dxf_asset", None),
+        )
+        self.dxf_asset = copy.deepcopy(result.dxf_asset)
+        self.current_project_path = result.project_path
         self.project_result = copy.deepcopy(payload.get("result"))
-        return path
+        self.dxf_asset_status_report = manager.inspect(
+            result.project_path,
+            self.dxf_asset,
+            self.dxf_last_import_debug,
+            has_solver_result=bool(self.result_items),
+            repair=False,
+        )
+        self._clear_project_dirty()
+        return result.project_path
+
+    def _active_dxf_source_for_save(self):
+        manager = self._ensure_project_services()
+        report = getattr(self, "dxf_asset_status_report", None)
+        if report is not None and report.active_source is not None:
+            return report.active_source
+
+        state = getattr(self, "dxf_last_import_debug", None)
+        if getattr(self, "dxf_asset", None) is None and isinstance(state, dict):
+            source_text = str(state.get("source_path", "") or "")
+            source_path = Path(source_text) if source_text else None
+            if source_path is not None and source_path.is_file():
+                # Explicit project save is the migration point for an old
+                # unmanaged dxf_import_state.
+                return manager.verified_source(
+                    source_path,
+                    DxfStatus.RUNTIME_READY,
+                    original_path=source_path,
+                )
+        return None
 
     def load_project_case(self, project_name, *, silent=False):
         path = self._project_case_path(project_name)
         if path is None or not path.is_file():
             raise FileNotFoundError(f"找不到專案：{project_name}")
 
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw_payload = json.loads(path.read_text(encoding="utf-8"))
+        legacy_no_state = (
+            "dxf_asset" not in raw_payload
+            and not isinstance(raw_payload.get("dxf_import_state"), dict)
+        )
+        payload = ProjectSerializer.migrate(raw_payload)
+        ProjectSerializer.validate(payload)
         self._apply_project_payload(payload, path)
-        self._refresh_project_case_list(selected_name=path.stem)
+        manager = self._ensure_project_services()
+        self.dxf_asset_status_report = manager.inspect(
+            path,
+            self.dxf_asset,
+            self.dxf_last_import_debug,
+            has_solver_result=bool(self.result_items),
+            legacy_no_state=legacy_no_state,
+            repair=True,
+        )
+        self.last_dxf_compatibility_report = None
+        self._clear_project_dirty()
+        display_name = self._project_case_name_from_path(path)
+        self._refresh_project_case_list(selected_name=display_name)
         if not silent:
+            dxf_notice = f"DXF 狀態：{self.dxf_asset_status_report.summary}"
+            if self.dxf_asset_status_report.status == DxfStatus.LEGACY_NO_STATE:
+                dxf_notice = (
+                    "此專案建立於舊版，未保存 DXF 構件綁定資訊。"
+                    "既有 Solver 輸入、最佳化結果與材料配置仍可使用。"
+                    "若要匯出 DXF，請重新建立 DXF 關聯。"
+                    "此操作不會重新執行 Solver，也不會清除既有最佳化結果，"
+                    "但可能需要重新確認構件對應。"
+                )
             if self.result_items:
-                self.show_result(f"已載入專案：{path.stem}\n已恢復計算結果與材料統計。")
+                self.show_result(
+                    f"已載入專案：{display_name}\n已恢復計算結果與材料統計。\n"
+                    f"{dxf_notice}"
+                )
             else:
-                self.show_result(f"已載入專案：{path.stem}\n此專案尚無計算結果。")
+                self.show_result(
+                    f"已載入專案：{display_name}\n此專案尚無計算結果。\n"
+                    f"{dxf_notice}"
+                )
         return payload
 
     def _build_material_summary_payload(self):
@@ -1116,11 +1590,16 @@ class SupportInputApp:
     def _mark_results_updated(self):
         self.last_calculated_time = datetime.now().isoformat(timespec="seconds")
         self.project_result = self._build_project_result_payload()
+        self._mark_project_dirty("成果配置已變更")
 
     def _build_project_payload(self, path=None):
-        project_name = Path(path).stem if path else "未命名專案"
+        project_name = (
+            self._project_case_name_from_path(path)
+            if path
+            else "未命名專案"
+        )
         return {
-            "schema_version": 2,
+            "schema_version": PROJECT_SCHEMA_VERSION,
             "project_information": {
                 "project_name": project_name,
                 "saved_at": datetime.now().isoformat(timespec="seconds"),
@@ -1130,6 +1609,7 @@ class SupportInputApp:
             "dxf_import_state": copy.deepcopy(
                 getattr(self, "dxf_last_import_debug", None)
             ),
+            "dxf_asset": copy.deepcopy(getattr(self, "dxf_asset", None)),
             "result": self._build_project_result_payload(),
         }
 
@@ -1137,15 +1617,27 @@ class SupportInputApp:
         input_data = payload.get("input_data") or payload.get("data") or payload
         result_payload = payload.get("result", None)
         dxf_import_state = payload.get("dxf_import_state")
+        dxf_asset = payload.get("dxf_asset")
         self.dxf_last_import_debug = (
             copy.deepcopy(dxf_import_state)
             if isinstance(dxf_import_state, dict)
+            else None
+        )
+        self.dxf_asset = (
+            copy.deepcopy(dxf_asset)
+            if isinstance(dxf_asset, dict)
             else None
         )
 
         self.walers = copy.deepcopy(input_data.get("walers", []))
         self.struts = copy.deepcopy(input_data.get("struts", []))
         self.braces = copy.deepcopy(input_data.get("braces", []))
+        self.inventory = copy.deepcopy(
+            input_data.get("inventory", self._load_default_inventory())
+        )
+        self.material_specs = copy.deepcopy(
+            input_data.get("material_specs", DEFAULT_MATERIAL_SPECS)
+        )
 
         self.result_items.clear()
         if isinstance(result_payload, dict):
@@ -1165,7 +1657,13 @@ class SupportInputApp:
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
         self.current_project_path = path
-        for table_name in ("walers", "struts", "braces", "inventory"):
+        for table_name in (
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+            "material_specs",
+        ):
             self._refresh_tree(table_name)
         self._refresh_results_tree()
         self.update_preview()
@@ -1343,6 +1841,195 @@ class SupportInputApp:
             if parent_id:
                 self.results_tree.item(parent_id, open=True)
         self.update_preview(preserve_view=True)
+
+    def _visible_dxf_export_plans(self):
+        plans = []
+        for result_id, item in self.result_items.items():
+            if not item.get("visible", True):
+                continue
+            result_type = item.get("type")
+            result = item.get("result")
+            if result_type == "waler" and isinstance(result, dict):
+                plan = result.get("selected_plan") or {}
+                member_id = str(result.get("waler_id", "") or "").strip()
+                if not member_id or not isinstance(plan, dict):
+                    continue
+                raw_pieces = list(plan.get("pieces", []) or [])
+                if not raw_pieces:
+                    raw_pieces = [
+                        ("steel", length)
+                        for length in list(plan.get("segments", []) or [])
+                    ]
+                    adjustment = float(plan.get("tail_adjustment", 0) or 0)
+                    if adjustment > 0:
+                        raw_pieces.append(("shim", adjustment))
+                pieces = tuple(
+                    ExportPiece(str(kind).lower(), float(length))
+                    for kind, length in raw_pieces
+                )
+                if pieces:
+                    plans.append(
+                        MemberExportPlan(
+                            member_id,
+                            "waler",
+                            pieces,
+                            float(plan.get("gap", 0) or 0),
+                            str(result_id),
+                        )
+                    )
+                continue
+
+            if result_type != "support" or result is None:
+                continue
+            for plan in list(getattr(result, "plans", []) or []):
+                member_id = str(getattr(plan, "support_id", "") or "").strip()
+                if not member_id or not self._support_plan_visible(item, member_id):
+                    continue
+                pieces = tuple(
+                    ExportPiece(str(kind).lower(), float(length))
+                    for kind, length in list(getattr(plan, "pieces", []) or [])
+                )
+                if pieces:
+                    plans.append(
+                        MemberExportPlan(
+                            member_id,
+                            "strut",
+                            pieces,
+                            float(getattr(plan, "gap", 0) or 0),
+                            str(result_id),
+                        )
+                    )
+        return plans
+
+    def _export_visible_results_to_dxf(self):
+        dxf_state = getattr(self, "dxf_last_import_debug", None)
+        if not isinstance(dxf_state, dict):
+            messagebox.showwarning(
+                "匯出支撐配置成果DXF",
+                (
+                    "目前專案沒有已確認的 DXF 工程幾何，"
+                    "無法重建乾淨成果圖。\n\n"
+                    "既有 Solver 結果仍會保留；請先匯入 DXF 並完成構件確認。"
+                ),
+                parent=self.root,
+            )
+            return
+
+        try:
+            plans = self._visible_dxf_export_plans()
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror(
+                "匯出 DXF 失敗",
+                f"可見方案含有無法匯出的分段資料：\n{exc}",
+                parent=self.root,
+            )
+            return
+        if not plans:
+            messagebox.showwarning(
+                "匯出 DXF",
+                "目前沒有勾選為可見的圍令或支撐配置。",
+                parent=self.root,
+            )
+            return
+
+        source_text = str(dxf_state.get("source_path", "") or "").strip()
+        source_hint = Path(source_text) if source_text else None
+        dxf_asset = getattr(self, "dxf_asset", None)
+        asset_name = (
+            str(dxf_asset.get("original_file_name", "") or "").strip()
+            if isinstance(dxf_asset, dict)
+            else ""
+        )
+        if source_hint is not None and source_hint.stem:
+            source_stem = source_hint.stem
+        elif asset_name:
+            source_stem = Path(asset_name).stem
+        else:
+            source_stem = "支撐配置"
+
+        initial_directory = Path.cwd()
+        if source_hint is not None and source_hint.parent.is_dir():
+            initial_directory = source_hint.parent
+        else:
+            project_path = getattr(self, "current_project_path", None)
+            if project_path is not None and Path(project_path).parent.is_dir():
+                initial_directory = Path(project_path).parent
+
+        default_name = f"{source_stem}_支撐配置成果.dxf"
+        output_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="建立乾淨支撐配置成果DXF",
+            initialdir=str(initial_directory),
+            initialfile=default_name,
+            defaultextension=".dxf",
+            filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
+        )
+        if not output_path:
+            return
+
+        try:
+            bindings = build_member_bindings(
+                dxf_state,
+                self.walers,
+                self.struts,
+            )
+            report = export_results_to_dxf(
+                dxf_state,
+                output_path,
+                plans,
+                bindings,
+            )
+        except (DXFResultExportError, OSError, ezdxf.DXFError) as exc:
+            messagebox.showerror(
+                "匯出 DXF 失敗",
+                str(exc),
+                parent=self.root,
+            )
+            return
+
+        role_labels = {
+            "waler": "圍令",
+            "strut": "支撐",
+            "brace": "斜撐",
+            "corner_brace": "角撐",
+            "column": "中間柱",
+            "beam": "托梁",
+            "auxiliary": "輔助線",
+        }
+        background_summary = "、".join(
+            f"{role_labels.get(role, role)} {count}"
+            for role, count in report.background_counts
+        ) or "無"
+        fallback_summary = ""
+        if report.layer_name_fallbacks:
+            fallback_summary = "\n圖層名稱替代：\n" + "\n".join(
+                f"- {item.original_name or '<空白>'} → {item.output_name}"
+                for item in report.layer_name_fallbacks
+            )
+        messagebox.showinfo(
+            "支撐配置成果DXF已建立",
+            (
+                "已建立乾淨DXF成果檔；原始DXF未被重新儲存或修改。\n"
+                f"DXF版本：{report.dxf_version}\n"
+                f"座標：原始世界座標；單位：{report.coordinate_units}\n"
+                f"背景：{report.background_layer_count}個圖層、"
+                f"{report.background_segment_count}條線段\n"
+                f"背景內容：{background_summary}\n"
+                f"成果圖層：SD_RESULT_WALER、SD_RESULT_SUPPORT\n"
+                f"最終結構檢查：{report.final_audit.error_count}項錯誤、"
+                f"{report.final_audit.fix_count}項修復\n"
+                f"Dimension：{report.actual_dimension_count}／"
+                f"{report.dimension_count}\n"
+                f"Jack Block Reference：{report.actual_jack_count}／"
+                f"{report.jack_count}\n\n"
+                f"成果構件：圍令{report.result_waler_count}、"
+                f"支撐{report.result_support_count}\n"
+                f"成果檔：\n{report.output_path}\n\n"
+                f"{report.merge_guidance}"
+                f"{fallback_summary}"
+            ),
+            parent=self.root,
+        )
 
     def _support_config_by_id(self, support_id):
         configs = self.build_support_inputs()
@@ -1594,6 +2281,7 @@ class SupportInputApp:
         if plan is None or config is None:
             messagebox.showwarning("支撐編輯器", "找不到支撐方案或支撐設定資料。")
             return
+        allowed_steel_lengths = support.configured_steel_lengths(config)
 
         editor = tk.Toplevel(self.root)
         editor.title(f"支撐配置編輯器 - {zoning} / {support_id}")
@@ -1695,7 +2383,7 @@ class SupportInputApp:
             if jack_count != 1:
                 return "❌ 千斤頂數量不是 1"
             for kind, length in piece_rows:
-                if kind == "steel" and length not in support.STEEL_LENGTHS:
+                if kind == "steel" and length not in allowed_steel_lengths:
                     return f"❌ 鋼材長度不合法：{length} mm"
                 if kind == "shim" and length not in support.SHIM_LENGTHS:
                     return f"❌ 調整塊長度不合法：{length} mm"
@@ -1768,7 +2456,12 @@ class SupportInputApp:
             renumber()
             evaluate_and_refresh()
 
-        ttk.Button(button_frame, text="新增鋼材", command=lambda: add_piece("steel", 5000)).pack(side="left", padx=(0, 5))
+        default_steel_length = allowed_steel_lengths[0] if allowed_steel_lengths else 5000
+        ttk.Button(
+            button_frame,
+            text="新增鋼材",
+            command=lambda: add_piece("steel", default_steel_length),
+        ).pack(side="left", padx=(0, 5))
         ttk.Button(button_frame, text="新增調整塊", command=lambda: add_piece("shim", 150)).pack(side="left", padx=5)
         ttk.Button(button_frame, text="新增千斤頂", command=lambda: add_piece("jack", support.JACK_LENGTH)).pack(side="left", padx=5)
         ttk.Button(button_frame, text="刪除構件", command=delete_piece).pack(side="left", padx=5)
@@ -1807,10 +2500,10 @@ class SupportInputApp:
                 if length <= 0:
                     messagebox.showerror("輸入錯誤", "長度(mm) 必須大於 0。", parent=editor)
                     return
-                if kind == "steel" and length not in support.STEEL_LENGTHS:
+                if kind == "steel" and length not in allowed_steel_lengths:
                     messagebox.showerror(
                         "輸入錯誤",
-                        f"鋼材長度必須存在於可用鋼材長度：{support.STEEL_LENGTHS}",
+                        f"鋼材長度必須存在於可用鋼材長度：{allowed_steel_lengths}",
                         parent=editor,
                     )
                     return
@@ -2300,6 +2993,7 @@ class SupportInputApp:
                 item.setdefault("support_visibility", {})[support_id] = make_visible
             for _result_id, item, _info in grouped_entries:
                 item["visible"] = make_visible
+            self._mark_project_dirty("結果顯示狀態已變更")
             self._refresh_results_tree(selected_id=group_iid)
             self.update_preview(preserve_view=True)
             return
@@ -2308,6 +3002,7 @@ class SupportInputApp:
         for _result_id, item, _info in grouped_entries:
             item["visible"] = make_visible
 
+        self._mark_project_dirty("結果顯示狀態已變更")
         self._refresh_results_tree(selected_id=group_iid)
         self.update_preview(preserve_view=True)
 
@@ -2317,6 +3012,7 @@ class SupportInputApp:
             return
 
         item["visible"] = not item.get("visible", True)
+        self._mark_project_dirty("結果顯示狀態已變更")
         self._refresh_results_tree(selected_id=result_id)
         self.update_preview(preserve_view=True)
 
@@ -2331,6 +3027,7 @@ class SupportInputApp:
             self._support_plan_visible(item, plan_id)
             for plan_id in self._support_plan_ids(item)
         )
+        self._mark_project_dirty("結果顯示狀態已變更")
         self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
         parent_id = self.results_tree.parent(self._support_plan_iid(zoning, support_id)) if self.results_tree.exists(self._support_plan_iid(zoning, support_id)) else ""
         if parent_id:
@@ -3825,6 +4522,10 @@ class SupportInputApp:
             # Retain only serializable diagnostics.  No ezdxf Entity crosses
             # into the application data model or Solver input path.
             self.dxf_last_import_debug = result.to_debug_dict()
+            self.dxf_asset_status_report = self._ensure_project_services().runtime_report(
+                file_path
+            )
+            self.last_dxf_compatibility_report = None
             for table_name in ("walers", "struts", "braces"):
                 self._refresh_tree(table_name)
             self._handle_input_data_changed(preserve_view=False)
@@ -3835,7 +4536,7 @@ class SupportInputApp:
                 f"角撐 {len(imported['corner_braces'])}、"
                 f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}"
             )
-        except (DXFImportError, OSError, ValueError) as exc:
+        except (DXFImportError, ProjectPersistenceError, OSError, ValueError) as exc:
             self._set_cad_import_status("DXF 匯入失敗", error=exc)
             messagebox.showerror("DXF 匯入失敗", str(exc), parent=self.root)
 
@@ -3858,11 +4559,31 @@ class SupportInputApp:
         if had_result and hasattr(self, "result_text"):
             self.show_result("結果已失效，請重新計算")
 
-    def _handle_input_data_changed(self, *, preserve_view=True, table_name=None):
-        if table_name in (None, "walers", "struts", "braces"):
+    def _handle_input_data_changed(
+        self,
+        *,
+        preserve_view=True,
+        table_name=None,
+        field_name=None,
+    ):
+        metadata_only = (
+            table_name == "material_specs"
+            or (
+                table_name == "struts"
+                and field_name == "material_spec"
+            )
+        )
+        if not metadata_only and table_name in (
+            None,
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+        ):
             self._invalidate_solver_state_after_input_change()
-        elif table_name == "inventory":
+        if table_name == "inventory":
             self._update_material_summary()
+        self._mark_project_dirty("輸入資料已變更")
         self.update_preview(preserve_view=preserve_view)
 
     def _select_input_row(self, table_name, index):
@@ -3914,6 +4635,18 @@ class SupportInputApp:
             return False
 
     def _on_main_window_close(self):
+        if getattr(self, "project_dirty", False):
+            decision = messagebox.askyesnocancel(
+                "尚未儲存",
+                "目前專案有尚未儲存的變更。\n是否先儲存再關閉？",
+                parent=self.root,
+            )
+            if decision is None:
+                return
+            if decision:
+                saved = self._save_current_project()
+                if saved is None or getattr(self, "project_dirty", False):
+                    return
         if self._cad_poll_after_id is not None:
             try:
                 self.root.after_cancel(self._cad_poll_after_id)
@@ -3930,7 +4663,13 @@ class SupportInputApp:
                 break
 
     def _load_initial_data(self):
-        for table_name in ("walers", "struts", "braces", "inventory"):
+        for table_name in (
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+            "material_specs",
+        ):
             self._refresh_tree(table_name)
         self._refresh_results_tree()
         self._refresh_project_case_list()
@@ -4031,6 +4770,14 @@ class SupportInputApp:
     def _field_label(self, table_name, field_name):
         return self.table_column_labels.get(table_name, {}).get(field_name, field_name)
 
+    def _material_spec_options(self, usage):
+        return sorted({
+            str(row.get("Spec", "") or "").strip()
+            for row in self.material_specs
+            if str(row.get("Usage", "") or "").strip() == usage
+            and str(row.get("Spec", "") or "").strip()
+        })
+
     def _on_tree_double_click(self, event):
         tree = event.widget
         row_id = tree.identify_row(event.y)
@@ -4051,15 +4798,35 @@ class SupportInputApp:
         if self.editing_entry is not None:
             self.editing_entry.destroy()
 
-        entry = tk.Entry(tree)
+        table_name = self._get_table_name_by_tree(tree)
+        combobox_values = None
+        combobox_state = "normal"
+        if table_name == "material_specs" and column == "Usage":
+            combobox_values = ("支撐", "圍令")
+            combobox_state = "readonly"
+        elif column == "material_spec" and table_name in ("walers", "struts"):
+            usage = "圍令" if table_name == "walers" else "支撐"
+            combobox_values = self._material_spec_options(usage)
+
+        if combobox_values is None:
+            entry = tk.Entry(tree)
+            entry.insert(0, current_value)
+        else:
+            entry = ttk.Combobox(
+                tree,
+                values=combobox_values,
+                state=combobox_state,
+            )
+            entry.set(current_value)
         entry.place(x=x, y=y, width=width, height=height)
-        entry.insert(0, current_value)
         entry.focus_set()
 
         def save_edit(event=None):
             self._finish_edit(tree, row_id, column, entry)
 
         entry.bind("<Return>", save_edit)
+        if isinstance(entry, ttk.Combobox):
+            entry.bind("<<ComboboxSelected>>", save_edit)
         entry.bind("<FocusOut>", save_edit)
         self.editing_entry = entry
 
@@ -4083,7 +4850,11 @@ class SupportInputApp:
         tree.set(row_id, column, self._format_display_value(value))
         if table_name == "inventory":
             self._update_material_summary()
-        self._handle_input_data_changed(preserve_view=True, table_name=table_name)
+        self._handle_input_data_changed(
+            preserve_view=True,
+            table_name=table_name,
+            field_name=column,
+        )
 
     def _item_id_to_index(self, item_id):
         try:
@@ -4120,6 +4891,8 @@ class SupportInputApp:
         new_row = {col: "" for col in self.table_columns[table_name]}
         if table_name == "struts":
             new_row["TargetJackRegion"] = 2
+        elif table_name == "material_specs":
+            new_row["Usage"] = "支撐"
         getattr(self, table_name).append(new_row)
         self._refresh_tree(table_name)
         self._handle_input_data_changed(preserve_view=True, table_name=table_name)
@@ -5284,6 +6057,10 @@ class SupportInputApp:
         if not self.validate_data():
             return
 
+        if not self._get_purchasable_lengths():
+            self.show_result("錯誤：材料長度庫存沒有可供支撐 Solver 使用的有效長度")
+            return
+
         zonings = sorted({
             str(row.get("Zoning", "") or "").strip()
             for row in self.struts
@@ -5390,6 +6167,14 @@ class SupportInputApp:
 
     def build_support_inputs(self, zoning: Optional[str] = None) -> List[support.SupportConfig]:
         supports: List[support.SupportConfig] = []
+        waler_type_by_id = {
+            str(row.get("WalerID", "") or "").strip(): support.normalize_waler_type(
+                row.get("material_spec", "")
+            )
+            for row in self.walers
+            if str(row.get("WalerID", "") or "").strip()
+        }
+        available_steel_lengths = self._get_purchasable_lengths()
         for row in self.struts:
             row_zoning = str(row.get("Zoning", "") or "").strip()
             if zoning is not None and row_zoning != zoning:
@@ -5432,6 +6217,8 @@ class SupportInputApp:
                 if target_jack_region_value is not None
                 else 2
             )
+            from_waler_id = str(row.get("FromWaler", "") or "").strip()
+            to_waler_id = str(row.get("ToWaler", "") or "").strip()
             supports.append(
                 support.SupportConfig(
                     support_id=support_id,
@@ -5440,6 +6227,9 @@ class SupportInputApp:
                     waler_centers=waler_centers,
                     target_jack_region=target_jack_region,
                     material_spec=str(row.get("material_spec", "") or "").strip(),
+                    from_waler_type=waler_type_by_id.get(from_waler_id, "Steel"),
+                    to_waler_type=waler_type_by_id.get(to_waler_id, "Steel"),
+                    steel_lengths=list(available_steel_lengths),
                 )
             )
         return supports

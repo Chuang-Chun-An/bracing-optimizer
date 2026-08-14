@@ -20,6 +20,9 @@ class SupportConfig:
     waler_centers: List[int]
     target_jack_region: int = 2
     material_spec: str = ""
+    from_waler_type: str = "Steel"
+    to_waler_type: str = "Steel"
+    steel_lengths: Optional[List[int]] = None
 
 
 @dataclass
@@ -40,12 +43,39 @@ class SupportPlan:
     selection_reason: str = ""
 
 
-def get_support_config_key(config: SupportConfig) -> Tuple[int, Tuple[int, ...], Tuple[int, ...], int]:
+def normalize_waler_type(value: object) -> str:
+    """Return the construction-rule waler type; legacy blanks mean Steel."""
+
+    return "RC" if str(value or "").strip().upper() == "RC" else "Steel"
+
+
+def configured_steel_lengths(config: SupportConfig) -> List[int]:
+    """Return this project's Solver length source, with legacy fallback."""
+
+    source = getattr(config, "steel_lengths", None)
+    if source is None:
+        return list(STEEL_LENGTHS)
+
+    configured = set()
+    for value in source:
+        try:
+            length = int(round(float(value)))
+        except (TypeError, ValueError):
+            continue
+        if length > 0:
+            configured.add(length)
+    return sorted(configured)
+
+
+def get_support_config_key(config: SupportConfig) -> Tuple[object, ...]:
     return (
         config.total_length,
         tuple(config.pile_centers),
         tuple(config.waler_centers),
         config.target_jack_region,
+        normalize_waler_type(config.from_waler_type),
+        normalize_waler_type(config.to_waler_type),
+        tuple(configured_steel_lengths(config)),
     )
 
 
@@ -120,7 +150,7 @@ SUPPORT_MATERIAL_CONCENTRATION_WEIGHT = 0.0
 SUPPORT_DEFAULT_SHORT_MATERIAL_RATIO = 38
 SUPPORT_DEFAULT_MID_MATERIAL_RATIO = 40
 SUPPORT_DEFAULT_LONG_MATERIAL_RATIO = 22
-SUPPORT_CANDIDATE_CACHE_SCHEMA_VERSION = 6
+SUPPORT_CANDIDATE_CACHE_SCHEMA_VERSION = 8
 SUPPORT_CANDIDATE_SELECTION_VERSION = "phase1_material_style_v5"
 SUPPORT_MIN_GAP = 0
 SUPPORT_SHORT_STEEL_THRESHOLD = 4000
@@ -215,9 +245,11 @@ def build_support_candidate_cache_key(
             ("pile_centers", tuple(sorted(_stable_number_tuple(config.pile_centers)))),
             ("waler_centers", tuple(sorted(_stable_number_tuple(config.waler_centers)))),
             ("target_jack_region", int(config.target_jack_region)),
+            ("from_waler_type", normalize_waler_type(config.from_waler_type)),
+            ("to_waler_type", normalize_waler_type(config.to_waler_type)),
         )),
         ("materials", (
-            ("steel_lengths", tuple(sorted(_stable_number_tuple(STEEL_LENGTHS)))),
+            ("steel_lengths", tuple(_stable_number_tuple(configured_steel_lengths(config)))),
             ("shim_lengths", tuple(sorted(_stable_number_tuple(SHIM_LENGTHS)))),
             ("jack_length", _stable_cache_number(JACK_LENGTH)),
         )),
@@ -234,6 +266,12 @@ def build_support_candidate_cache_key(
         ("jack_region_rules", (
             ("algorithm", "sorted_pile_interval_v1"),
             ("jack_center_bucket_size", _stable_cache_number(jack_center_bucket_size)),
+        )),
+        ("layout_generation_rules", (
+            ("waler_type_rule", "direct_generation_v1"),
+            ("steel_waler_shim", "adjacent_to_jack"),
+            ("rc_waler_shim", "at_rc_contact_face"),
+            ("rc_terminal_shim_end_clearance", "exempt_matching_end_zone_only"),
         )),
         ("single_score_rules", (
             ("short_steel_threshold", _stable_cache_number(SUPPORT_SHORT_STEEL_THRESHOLD)),
@@ -1279,11 +1317,18 @@ def forbidden_zones(config: SupportConfig) -> List[Tuple[int, int, str]]:
     return zones
 
 
-def check_joint_forbidden(joint: int, config: SupportConfig) -> bool:
+def check_joint_forbidden(
+    joint: int,
+    config: SupportConfig,
+    ignored_zone_names: Tuple[str, ...] = (),
+) -> bool:
     """
     True 表示此 joint 落入禁止區。
     """
-    for z_start, z_end, _ in forbidden_zones(config):
+    ignored = set(ignored_zone_names)
+    for z_start, z_end, zone_name in forbidden_zones(config):
+        if zone_name in ignored:
+            continue
         if z_start <= joint <= z_end:
             return True
     return False
@@ -1291,6 +1336,47 @@ def check_joint_forbidden(joint: int, config: SupportConfig) -> bool:
 
 def count_forbidden_joints(joints: List[int], config: SupportConfig) -> int:
     return sum(1 for j in joints if check_joint_forbidden(j, config))
+
+
+def count_forbidden_piece_joints(
+    pieces: List[Tuple[str, int]],
+    config: SupportConfig,
+) -> int:
+    """Count forbidden boundaries with the RC contact-shim exception.
+
+    Only the boundary immediately behind a terminal shim at an RC contact
+    ignores the matching end-clearance zone.  Pile/waler zones and every
+    other piece boundary remain active.
+    """
+
+    if len(pieces) < 2:
+        return 0
+
+    positions = build_positions(pieces)
+    last_boundary_index = len(pieces) - 2
+    forbidden_count = 0
+    for boundary_index, joint in enumerate(positions[1:-1]):
+        ignored_zone_names: Tuple[str, ...] = ()
+        if (
+            boundary_index == 0
+            and str(pieces[0][0]).lower() == "shim"
+            and normalize_waler_type(config.from_waler_type) == "RC"
+        ):
+            ignored_zone_names = ("left_end",)
+        elif (
+            boundary_index == last_boundary_index
+            and str(pieces[-1][0]).lower() == "shim"
+            and normalize_waler_type(config.to_waler_type) == "RC"
+        ):
+            ignored_zone_names = ("right_end",)
+
+        if check_joint_forbidden(
+            joint,
+            config,
+            ignored_zone_names=ignored_zone_names,
+        ):
+            forbidden_count += 1
+    return forbidden_count
 
 
 # =========================================================
@@ -1321,13 +1407,13 @@ def evaluate_single_support(
         valid = False
         reasons.append(f"餘長(mm) 不合法: {gap}")
 
-    forbidden_count = count_forbidden_joints(joints, config)
+    forbidden_count = count_forbidden_piece_joints(pieces, config)
     if forbidden_count > 0:
         valid = False
         reasons.append(f"{forbidden_count} 個接頭落入禁止區")
 
     for kind, length in pieces:
-        if kind == "steel" and length not in STEEL_LENGTHS:
+        if kind == "steel" and length not in configured_steel_lengths(config):
             valid = False
             reasons.append(f"鋼材長度不合法: {length}")
 
@@ -1481,7 +1567,7 @@ def generate_length_combinations_dp(
         0: [(0.0, (), 0)]
     }
 
-    for steel in STEEL_LENGTHS:
+    for steel in configured_steel_lengths(config):
         for total in range(steel, max_steel_sum + 1):
             if total - steel not in dp:
                 continue
@@ -1603,6 +1689,67 @@ def beam_search_steel_orders(
     return [list(sequence) for _, sequence in completed[:max_orders]]
 
 
+def generate_waler_rule_layouts(
+    config: SupportConfig,
+    steel_pieces: List[Tuple[str, int]],
+    shim: int,
+) -> List[List[Tuple[str, int]]]:
+    """Generate only layouts permitted by the waler construction rule.
+
+    Waler type is deliberately absent from every score.  It constrains this
+    construction space only:
+
+    - Steel/Steel: a non-zero shim and the jack form one adjacent pair.
+    - Any RC contact: the shim is the terminal piece at that RC contact face.
+
+    A support with RC walers at both ends and one shim can place that shim at
+    either contact face, so both terminal alternatives are generated.
+    """
+
+    jack = ("jack", JACK_LENGTH)
+    shim_piece = ("shim", int(shim))
+    steel = list(steel_pieces)
+    if int(shim) <= 0:
+        return [steel[:position] + [jack] + steel[position:] for position in range(len(steel) + 1)]
+
+    from_rc = normalize_waler_type(config.from_waler_type) == "RC"
+    to_rc = normalize_waler_type(config.to_waler_type) == "RC"
+    layouts: List[List[Tuple[str, int]]] = []
+
+    if not from_rc and not to_rc:
+        # Insert the complete assembly as one unit; illegal separated
+        # Jack/Shim layouts are never materialized.
+        for position in range(len(steel) + 1):
+            layouts.append(
+                steel[:position] + [jack, shim_piece] + steel[position:]
+            )
+            layouts.append(
+                steel[:position] + [shim_piece, jack] + steel[position:]
+            )
+        return layouts
+
+    if from_rc:
+        # The first piece touches the FromWaler RC face.  Jack positions begin
+        # after the terminal shim so that this contact can never be broken.
+        base = [shim_piece, *steel]
+        for position in range(1, len(base) + 1):
+            layouts.append(base[:position] + [jack] + base[position:])
+
+    if to_rc:
+        # The final piece touches the ToWaler RC face.  Jack positions stop
+        # before the terminal shim for the same reason.
+        base = [*steel, shim_piece]
+        for position in range(0, len(base)):
+            layouts.append(base[:position] + [jack] + base[position:])
+
+    # When both ends are RC, layouts from the two terminal alternatives can
+    # coincide for degenerate inputs; keep deterministic unique output.
+    unique: Dict[Tuple[Tuple[str, int], ...], List[Tuple[str, int]]] = {}
+    for layout in layouts:
+        unique.setdefault(tuple(layout), layout)
+    return list(unique.values())
+
+
 def beam_search_layout(
     config: SupportConfig,
     steel_lengths: List[int],
@@ -1625,31 +1772,13 @@ def beam_search_layout(
 
     for order in steel_orders:
         steel_pieces = [("steel", length) for length in order]
-
-        if shim > 0:
-            for shim_pos in range(len(steel_pieces) + 1):
-                pieces_with_shim = steel_pieces[:]
-                pieces_with_shim.insert(shim_pos, ("shim", shim))
-
-                for jack_pos in range(len(pieces_with_shim) + 1):
-                    pieces = pieces_with_shim[:]
-                    pieces.insert(jack_pos, ("jack", JACK_LENGTH))
-                    key = tuple(pieces)
-                    if key in seen:
-                        continue
-                    seen[key] = True
-                    plan = evaluate_single_support(config, pieces)
-                    candidates.append(plan)
-        else:
-            for jack_pos in range(len(steel_pieces) + 1):
-                pieces = steel_pieces[:]
-                pieces.insert(jack_pos, ("jack", JACK_LENGTH))
-                key = tuple(pieces)
-                if key in seen:
-                    continue
-                seen[key] = True
-                plan = evaluate_single_support(config, pieces)
-                candidates.append(plan)
+        for pieces in generate_waler_rule_layouts(config, steel_pieces, shim):
+            key = tuple(pieces)
+            if key in seen:
+                continue
+            seen[key] = True
+            plan = evaluate_single_support(config, pieces)
+            candidates.append(plan)
 
     eligible_layouts = [
         plan
@@ -2153,7 +2282,7 @@ def calculate_material_concentration_analysis(
     spec_breakdown: Dict[int, Dict[str, float]] = {}
     penalty = 0.0
 
-    for spec in sorted(STEEL_LENGTHS):
+    for spec in sorted(set(STEEL_LENGTHS) | set(usage_counter)):
         count = int(usage_counter.get(int(spec), 0))
         ratio = count / total_steel_count if total_steel_count else 0.0
         excess = max(0.0, ratio - threshold)

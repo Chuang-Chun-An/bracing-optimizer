@@ -12,7 +12,15 @@ TABLE_SPECS = {
     "walers": {
         "id_field": "WalerID",
         "id_prefix": "W",
-        "columns": ("WalerID", "StartX", "StartY", "EndX", "EndY", "material_spec", "Remark"),
+        "columns": (
+            "WalerID",
+            "StartX",
+            "StartY",
+            "EndX",
+            "EndY",
+            "material_spec",
+            "Remark",
+        ),
         "defaults": {
             "StartX": "",
             "StartY": "",
@@ -95,6 +103,15 @@ TABLE_SPECS = {
             "Qty": "",
         },
     },
+    "material_specs": {
+        "id_field": None,
+        "id_prefix": None,
+        "columns": ("Usage", "Spec"),
+        "defaults": {
+            "Usage": "支撐",
+            "Spec": "",
+        },
+    },
 }
 
 TABLE_COLUMNS = {
@@ -102,6 +119,16 @@ TABLE_COLUMNS = {
     for table_name, spec in TABLE_SPECS.items()
 }
 GEOMETRY_TABLES = ("walers", "struts", "braces")
+PROJECT_SETTING_TABLES = ("inventory", "material_specs")
+DEFAULT_MATERIAL_SPECS = (
+    {"Usage": "圍令", "Spec": "RC"},
+    {"Usage": "圍令", "Spec": "H300x300"},
+    {"Usage": "圍令", "Spec": "H350x350"},
+    {"Usage": "圍令", "Spec": "BOX400x400"},
+    {"Usage": "支撐", "Spec": "H300x300"},
+    {"Usage": "支撐", "Spec": "H350x350"},
+    {"Usage": "支撐", "Spec": "BOX400x400"},
+)
 
 
 def _legacy_position_list(values: Sequence[Any]) -> str:
@@ -117,7 +144,17 @@ def _legacy_position_list(values: Sequence[Any]) -> str:
 
 def normalize_legacy_fields(table_name: str, source: Mapping[str, Any]) -> dict[str, Any]:
     values = copy.deepcopy(dict(source))
-    if table_name == "struts":
+    if table_name == "walers":
+        # WalerType used to duplicate the visible material specification.
+        # Preserve legacy RC projects by migrating the construction-bearing
+        # value into the single material_spec field.
+        legacy_type = str(values.pop("WalerType", "") or "").strip()
+        if (
+            not str(values.get("material_spec", "") or "").strip()
+            and legacy_type.upper() == "RC"
+        ):
+            values["material_spec"] = "RC"
+    elif table_name == "struts":
         if "BeamPositions" not in values:
             values["BeamPositions"] = _legacy_position_list(
                 [values.get("Beam1"), values.get("Beam2")]
@@ -198,15 +235,18 @@ class ProjectDataModel:
         struts: Sequence[Mapping[str, Any]] = (),
         braces: Sequence[Mapping[str, Any]] = (),
         inventory: Sequence[Mapping[str, Any]] = (),
+        material_specs: Sequence[Mapping[str, Any]] = DEFAULT_MATERIAL_SPECS,
     ) -> None:
         self.walers: list[dict[str, Any]] = []
         self.struts: list[dict[str, Any]] = []
         self.braces: list[dict[str, Any]] = []
         self.inventory: list[dict[str, Any]] = []
+        self.material_specs: list[dict[str, Any]] = []
         self.replace_table("walers", walers)
         self.replace_table("struts", struts)
         self.replace_table("braces", braces)
         self.replace_table("inventory", inventory)
+        self.replace_table("material_specs", material_specs)
 
     def rows(self, table_name: str) -> list[dict[str, Any]]:
         if table_name not in TABLE_SPECS:
@@ -232,12 +272,14 @@ class ProjectDataModel:
     def to_case_data(self) -> dict[str, list[dict[str, Any]]]:
         return {
             table_name: copy.deepcopy(self.rows(table_name))
-            for table_name in GEOMETRY_TABLES
+            for table_name in (*GEOMETRY_TABLES, *PROJECT_SETTING_TABLES)
         }
 
 
 __all__ = [
     "GEOMETRY_TABLES",
+    "PROJECT_SETTING_TABLES",
+    "DEFAULT_MATERIAL_SPECS",
     "TABLE_COLUMNS",
     "TABLE_SPECS",
     "ProjectDataModel",

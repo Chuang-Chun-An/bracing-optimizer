@@ -23,8 +23,10 @@ from cad_view_interaction import CADViewInteractionController, CADViewport
 
 try:
     import ezdxf
+    from ezdxf.disassemble import recursive_decompose as _recursive_decompose
 except ImportError:  # pragma: no cover - only a broken installation
     ezdxf = None
+    _recursive_decompose = None
 
 
 Point = tuple[float, float]
@@ -32,8 +34,6 @@ WorkArea = tuple[int, int, int, int]
 _WINDOW_GEOMETRY_PATTERN = re.compile(
     r"^\s*(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?\s*$"
 )
-# Temporary Y1A drawing default; change both values to "" before production use.
-TEMPORARY_DEFAULT_COORDINATE_ORIGIN = ("338238.287", "-724845.570")
 ERROR_SEVERITIES = {"error", "critical"}
 CONNECTION_VALIDATION_CODES = {
     "AMBIGUOUS_WALER_CONNECTION",
@@ -312,6 +312,24 @@ def parse_coordinate_origin(origin_x: str, origin_y: str) -> tuple[float, float]
     if not math.isfinite(x_value) or not math.isfinite(y_value):
         raise DXFImportError("原點座標格式錯誤")
     return x_value, y_value
+
+
+def coordinate_system_from_candidate(candidate: CandidatePoint) -> CoordinateSystem:
+    """Use one explicitly selected DXF point as the exact local origin."""
+
+    return CoordinateSystem(
+        "local",
+        float(candidate.world_point[0]),
+        float(candidate.world_point[1]),
+        "selected_candidate_point",
+    )
+
+
+def normalize_project_coordinate(value: Any) -> int:
+    """Normalize a Solver-facing drawing coordinate to the nearest millimetre."""
+
+    number = float(value)
+    return math.floor(number + 0.5) if number >= 0 else math.ceil(number - 0.5)
 
 
 @dataclass(frozen=True)
@@ -654,6 +672,20 @@ class SourceGeometry:
 
 
 @dataclass(frozen=True)
+class SourceText:
+    """Preview-only text retained from an auxiliary DXF layer."""
+
+    role: str
+    source_handle: str
+    text: str
+    position: Point
+    height: float = 0.0
+    rotation: float = 0.0
+    source_layer: str = ""
+    source_entity_type: str = ""
+
+
+@dataclass(frozen=True)
 class ComponentAssociation:
     """One confirmed Column/Beam ownership relation to a Solver strut."""
 
@@ -685,6 +717,7 @@ class SelectionState:
     hovered_component_id: str = ""
     mode: str = "idle"
     selected_candidate_point_id: str = ""
+    selected_candidate_source: str = ""
     hovered_candidate_point_id: str = ""
     preview_candidate_point_id: str = ""
     selected_start_point_id: str = ""
@@ -726,6 +759,7 @@ class DXFImportResult:
     messages: tuple[ValidationMessage, ...]
     source_entity_counts: Mapping[str, int]
     source_geometry: tuple[SourceGeometry, ...] = ()
+    source_texts: tuple[SourceText, ...] = ()
     coordinate_system: CoordinateSystem = CoordinateSystem()
     columns: tuple[Column, ...] = ()
     beams: tuple[Beam, ...] = ()
@@ -826,7 +860,7 @@ class DXFImportResult:
         self,
         existing_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Return Solver rows; validated errors are a hard conversion boundary."""
+        """Return 1 mm-normalized Solver rows; keep the DXF model full precision."""
 
         if not self.can_import:
             codes = sorted({item.code for item in self.messages if item.severity in ERROR_SEVERITIES})
@@ -849,6 +883,20 @@ class DXFImportResult:
                     result.append(candidate)
             return result
 
+        def normalize_row_coordinates(row: dict[str, Any]) -> dict[str, Any]:
+            for field_name in (
+                "StartX",
+                "StartY",
+                "EndX",
+                "EndY",
+                "ReferenceX",
+                "ReferenceY",
+            ):
+                value = row.get(field_name)
+                if value is not None and value != "":
+                    row[field_name] = normalize_project_coordinate(value)
+            return row
+
         waler_ids = allocate("walers", "W", len(self.walers))
         strut_ids = allocate("struts", "S", len(self.struts))
         brace_ids = allocate("braces", "B", len(self.braces))
@@ -856,12 +904,12 @@ class DXFImportResult:
         strut_id_map = {old.id: new for old, new in zip(self.struts, strut_ids)}
         walers = []
         for member, identifier in zip(self.walers, waler_ids):
-            row = member.to_project_row()
+            row = normalize_row_coordinates(member.to_project_row())
             row["WalerID"] = identifier
             walers.append(row)
         struts = []
         for member, identifier in zip(self.struts, strut_ids):
-            row = member.to_project_row()
+            row = normalize_row_coordinates(member.to_project_row())
             row.update(
                 StrutID=identifier,
                 FromWaler=id_map.get(member.from_waler, member.from_waler),
@@ -870,7 +918,7 @@ class DXFImportResult:
             struts.append(row)
         braces = []
         for member, identifier in zip(self.braces, brace_ids):
-            row = member.to_project_row()
+            row = normalize_row_coordinates(member.to_project_row())
             row.update(
                 BraceID=identifier,
                 FromWaler=id_map.get(member.from_waler, member.from_waler),
@@ -883,7 +931,7 @@ class DXFImportResult:
         ) -> list[dict[str, Any]]:
             rows = []
             for member in members:
-                row = member.to_project_row()
+                row = normalize_row_coordinates(member.to_project_row())
                 row["AssociatedStrutID"] = strut_id_map.get(
                     member.associated_strut_id,
                     member.associated_strut_id,
@@ -3194,6 +3242,7 @@ class PreviewRenderer:
         layer: str,
         *coordinates: float,
         component_id: str = "",
+        source_handle: str = "",
         overlay_key: str = "",
         extra_tags: Sequence[str] = (),
         **options: Any,
@@ -3204,6 +3253,7 @@ class PreviewRenderer:
             item_id,
             layer,
             component_id=component_id,
+            source_handle=source_handle,
             overlay_key=overlay_key,
         )
 
@@ -3395,6 +3445,7 @@ class SelectionController:
         self.state.selected_component_id = component_id
         self.state.hovered_component_id = ""
         self.state.selected_candidate_point_id = ""
+        self.state.selected_candidate_source = ""
         self.state.hovered_candidate_point_id = ""
         self.state.preview_candidate_point_id = ""
         self.state.mode = "idle"
@@ -3421,6 +3472,9 @@ class SelectionController:
         point = self.candidate_store.get(component_id, point_id)
         if point is None:
             return self._noop()
+        self.state.selected_candidate_source = (
+            source if source in self.VALID_SOURCES else "programmatic"
+        )
         mode = self.state.mode
         selected_changed = point_id != self.state.selected_candidate_point_id
         pending_changed = False
@@ -3496,6 +3550,7 @@ class SelectionController:
             return self._noop()
         self.state.mode = mode
         self.state.selected_candidate_point_id = ""
+        self.state.selected_candidate_source = ""
         self.state.pick_baseline_start_point_id = self.state.pending_start_point_id
         self.state.pick_baseline_end_point_id = self.state.pending_end_point_id
         return self._commit(
@@ -3611,6 +3666,9 @@ class SelectionController:
         self.state.pending_start_point_id = start_point_id
         self.state.pending_end_point_id = end_point_id
         self.state.selected_candidate_point_id = start_point_id
+        self.state.selected_candidate_source = (
+            source if source in self.VALID_SOURCES else "programmatic"
+        )
         self.state.preview_candidate_point_id = start_point_id
         self.state.pending_selection_source = (
             "cad_manual" if source == "cad_manual" else "manual_candidate_points"
@@ -5466,6 +5524,7 @@ class DXFImporter:
         debug: list[EntityDebugInfo] = []
         messages: list[ValidationMessage] = []
         source_geometry: list[SourceGeometry] = []
+        source_texts: list[SourceText] = []
         source_counts: dict[str, int] = {}
         candidates_by_role: dict[str, list[_Candidate]] = {}
 
@@ -5610,6 +5669,12 @@ class DXFImporter:
         for layer in selected["auxiliary"]:
             entities = self.entities_on_layer(layer)
             source_counts["auxiliary"] += len(entities)
+            self._collect_auxiliary_source_texts(
+                layer,
+                entities,
+                source_texts,
+                debug,
+            )
             self._geometry_groups(
                 "auxiliary",
                 layer,
@@ -5687,6 +5752,7 @@ class DXFImporter:
             tuple(messages),
             source_counts,
             tuple(source_geometry),
+            tuple(source_texts),
             columns=columns,
             beams=beams,
             corner_braces=corner_braces,
@@ -5701,6 +5767,131 @@ class DXFImporter:
             world_result,
             coordinate_system or CoordinateSystem(),
         )
+
+    def _collect_auxiliary_source_texts(
+        self,
+        layer: str,
+        entities: Sequence[Any],
+        source_texts: list[SourceText],
+        debug: list[EntityDebugInfo],
+    ) -> None:
+        """Collect displayed text recursively without exposing it to recognition."""
+
+        if _recursive_decompose is None:
+            return
+        for entity in entities:
+            root_handle = str(
+                getattr(entity.dxf, "handle", "")
+                or f"NO_HANDLE_TEXT_{len(source_texts)}"
+            )
+            try:
+                leaves = list(_recursive_decompose((entity,)))
+                leaves.extend(self._unbound_nested_attdefs(entity))
+                for leaf in leaves:
+                    entity_type = leaf.dxftype()
+                    if entity_type not in self.TEXT_TYPES:
+                        continue
+                    text = self._source_text_content(leaf)
+                    position = self._source_text_position(leaf)
+                    if not text or position is None:
+                        continue
+                    source_texts.append(
+                        SourceText(
+                            role="auxiliary",
+                            source_handle=root_handle,
+                            text=text,
+                            position=position,
+                            height=self._source_text_height(leaf),
+                            rotation=self._source_text_rotation(leaf),
+                            source_layer=layer,
+                            source_entity_type=entity_type,
+                        )
+                    )
+            except Exception as exc:
+                debug.append(
+                    EntityDebugInfo(
+                        "auxiliary",
+                        layer,
+                        entity.dxftype(),
+                        root_handle,
+                        "preview_failed",
+                        "warning",
+                        detail=f"Unable to read preview text: {exc}",
+                    )
+                )
+
+    def _unbound_nested_attdefs(self, entity: Any) -> list[Any]:
+        """Return nested ATTDEF defaults that have no displayed ATTRIB."""
+
+        if entity.dxftype() != "INSERT":
+            return []
+        result: list[Any] = []
+        attached_tags = {
+            str(getattr(attrib.dxf, "tag", "")).casefold()
+            for attrib in getattr(entity, "attribs", ())
+        }
+        block = entity.block()
+        if block is not None:
+            transform = entity.matrix44()
+            for child in block:
+                if child.dxftype() != "ATTDEF":
+                    continue
+                tag = str(getattr(child.dxf, "tag", "")).casefold()
+                if tag in attached_tags:
+                    continue
+                copy = child.copy()
+                copy.transform(transform)
+                result.append(copy)
+        try:
+            virtual_entities = entity.virtual_entities()
+            for child in virtual_entities:
+                if child.dxftype() == "INSERT":
+                    result.extend(self._unbound_nested_attdefs(child))
+        except Exception:
+            pass
+        return result
+
+    @staticmethod
+    def _source_text_content(entity: Any) -> str:
+        if entity.dxftype() == "MTEXT":
+            plain_text = getattr(entity, "plain_text", None)
+            value = plain_text() if callable(plain_text) else entity.dxf.text
+        else:
+            value = getattr(entity.dxf, "text", "")
+        return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    @staticmethod
+    def _source_text_position(entity: Any) -> Point | None:
+        get_placement = getattr(entity, "get_placement", None)
+        if callable(get_placement):
+            try:
+                _alignment, point, _second_point = get_placement()
+                return _point(point)
+            except (AttributeError, TypeError, ValueError):
+                pass
+        insert = getattr(entity.dxf, "insert", None)
+        return None if insert is None else _point(insert)
+
+    @staticmethod
+    def _source_text_height(entity: Any) -> float:
+        attribute = "char_height" if entity.dxftype() == "MTEXT" else "height"
+        try:
+            return max(
+                float(getattr(entity.dxf, attribute, 0.0) or 0.0),
+                0.0,
+            )
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _source_text_rotation(entity: Any) -> float:
+        get_rotation = getattr(entity, "get_rotation", None)
+        try:
+            if callable(get_rotation):
+                return float(get_rotation())
+            return float(getattr(entity.dxf, "rotation", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _geometry_groups(
         self,
@@ -5719,13 +5910,41 @@ class DXFImporter:
             )
             if entity.dxftype() in self.TEXT_TYPES:
                 ignored_text += 1
-                debug.append(EntityDebugInfo(role, layer, entity.dxftype(), handle, "ignored", "info", detail="文字不參與構件辨識。"))
+                debug.append(
+                    EntityDebugInfo(
+                        role,
+                        layer,
+                        entity.dxftype(),
+                        handle,
+                        "preview_only" if role == "auxiliary" else "ignored",
+                        "info",
+                        detail=(
+                            "文字僅保留於輔助底稿預覽，不參與構件辨識。"
+                            if role == "auxiliary"
+                            else "文字不參與構件辨識。"
+                        ),
+                    )
+                )
                 continue
             self._extract_entity(entity, group, debug, source_geometry, handle)
             if group.primitives or entity.dxftype() in self.GEOMETRY_TYPES:
                 groups.append(group)
         if ignored_text:
-            debug.append(EntityDebugInfo(role, layer, "TEXT_SUMMARY", "", "ignored", "info", detail=f"共略過 {ignored_text} 個文字 Entity。"))
+            debug.append(
+                EntityDebugInfo(
+                    role,
+                    layer,
+                    "TEXT_SUMMARY",
+                    "",
+                    "preview_only" if role == "auxiliary" else "ignored",
+                    "info",
+                    detail=(
+                        f"共保留 {ignored_text} 個頂層文字供輔助底稿預覽。"
+                        if role == "auxiliary"
+                        else f"共略過 {ignored_text} 個文字 Entity。"
+                    ),
+                )
+            )
         return groups
 
     def _extract_entity(
@@ -5740,7 +5959,22 @@ class DXFImporter:
         entity_type = entity.dxftype()
         group.handles.add(root_handle)
         if entity_type in self.TEXT_TYPES:
-            debug.append(EntityDebugInfo(group.role, group.layer, entity_type, root_handle, "ignored", "info", block_instance=block_name, detail="文字不參與構件辨識。"))
+            debug.append(
+                EntityDebugInfo(
+                    group.role,
+                    group.layer,
+                    entity_type,
+                    root_handle,
+                    "preview_only" if group.role == "auxiliary" else "ignored",
+                    "info",
+                    block_instance=block_name,
+                    detail=(
+                        "文字僅保留於輔助底稿預覽，不參與構件辨識。"
+                        if group.role == "auxiliary"
+                        else "文字不參與構件辨識。"
+                    ),
+                )
+            )
             return
         group.entity_types.add(entity_type)
         try:
@@ -6206,6 +6440,7 @@ class DXFImportDialog:
         self.result: DXFImportResult | None = None
         self.world_result: DXFImportResult | None = None
         self.coordinate_valid = False
+        self.selected_origin_world: Point | None = None
         self.import_mode = "replace"
         self.problem_records: tuple[ProblemRecord, ...] = ()
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
@@ -6286,8 +6521,37 @@ class DXFImportDialog:
             self.candidate_point_store,
         )
 
+        self.form_scroll_host = ttk.Frame(self.window)
+        form_background = ttk.Style(self.window).lookup("TFrame", "background")
+        self.form_canvas = tk.Canvas(
+            self.form_scroll_host,
+            background=form_background or self.window.cget("background"),
+            borderwidth=0,
+            highlightthickness=0,
+            yscrollincrement=24,
+        )
+        self.form_scrollbar = ttk.Scrollbar(
+            self.form_scroll_host,
+            orient="vertical",
+            command=self.form_canvas.yview,
+        )
+        self.form_canvas.configure(yscrollcommand=self.form_scrollbar.set)
+        self.form_canvas.pack(side="left", fill="both", expand=True)
+        self.form_scrollbar.pack(side="right", fill="y")
+        self.form_content = ttk.Frame(self.form_canvas)
+        self.form_content_window = self.form_canvas.create_window(
+            (0, 0),
+            window=self.form_content,
+            anchor="nw",
+        )
+        self.form_content.bind("<Configure>", self._update_form_scrollregion)
+        self.form_canvas.bind("<Configure>", self._resize_form_content)
+        self.window.bind("<MouseWheel>", self._on_form_mousewheel, add="+")
+        self.window.bind("<Button-4>", self._on_form_mousewheel, add="+")
+        self.window.bind("<Button-5>", self._on_form_mousewheel, add="+")
+
         controls = ttk.LabelFrame(
-            self.window,
+            self.form_content,
             text=f"STEP1 圖層用途分類 — {self.file_path.name}",
         )
         controls.pack(fill="x", padx=10, pady=10)
@@ -6403,9 +6667,9 @@ class DXFImportDialog:
         )
         self.recognize_button.pack(side="right")
 
-        self._build_coordinate_system_settings()
+        self._build_coordinate_system_settings(self.form_content)
 
-        self.notebook = ttk.Notebook(self.window)
+        self.notebook = ttk.Notebook(self.form_content)
         review_frame = ttk.Frame(self.notebook)
         diagnostics_frame = ttk.Frame(self.notebook)
         self.notebook.add(review_frame, text="STEP3–6 構件確認與修正")
@@ -6423,7 +6687,8 @@ class DXFImportDialog:
         self.apply_button.pack(side="right")
         self.apply_button.configure(state="disabled", text="不可匯入")
         self.status_var.set("請先完成圖層用途分類，再按下「開始辨識」。")
-        self.notebook.pack(fill="both", expand=True, padx=10)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.form_scroll_host.pack(fill="both", expand=True)
         if bool(self.ui_state.get("main_maximized", False)):
             self.window.after_idle(lambda: self._set_maximized(True))
         self.window.after_idle(self._open_preview_window)
@@ -6445,6 +6710,64 @@ class DXFImportDialog:
                 self.window.attributes("-zoomed", maximized)
             except self.tk.TclError:
                 return
+
+    def _update_form_scrollregion(self, _event: Any = None) -> None:
+        bounds = self.form_canvas.bbox("all")
+        if bounds is not None:
+            self.form_canvas.configure(scrollregion=bounds)
+
+    def _resize_form_content(self, event: Any) -> None:
+        self.form_canvas.itemconfigure(
+            self.form_content_window,
+            width=max(int(event.width), 1),
+        )
+
+    @staticmethod
+    def _form_wheel_units(event: Any) -> int:
+        button = getattr(event, "num", None)
+        if button == 4:
+            return -1
+        if button == 5:
+            return 1
+        delta = float(getattr(event, "delta", 0) or 0)
+        if delta == 0:
+            return 0
+        return -1 if delta > 0 else 1
+
+    @staticmethod
+    def _widget_can_scroll(widget: Any, units: int) -> bool:
+        try:
+            first, last = widget.yview()
+        except Exception:
+            return False
+        if units < 0:
+            return float(first) > 1e-9
+        return float(last) < 1.0 - 1e-9
+
+    def _on_form_mousewheel(self, event: Any) -> str | None:
+        units = self._form_wheel_units(event)
+        if units == 0:
+            return None
+
+        widget = getattr(event, "widget", None)
+        if widget is not None and widget is not self.form_canvas:
+            try:
+                widget_class = str(widget.winfo_class())
+            except Exception:
+                widget_class = ""
+            if widget_class in {"Treeview", "Text", "Listbox"}:
+                return None
+            if widget_class == "Canvas":
+                if self._widget_can_scroll(widget, units):
+                    widget.yview_scroll(units, "units")
+                    return "break"
+                return None
+
+        if not self._widget_can_scroll(self.form_canvas, units):
+            return None
+        self.form_canvas.yview_scroll(units, "units")
+        return "break"
+
     def _on_main_window_configure(self, event: Any) -> None:
         if event.widget is not self.window:
             return
@@ -6911,50 +7234,40 @@ class DXFImportDialog:
         except self.tk.TclError:
             pass
 
-    def _build_coordinate_system_settings(self) -> None:
-        frame = self.ttk.LabelFrame(self.window, text="STEP2 座標系統設定")
+    def _build_coordinate_system_settings(self, parent: Any) -> None:
+        frame = self.ttk.LabelFrame(parent, text="STEP2 座標系統設定")
         frame.pack(fill="x", padx=10, pady=(0, 8))
-        default_origin_x, default_origin_y = TEMPORARY_DEFAULT_COORDINATE_ORIGIN
-        self.coordinate_mode_var = self.tk.StringVar(value="local")
-        self.origin_x_var = self.tk.StringVar(value=default_origin_x)
-        self.origin_y_var = self.tk.StringVar(value=default_origin_y)
+        self.coordinate_mode_var = self.tk.StringVar(value="world")
         self.coordinate_error_var = self.tk.StringVar(value="")
         self.coordinate_info_var = self.tk.StringVar(value="")
         self.coordinate_example_var = self.tk.StringVar(value="")
 
-        self.ttk.Radiobutton(
+        self.ttk.Button(
             frame,
             text="使用原始 CAD 座標",
-            variable=self.coordinate_mode_var,
-            value="world",
-            command=self._coordinate_mode_changed,
+            command=self._reset_coordinate_settings,
         ).grid(row=0, column=0, padx=8, pady=(7, 3), sticky="w")
-        self.ttk.Radiobutton(
+        self.ttk.Button(
             frame,
-            text="使用局部座標系統",
-            variable=self.coordinate_mode_var,
-            value="local",
-            command=self._coordinate_mode_changed,
+            text="以候選點表格選定點設定原點",
+            command=self._set_selected_point_as_origin,
         ).grid(row=0, column=1, padx=8, pady=(7, 3), sticky="w")
-        self.ttk.Label(frame, text="原點 X：").grid(row=0, column=2, padx=(14, 2), pady=(7, 3), sticky="e")
-        self.origin_x_entry = self.ttk.Entry(frame, textvariable=self.origin_x_var, width=18)
-        self.origin_x_entry.grid(row=0, column=3, padx=(0, 8), pady=(7, 3), sticky="w")
-        self.ttk.Label(frame, text="原點 Y：").grid(row=0, column=4, padx=(8, 2), pady=(7, 3), sticky="e")
-        self.origin_y_entry = self.ttk.Entry(frame, textvariable=self.origin_y_var, width=18)
-        self.origin_y_entry.grid(row=0, column=5, padx=(0, 8), pady=(7, 3), sticky="w")
-        self.ttk.Button(frame, text="套用", command=self._apply_coordinate_settings).grid(row=0, column=6, padx=(4, 3), pady=(7, 3))
-        self.ttk.Button(frame, text="重設", command=self._reset_coordinate_settings).grid(row=0, column=7, padx=(3, 8), pady=(7, 3))
+        self.ttk.Label(
+            frame,
+            text="請先在 STEP5 候選點明細表格中選取一個點；預覽窗格只用於修正起終點。",
+            foreground="#455a64",
+        ).grid(row=0, column=2, columnspan=3, padx=(12, 8), pady=(7, 3), sticky="w")
 
         self.tk.Label(frame, textvariable=self.coordinate_error_var, foreground="#c62828", anchor="w").grid(
             row=1, column=0, columnspan=2, padx=8, pady=(1, 5), sticky="w"
         )
         self.ttk.Label(frame, textvariable=self.coordinate_info_var).grid(
-            row=1, column=2, columnspan=3, padx=8, pady=(1, 5), sticky="w"
+            row=1, column=2, columnspan=2, padx=8, pady=(1, 5), sticky="w"
         )
         self.ttk.Label(frame, textvariable=self.coordinate_example_var, foreground="#455a64").grid(
-            row=1, column=5, columnspan=3, padx=8, pady=(1, 5), sticky="e"
+            row=1, column=4, padx=8, pady=(1, 5), sticky="e"
         )
-        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(4, weight=1)
 
     def _build_diagnostics_tab(self, parent: Any, scrolledtext: Any) -> None:
         summary_frame = self.ttk.LabelFrame(parent, text="DXF 匯入摘要")
@@ -7085,26 +7398,37 @@ class DXFImportDialog:
             except self.tk.TclError:
                 pass
 
-    def _coordinate_mode_changed(self) -> None:
-        local_mode = self.coordinate_mode_var.get() == "local"
-        state = "normal" if local_mode else "disabled"
-        self.origin_x_entry.configure(state=state)
-        self.origin_y_entry.configure(state=state)
-        if local_mode:
-            self.coordinate_valid = False
-            self.coordinate_error_var.set("請輸入原點座標並按下「套用」")
-            if self.world_result is not None:
-                self.result = self.world_result
-                self._refresh_result_views()
-        else:
-            self._apply_coordinate_settings(show_error=False)
-
     def _reset_coordinate_settings(self) -> None:
-        default_origin_x, default_origin_y = TEMPORARY_DEFAULT_COORDINATE_ORIGIN
+        self.coordinate_mode_var.set("world")
+        self.selected_origin_world = None
+        self._apply_coordinate_settings(show_error=False)
+
+    def _set_selected_point_as_origin(self) -> None:
+        if self.world_result is None:
+            self.coordinate_error_var.set("請先完成 DXF 辨識。")
+            return
+        state = self.selection_state
+        if state.selected_candidate_source != "candidate_tree":
+            self.coordinate_error_var.set(
+                "請在 STEP5 候選點明細表格中選取原點；預覽窗格選點僅用於修正起終點。"
+            )
+            return
+        candidate = self.candidate_point_store.get(
+            state.selected_component_id,
+            state.selected_candidate_point_id,
+        )
+        if candidate is None:
+            self.coordinate_error_var.set(
+                "請先選取構件，再於 STEP5 候選點明細表格選取要作為原點的點。"
+            )
+            return
+        coordinate_system = coordinate_system_from_candidate(candidate)
+        self.selected_origin_world = (
+            coordinate_system.origin_x,
+            coordinate_system.origin_y,
+        )
         self.coordinate_mode_var.set("local")
-        self.origin_x_var.set(default_origin_x)
-        self.origin_y_var.set(default_origin_y)
-        self._coordinate_mode_changed()
+        self._apply_coordinate_settings(show_error=False)
 
     def _apply_coordinate_settings(
         self,
@@ -7116,28 +7440,24 @@ class DXFImportDialog:
         if self.world_result is None:
             return
         mode = self.coordinate_mode_var.get()
-        try:
-            if mode == "local":
-                origin_x, origin_y = parse_coordinate_origin(
-                    self.origin_x_var.get(),
-                    self.origin_y_var.get(),
-                )
-                coordinate_system = CoordinateSystem(
-                    "local", origin_x, origin_y, "user_input"
-                )
-            else:
-                coordinate_system = CoordinateSystem()
-        except DXFImportError as exc:
+        if mode == "local" and self.selected_origin_world is None:
             self.coordinate_valid = False
             self.result = self.world_result
-            self.coordinate_error_var.set(str(exc))
+            self.coordinate_error_var.set("請先選取一個候選點作為局部原點。")
             self._refresh_result_views(
                 preview_dirty=preview_dirty,
                 rebuild_candidate_tree=rebuild_candidate_tree,
             )
-            if show_error:
-                self.origin_x_entry.focus_set()
             return
+        if mode == "local":
+            coordinate_system = CoordinateSystem(
+                "local",
+                self.selected_origin_world[0],
+                self.selected_origin_world[1],
+                "selected_candidate_point",
+            )
+        else:
+            coordinate_system = CoordinateSystem()
         self.coordinate_valid = True
         self.coordinate_error_var.set("")
         self.result = apply_coordinate_system(self.world_result, coordinate_system)
@@ -7727,7 +8047,7 @@ class DXFImportDialog:
         if not selection or not self.selected_member_id:
             return
         point_id = self.candidate_tree_adapter.point_id_for_iid(selection[0])
-        if not point_id or point_id == self.selection_state.selected_candidate_point_id:
+        if not point_id:
             return
         self._select_candidate_point(
             point_id,
@@ -8256,6 +8576,10 @@ class DXFImportDialog:
             for geometry in raw
             for point in geometry.points
         )
+        all_points.extend(
+            coordinate_system.transform(source_text.position)
+            for source_text in self.result.source_texts
+        )
         selected_member = self._selected_member()
         if selected_member is not None:
             all_points.extend(
@@ -8333,6 +8657,7 @@ class DXFImportDialog:
         self.preview_transform = self.preview_viewport.legacy_transform
         self.preview_zoom_factor = zoom_factor
         self._draw_source_geometry_layer(raw)
+        self._draw_source_text_layer(self.result.source_texts)
         self._draw_engineering_members()
         self._rebuild_candidate_overlay(update_overlays=False)
         self._ensure_preview_overlay_items()
@@ -8422,6 +8747,39 @@ class DXFImportDialog:
                     source_handle=geometry.source_handle,
                     **options,
                 )
+
+    def _draw_source_text_layer(
+        self,
+        source_texts: Sequence[SourceText],
+    ) -> None:
+        if self.result is None or self.preview_renderer is None:
+            return
+        renderer = self.preview_renderer
+        coordinate_system = self.result.coordinate_system
+        for source_text in source_texts:
+            displayed_position = coordinate_system.transform(source_text.position)
+            if not self._preview_intersects((displayed_position,)):
+                continue
+            x, y = self._project_preview_point(displayed_position)
+            font_size = max(
+                8,
+                min(
+                    28,
+                    round(source_text.height * self.preview_viewport.scale),
+                ),
+            )
+            renderer.create_text(
+                "auxiliary_geometry",
+                x,
+                y,
+                text=source_text.text,
+                fill="#66757f",
+                anchor="center",
+                justify="center",
+                font=("Microsoft JhengHei", font_size),
+                angle=-source_text.rotation,
+                source_handle=source_text.source_handle,
+            )
 
     def _member_issue_levels(self) -> dict[str, str]:
         severity_rank = {"warning": 1, "error": 2, "critical": 3}
@@ -9167,8 +9525,10 @@ __all__ = [
     "build_problem_records",
     "build_validation_overview",
     "connect_components_to_walers",
+    "coordinate_system_from_candidate",
     "fit_window_geometry_to_work_areas",
     "import_dxf",
+    "normalize_project_coordinate",
     "outline_centerline",
     "parse_coordinate_origin",
     "read_dxf_layers",

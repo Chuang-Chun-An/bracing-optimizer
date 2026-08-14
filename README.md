@@ -4,7 +4,7 @@
 
 本文件以目前工作目錄中的實際程式碼為準，供未來維護者重新理解專案。它不只是操作說明，也記錄資料模型、模組責任、主要函式、Solver 流程、評分公式、JSON contract、GUI 呼叫關係及已知待重構區域。
 
-更新日期：2026-07-30
+更新日期：2026-08-12
 
 ---
 
@@ -71,8 +71,9 @@ CAD Builder 沒有獨立正式 GUI。`main.py` 是唯一工程資料 GUI。
 - 在預覽圖疊加圍令分段與支撐材料配置。
 - 依目前可見方案統計材料用量與庫存差額。
 - 匯出高解析度 PNG/JPEG 完整配置圖。
+- 依專案已保存的工程幾何，建立目前可見圍令與支撐配置的乾淨 DXF 成果檔。
 
-目前沒有 DXF、DWG、PDF 或 CAD 原生施工圖輸出。現有「圖面輸出」是 Matplotlib 點陣配置圖。
+DXF 匯出不再重新儲存原始 DXF。程式以 `ezdxf.new("R2018")` 新建毫米圖檔，從 `dxf_import_state` 的世界座標重建必要工程背景；鋼材、調整塊與餘量使用對齊尺寸標註，千斤頂插入 `SUPPORT_JACK` 專用圖塊且不另標尺寸。DWG 與 PDF 尚未提供原生輸出。
 
 ---
 
@@ -222,7 +223,7 @@ WalerSolverDialog      SupportSolverDialog
     Results    Preview   材料統計
                               │
                               ▼
-                      PNG / JPEG 匯出
+                  PNG / JPEG、DXF 匯出
 ```
 
 ## 4.2 CAD 匯入資料流
@@ -511,7 +512,30 @@ Matplotlib 自訂工具列，只保留：
 | `geometry_rows()` | 無 | 三表 dict | 提供 CAD mapper 目前資料 |
 | `to_case_data()` | 無 | 三表 deep copy | 產生案例 JSON 的 `data` |
 
-## 6.2 `cad_builder.py`
+## 6.2 `project_persistence.py`
+
+| 類別／函數 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `ProjectSerializer.migrate()` | 任意舊專案 payload | schema 2 dict | 補欄位但不改 Solver 資料 |
+| `ProjectSerializer.validate()` | payload | `None` | JSON 可序列化與 `dxf_asset` 契約驗證 |
+| `DxfAssetManager.file_info()` | DXF path | hash、size、mtime | SHA-256 與 DXF 可讀性驗證 |
+| `DxfAssetManager.inspect()` | project path、asset、state | `DxfAssetStatusReport` | 唯一的 DXF 狀態判斷與同 hash 修復入口 |
+| `DxfAssetManager.save_project()` | payload、已驗證 DXF | `ProjectSaveResult` | 管理副本與 JSON 的交易式儲存／回復 |
+| `DxfCompatibilityChecker.compare()` | 保存 state、候選 state、Solver rows | 相容性報告 | handle＋工程線、圖層＋工程線、跨圖層工程線比對 |
+| `merge_source_references()` | 兩份 state、match report | 新 state | 只更新來源參照，保留 ID、工程線與人工修正 |
+
+`DxfStatus` 包含 `READY`、`SOURCE_MODIFIED`、`MISSING`、`RELINK_REQUIRED`、`BINDING_REQUIRED`、`LEGACY_NO_STATE` 與 `INCOMPATIBLE`，並另有 runtime／待儲存／管理副本異常等細分狀態。這些狀態仍用於專案保存、來源追蹤與重新連結；正式成果匯出只依賴專案內已確認的 `dxf_import_state`，不讀取或重新儲存來源檔。
+
+### 6.2.1 `dxf_result_export.py`
+
+| 函數 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `build_member_bindings()` | import state、Solver 圍令／支撐列 | world-coordinate bindings | 以最終確認工程線將結果綁到世界座標 |
+| `export_results_to_dxf()` | import state、可見方案、bindings、輸出路徑 | `DXFExportReport` | 新建 R2018 clean document、重建背景、加入成果、暫存驗證後交易式交付 |
+
+正式輸出只在新文件上執行一次 `saveas()` 到同資料夾唯一暫存檔，重新讀取後要求 Audit 為 0 errors／0 fixes，並驗證背景及成果世界座標、圖層、Dimension、Jack Block、重複 Layer、XRecord 與懸空 Handle。全部通過後才以 `os.replace()` 取代正式檔。
+
+## 6.3 `cad_builder.py`
 
 | 函數／方法 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
@@ -524,7 +548,7 @@ Matplotlib 自訂工具列，只保留：
 | `check_new_event()` | 無 | event 或 `None` | 檔案存在且非 last event 才回傳 |
 | `acknowledge()` | 已成功 event | `None` | 同 event_id 才刪檔並記錄 last ID |
 
-## 6.3 `support.py`
+## 6.4 `support.py`
 
 ### 資料與顯示工具
 
@@ -578,7 +602,7 @@ Matplotlib 自訂工具列，只保留：
 | `build_global_solution()` | 每支候選、beam width | `GlobalSolution` | Phase 2 beam search |
 | `fallback_global_solution()` | 每支候選 | invalid `GlobalSolution` | 全域無路徑時取各支最低分並加 5M |
 
-## 6.4 `wales.py`
+## 6.5 `wales.py`
 
 完整逐函式教學另見 `docs/wales/README.md`。
 
@@ -652,7 +676,7 @@ Matplotlib 自訂工具列，只保留：
 | `diagnose_search_space()` | config、stock、sample count | `None` | 命令列搜尋空間報告 |
 | `print_results()` | results | `None` | 命令列方案輸出 |
 
-## 6.5 `main.py`
+## 6.6 `main.py`
 
 ### 模組級函數
 
@@ -672,6 +696,7 @@ Matplotlib 自訂工具列，只保留：
 | GUI 建立 | `__init__()`、`_build_ui()`、`_create_table_tab()`、`_create_cad_import_tab()`、`_create_test_cases_tab()`、`_create_results_tab()` | 建立主視窗與 tabs；回傳 `None` |
 | 彩蛋 | `_on_ascii_art_*()`、`_show_ascii_art_window()` | code→picture text→最大化視窗 |
 | 案例管理 | `_test_case_json_files()`、`_sanitize_test_case_name()`、`_test_case_path()`、`_refresh_test_case_list()`、`_selected_test_case_name()`、`_load_selected_test_case()`、`_delete_selected_test_case()`、`_save_current_test_case_from_prompt()`、`_build_test_case_payload()`、`save_test_case()`、`load_test_case()` | case name/path/payload；讀寫 JSON |
+| 專案持久化 | `_new_project()`、`_save_current_project()`、`_save_project_as()`、`save_project_case()`、`load_project_case()`、`_relink_dxf()`、`_mark_project_dirty()` | 協調 serializer／asset manager，更新 GUI 與 Dirty；不自行做 hash 或幾何比對 |
 | 結果互動 | `_on_results_tree_click()`、`_on_results_tree_space()`、`_on_results_tree_double_click()`、`_show_result_details()` | 切換顯示、展開、詳細資訊 |
 | 結果刪除 | `_selected_result_id_for_*()`、`_is_custom_result_item()`、`_delete_result_display_name()`、`_remove_result_from_session_caches()`、`_delete_selected_result_plan()` | 刪方案及關聯快取 |
 | 支撐方案編輯 | `_support_config_by_id()`、`_support_plan_piece_rows()`、`_support_kind_*()`、`_replace_support_plan()`、`_recalculate_support_global_solution()`、`_find_support_forbidden_zone_hit()`、`_format_support_status()`、`_format_support_plan_breakdown()`、`_support_neighbor_penalty_for_plan()`、`_open_support_plan_editor()` | 編輯 pieces、重評單體與鄰支撐 penalty |
@@ -684,6 +709,7 @@ Matplotlib 自訂工具列，只保留：
 | Preview 建立 | `_build_preview()`、`_format_preview_coordinates()`、`_capture_preview_home_view()`、`_get_preview_zoom_percent()` | Figure/Canvas/Toolbar |
 | Preview 效能 | `_begin_preview_interaction()`、`_begin_preview_pan_interaction()`、`_end_preview_interaction()`、`_on_preview_scroll()`、`_schedule_preview_scroll_redraw()`、`_flush_preview_scroll_redraw()`、`_cancel_preview_scroll_redraw()` | 文字隱藏、scroll debounce、pan throttle 協調 |
 | 圖片匯出 | `_ask_export_scale()`、`_export_preview_image()` | scale→PNG/JPEG；先重建完整圖面 |
+| DXF 匯出 | `_visible_dxf_export_plans()`、`_export_visible_results_to_dxf()` | 可見結果＋保存工程模型→乾淨 R2018 世界座標成果 DXF |
 | CAD polling | `_schedule_cad_event_poll()`、`_poll_cad_event()`、`_set_cad_import_status()`、`_refresh_cad_import_status()`、`_toggle_cad_import()`、`_manual_read_cad_event()` | 500 ms 自動或手動讀取 |
 | CAD apply | `_project_rows_by_table()`、`_invalidate_solver_state_after_input_change()`、`_handle_input_data_changed()`、`_select_input_row()`、`_apply_cad_event()`、`read_cad_event()` | mapper row→正式 model→ack→重畫 |
 | 表格資料 | `_load_initial_data()`、`_refresh_tree()`、`_format_display_value()`、`_format_position_value()`、`_format_position_list()`、`_migrate_strut_position_fields()`、`_parse_position_list()` | Model 與 Treeview 同步 |
@@ -723,18 +749,18 @@ Matplotlib 自訂工具列，只保留：
 ## 7.1 固定工程參數
 
 ```text
-STEEL_LENGTHS = 1000～10000，每 500 mm
+預設 STEEL_LENGTHS = 1000～10000，每 500 mm（舊專案 fallback）
 JACK_LENGTH = 600
 SHIM_LENGTHS = 0, 100, 150, 200, 300
 MAX_GAP = 150
 TARGET_GAP = 80
 MIN_END_CLEAR = 1600
-PILE_FORBIDDEN_HALF = 730
-WALER_FORBIDDEN_HALF = 1130
+PILE_FORBIDDEN_HALF = 830
+WALER_FORBIDDEN_HALF = 550
 MIN_JACK_DISTANCE_BETWEEN_SUPPORTS = 600
 ```
 
-注意：Support Solver 使用 `support.py` 固定 `STEEL_LENGTHS`，目前沒有使用 GUI Inventory 限制候選鋼材。Inventory 只在結果材料統計中比較。
+正式執行時，Support Solver 使用專案「庫存」頁籤的 `Length` 作為可用鋼材長度；`support.py` 的固定 `STEEL_LENGTHS` 只供沒有庫存資料的舊流程 fallback。`Qty` 仍由庫存配置與材料統計獨立使用。
 
 ## 7.2 Phase 1：每根支撐候選
 
@@ -754,8 +780,7 @@ beam_search_steel_orders()
       ▼
 beam_search_layout()
       │
-      ├─ 插入 shim 位置
-      └─ 插入唯一 jack 位置
+      └─ 依圍令材料規格判定施工型式並直接生成合法 shim／jack 位置
       │
       ▼
 evaluate_single_support()
@@ -800,11 +825,17 @@ heuristic 偏好：
 
 針對每個鋼材順序：
 
-- shim > 0 時嘗試所有 shim 插入位置。
-- 嘗試所有 jack 插入位置。
+- Steel Waler：只生成 jack 與 shim 相鄰的排列。
+- RC Waler：只生成 shim 位於 RC 接觸面的排列。
+- 兩端皆為 RC 時，直接生成 shim 位於任一端接觸面的兩組合法空間。
+- shim = 0 時不建立 shim piece，jack 仍可位於各鋼材間隙。
 - 每個 pieces tuple 去重。
 - 呼叫 `evaluate_single_support()`。
 - 依最終單支分數排序並截斷。
+
+圍令材料規格為 `RC` 時採 RC 規則，其餘規格採 Steel 規則。此施工型式只用於配置生成，不進入單體評分、Pattern、Material Ratio 或 Phase 2 評分，也不採用「先生成非法排列再扣分／淘汰」的方式。
+
+RC 接觸面上的終端調整塊界面不套用該側 `MIN_END_CLEAR` 端部禁止區；這項豁免不延伸到下一個接頭，也不忽略樁位或托梁禁止區。
 
 ### `generate_single_support_candidates()`
 
@@ -1069,8 +1100,9 @@ station =
 3. 斜撐
 4. 庫存
 5. CAD 匯入
-6. 測試案例
-7. 結果
+6. 專案
+7. 測試案例
+8. 結果
 
 ## 10.2 資料表畫面
 
@@ -1096,7 +1128,30 @@ station =
 - 立即讀取
 - 重新顯示狀態
 
-## 10.4 測試案例畫面
+## 10.4 專案畫面
+
+功能：
+
+- 新增、開啟、儲存及另存專案。
+- 儲存時才建立 `source/source.dxf` 管理副本；單純匯入 DXF 不會建立永久副本。
+- 顯示 Dirty、DXF 管理副本、外部原始來源、構件匹配及 Solver 保留狀態。
+- 重新連結 DXF；完全相同使用 SHA-256，版本不同則使用構件工程線與集中容許誤差比對。
+- 視窗標題的 `*` 表示有尚未儲存的變更。
+
+專案資料夾：
+
+```text
+project_cases/
+└─ 專案名稱/
+   ├─ project.json
+   ├─ project.json.bak
+   └─ source/
+      └─ source.dxf
+```
+
+舊版 `project_cases/專案名稱.json` 仍可直接開啟；重新儲存後會建立上述資料夾格式，舊檔保留作為相容來源。
+
+## 10.5 測試案例畫面
 
 功能：
 
@@ -1105,7 +1160,7 @@ station =
 - 將目前資料存為案例
 - 刪除案例
 
-## 10.5 結果畫面
+## 10.6 結果畫面
 
 以群組顯示：
 
@@ -1121,7 +1176,7 @@ station =
 - 刪除方案
 - 依可見方案更新材料統計
 
-## 10.6 Solver Dialog
+## 10.7 Solver Dialog
 
 ### Waler
 
@@ -1242,6 +1297,7 @@ B1, B2...
   "StartY": 0,
   "EndX": 12000,
   "EndY": 0,
+  "material_spec": "H350x350",
   "Remark": ""
 }
 ```
@@ -1306,7 +1362,20 @@ Qty > 0          → stock_items
 
 因此 `Qty=0` 仍代表可以購買該長度。
 
-## 11.4 案例 JSON
+## 11.4 材料規格
+
+```json
+{
+  "material_specs": [
+    {"Usage": "支撐", "Spec": "H350x350"},
+    {"Usage": "圍令", "Spec": "RC"}
+  ]
+}
+```
+
+材料規格表不含長度。它只提供專案設定、構件欄位選擇、圖面標示與報表資料，不傳入 Solver 候選或評分。材料長度仍只由獨立的 `inventory` 表管理。
+
+## 11.5 案例 JSON
 
 簡化結構：
 
@@ -1344,6 +1413,69 @@ data.braces
 Inventory 不儲存在案例 `data` 中，也不會因載入案例而被替換；它維持目前或預設 Inventory。
 
 `derived`、`solver_settings`、`parameters` 目前會寫入檔案，但 `load_test_case()` 沒有把它們重新套回 runtime 設定，主要屬於紀錄資訊。
+
+## 11.5 專案 JSON 與 DXF 資產
+
+專案使用 `schema_version: 2`。`dxf_import_state` 繼續保存既有的純資料辨識狀態；DXF 檔案完整性與管理位置由 `dxf_asset` 單獨負責：
+
+```json
+{
+  "schema_version": 2,
+  "project_information": {
+    "project_name": "Y1A站第一層支撐",
+    "saved_at": "2026-08-12T15:30:00",
+    "application": "SupportSolver"
+  },
+  "input_data": {
+    "walers": [],
+    "struts": [],
+    "braces": []
+  },
+  "dxf_asset": {
+    "storage_mode": "managed_copy",
+    "relative_path": "source/source.dxf",
+    "original_path": "D:/Project/Y1A.dxf",
+    "original_file_name": "Y1A.dxf",
+    "sha256": "完整的 SHA-256",
+    "file_size": 123456,
+    "modified_time": 1786519800.0
+  },
+  "dxf_import_state": {
+    "source_path": "D:/Project/Y1A.dxf",
+    "coordinate_system": {
+      "mode": "local",
+      "origin_x": 338238.287,
+      "origin_y": -724845.57,
+      "source": "user_origin"
+    },
+    "layer_classification": {},
+    "converted": {
+      "walers": [],
+      "struts": [],
+      "braces": [],
+      "columns": [],
+      "beams": [],
+      "corner_braces": []
+    }
+  },
+  "result": {}
+}
+```
+
+純手動專案的 `dxf_asset` 與 `dxf_import_state` 均可為 `null`。JSON 不保存 Base64 DXF，也不保存 `ezdxf` 的 Document、Entity、Layout 或 Block 執行階段物件。
+
+交易式儲存順序：
+
+```text
+驗證目前 DXF
+→ 複製 source.dxf.tmp 並核對 SHA-256
+→ 寫入及重新解析 project.json.tmp
+→ 備份既有 project.json.bak
+→ 原子替換 source/source.dxf
+→ 原子替換 project.json
+```
+
+若 JSON 正式替換失敗，程式會把 DXF 回復成原版本；所有失敗都保留 Dirty。管理副本遺失時，只有 `original_path` 的 SHA-256 完全相同才會自動修復，否則必須重新連結。
 
 ---
 
@@ -1544,6 +1676,22 @@ Beam 與 Column 點先收集，再各自呼叫一次 `scatter()` 批次繪製。
 
 統計只包含目前可見結果。Waler 使用 assignments 的 stock length；沒有 assignments 時 fallback segments。Support 目前會計數 `pieces` 中所有 kind，因此 jack 600 與 shim 也可能被算進材料統計，這是待確認的業務規則。
 
+## 13.6 DXF 配置標註輸出
+
+結果頁的「匯出支撐配置成果DXF」會：
+
+1. 從專案已保存的 `dxf_import_state` 取得座標系統、來源工程圖層、必要底圖線段及人工確認後的正式構件幾何；不開啟原始 DXF。
+2. 新建 R2018／毫米的 clean document，以原始世界座標重建圍令、支撐、斜撐、角撐、中間柱、托梁與輔助線。合法的來源圖層名稱會沿用；非法、空白或與成果層衝突時，集中改用 `SD_BASE_*` fallback 並在摘要列出。
+3. 將圍令標註放在 `SD_RESULT_WALER`；支撐標註、千斤頂及相關配置成果放在 `SD_RESULT_SUPPORT`。鋼材用一般對齊尺寸、調整塊用「調整塊」尺寸、尾端現場處理長度用「餘量」尺寸。
+4. 千斤頂只從 `assets/dxf/jack_symbol.dxf` 複製允許的 `LINE`／`CIRCLE` 幾何建立 `SUPPORT_JACK`，Block 內圖元位於 `0` 層，INSERT 位於支撐成果層，且不另加尺寸標註。
+5. 先寫入輸出資料夾內唯一暫存檔，再從磁碟重新讀取，執行 Audit、世界座標、成果數量、圖層、Block definition、重複 Layer、XRecord 與裸 Handle reference 驗證；只有全部通過才交易式替換正式檔。
+
+Dimension 不直接在大世界座標下 render。每支構件先以自身起點建立 Local Support Geometry，在局部座標完成 Dimension geometry 與匿名 Block render，再以純平移矩陣將 Dimension 定義點及 Block 內 `LINE`、`MTEXT`、`SOLID`、`INSERT` 等實體統一轉回世界座標。最終驗證也會比對匿名 Block 的實際顯示文字，避免 Dimension 量測值正確但畫面文字受浮點誤差影響。
+
+只匯出結果樹目前勾選為可見的方案。同一構件若同時勾選兩個方案，匯出會停止並要求只保留一個可見方案。
+
+原始 DXF 或專案管理副本遺失時，只要專案仍保存完整且已確認的 `dxf_import_state`，成果匯出仍可執行。舊專案若完全沒有工程模型，或仍有 error／critical 等級的人工確認問題，則會停止並說明原因。成果檔採原始世界座標與毫米單位；合併回原始 DWG 時，先確認目標單位為毫米，再使用 Insert、Xref 或貼到原始座標，避免額外縮放、旋轉或位移。
+
 ---
 
 # 14. 模組相依與 Call Graph
@@ -1555,6 +1703,12 @@ main.py
 ├─ project_data.py
 ├─ cad_builder.py
 │  └─ project_data.py
+├─ project_persistence.py
+│  ├─ ProjectSerializer
+│  ├─ DxfAssetManager
+│  └─ DxfCompatibilityChecker
+├─ dxf_result_export.py
+│  └─ assets/dxf/jack_symbol.dxf
 ├─ wales.py
 ├─ support.py
 ├─ tkinter
@@ -1723,14 +1877,15 @@ format/return breakdown
 
 GUI 只顯示 breakdown，不重算。
 
-## 15.5 Support Solver 與 Inventory 尚未整合
+## 15.5 Support Solver 與 Inventory 的責任邊界
 
-Support 使用固定 `STEEL_LENGTHS`，不參考 Inventory Qty 或可購買長度。材料統計只在事後比較。
+Support 候選鋼材長度已改由目前專案 Inventory 的所有有效 `Length` 提供；`Qty=0` 仍表示該長度可購買。Inventory 改變時會清除候選快取，並且 Inventory 會隨專案保存及開啟。
 
-需要先確認業務規則：
+目前仍維持以下責任邊界：
 
-- Support 是否也應優先庫存？
-- Qty=0 是否可購買？
+- `Length` 決定 Solver 可生成的鋼材長度。
+- `Qty` 供庫存配置與材料統計，不是 Waler Type 或材料規格評分。
+- 材料規格表完全不提供長度。
 - jack、shim 是否屬於 Inventory 統計？
 
 ## 15.6 材料統計可能把 jack/shim 當鋼材
