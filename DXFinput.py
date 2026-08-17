@@ -5553,7 +5553,7 @@ class DXFImporter:
                         ValidationMessage(
                             "info",
                             "TEXT_SKIPPED",
-                            f"已略過 {ignored_text} 個文字 Entity；文字不參與構件辨識。",
+                            f"已略過 {ignored_text} 個 DXF 文字圖元；文字不參與構件辨識。",
                             role,
                         )
                     )
@@ -5941,7 +5941,7 @@ class DXFImporter:
                     detail=(
                         f"共保留 {ignored_text} 個頂層文字供輔助底稿預覽。"
                         if role == "auxiliary"
-                        else f"共略過 {ignored_text} 個文字 Entity。"
+                        else f"共略過 {ignored_text} 個 DXF 文字圖元。"
                     ),
                 )
             )
@@ -6562,14 +6562,39 @@ class DXFImportDialog:
         ).pack(anchor="w", padx=8, pady=(6, 3))
         classification_body = ttk.Frame(controls)
         classification_body.pack(fill="x", padx=8, pady=(0, 5))
+        classification_header = ttk.Frame(classification_body)
+        classification_header.pack(fill="x", padx=(0, 16))
+        ttk.Label(
+            classification_header,
+            text="圖層名稱",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=0, padx=8, pady=4, sticky="w")
+        ttk.Label(
+            classification_header,
+            text="DXF 圖元數量",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=1, padx=8, pady=4, sticky="e")
+        ttk.Label(
+            classification_header,
+            text="用途",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=2, padx=8, pady=4, sticky="w")
+        classification_header.columnconfigure(0, weight=1)
+        classification_header.columnconfigure(1, minsize=120)
+        classification_header.columnconfigure(2, minsize=150)
+
+        classification_list = ttk.Frame(classification_body)
+        classification_list.pack(fill="x", expand=True)
         classification_canvas = tk.Canvas(
-            classification_body,
-            height=135,
+            classification_list,
+            height=245,
             highlightthickness=1,
             highlightbackground="#b0bec5",
+            yscrollincrement=24,
         )
+        self.classification_canvas = classification_canvas
         classification_scroll = ttk.Scrollbar(
-            classification_body,
+            classification_list,
             orient="vertical",
             command=classification_canvas.yview,
         )
@@ -6595,21 +6620,6 @@ class DXFImportDialog:
                 width=event.width,
             ),
         )
-        ttk.Label(
-            classification_rows,
-            text="圖層名稱",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=0, padx=8, pady=4, sticky="w")
-        ttk.Label(
-            classification_rows,
-            text="Entity 數量",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=1, padx=8, pady=4, sticky="e")
-        ttk.Label(
-            classification_rows,
-            text="用途",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=2, padx=8, pady=4, sticky="w")
         saved_classification = self.initial_state.get("layer_classification", {})
         if not isinstance(saved_classification, Mapping):
             saved_classification = {}
@@ -6629,7 +6639,7 @@ class DXFImportDialog:
         }
         self.layer_use_vars: dict[str, Any] = {}
         names = self.importer.layer_names
-        for row, layer in enumerate(names, 1):
+        for row, layer in enumerate(names):
             ttk.Label(classification_rows, text=layer).grid(
                 row=row,
                 column=0,
@@ -6654,6 +6664,8 @@ class DXFImportDialog:
             combo.grid(row=row, column=2, padx=8, pady=2, sticky="w")
             self.layer_use_vars[layer] = variable
         classification_rows.columnconfigure(0, weight=1)
+        classification_rows.columnconfigure(1, minsize=120)
+        classification_rows.columnconfigure(2, minsize=150)
 
         action_row = ttk.Frame(controls)
         action_row.pack(fill="x", padx=8, pady=(0, 7))
@@ -6669,12 +6681,15 @@ class DXFImportDialog:
 
         self._build_coordinate_system_settings(self.form_content)
 
-        self.notebook = ttk.Notebook(self.form_content)
-        review_frame = ttk.Frame(self.notebook)
-        diagnostics_frame = ttk.Frame(self.notebook)
-        self.notebook.add(review_frame, text="STEP3–6 構件確認與修正")
-        self.notebook.add(diagnostics_frame, text="STEP7 錯誤與警告")
+        review_frame = ttk.Frame(self.form_content)
+        review_frame.pack(fill="x", padx=10, pady=(0, 8))
         self._build_engineering_review(review_frame)
+
+        diagnostics_frame = ttk.LabelFrame(
+            self.form_content,
+            text="STEP7 匯入檢核結果",
+        )
+        diagnostics_frame.pack(fill="x", padx=10, pady=(0, 10))
         self._build_diagnostics_tab(diagnostics_frame, scrolledtext)
 
         footer = ttk.Frame(self.window)
@@ -6687,7 +6702,6 @@ class DXFImportDialog:
         self.apply_button.pack(side="right")
         self.apply_button.configure(state="disabled", text="不可匯入")
         self.status_var.set("請先完成圖層用途分類，再按下「開始辨識」。")
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.form_scroll_host.pack(fill="both", expand=True)
         if bool(self.ui_state.get("main_maximized", False)):
             self.window.after_idle(lambda: self._set_maximized(True))
@@ -6744,6 +6758,15 @@ class DXFImportDialog:
             return float(first) > 1e-9
         return float(last) < 1.0 - 1e-9
 
+    @staticmethod
+    def _widget_is_descendant(widget: Any, ancestor: Any) -> bool:
+        current = widget
+        while current is not None:
+            if current is ancestor:
+                return True
+            current = getattr(current, "master", None)
+        return False
+
     def _on_form_mousewheel(self, event: Any) -> str | None:
         units = self._form_wheel_units(event)
         if units == 0:
@@ -6751,6 +6774,15 @@ class DXFImportDialog:
 
         widget = getattr(event, "widget", None)
         if widget is not None and widget is not self.form_canvas:
+            classification_canvas = getattr(self, "classification_canvas", None)
+            if (
+                classification_canvas is not None
+                and self._widget_is_descendant(widget, classification_canvas)
+            ):
+                if self._widget_can_scroll(classification_canvas, units):
+                    classification_canvas.yview_scroll(units, "units")
+                    return "break"
+                # At the top or bottom, fall through to the page canvas.
             try:
                 widget_class = str(widget.winfo_class())
             except Exception:
@@ -6761,7 +6793,8 @@ class DXFImportDialog:
                 if self._widget_can_scroll(widget, units):
                     widget.yview_scroll(units, "units")
                     return "break"
-                return None
+                # The inner list reached its boundary; continue with the
+                # STEP1–STEP7 page instead of trapping the mouse wheel.
 
         if not self._widget_can_scroll(self.form_canvas, units):
             return None
@@ -6846,7 +6879,7 @@ class DXFImportDialog:
             ("構件編號", "id"),
             ("構件類型", "role"),
             ("來源圖層", "layer"),
-            ("來源 Entity", "entities"),
+            ("來源 DXF 圖元", "entities"),
             ("辨識方法", "method"),
             ("StartX", "start_x"),
             ("StartY", "start_y"),
@@ -7017,20 +7050,39 @@ class DXFImportDialog:
         candidate_scroll.grid_configure(row=0, pady=(6, 4))
         for widget in candidate_frame.grid_slaves(row=2):
             widget.grid_configure(row=1, pady=(2, 6))
+        origin_action = self.ttk.Frame(candidate_frame)
+        origin_action.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8,
+            pady=(0, 7),
+        )
+        self.set_origin_button = self.ttk.Button(
+            origin_action,
+            text="以選定點設定局部原點",
+            command=self._set_selected_point_as_origin,
+            state="disabled",
+        )
+        self.set_origin_button.pack(side="left", padx=(0, 8))
+        self.ttk.Label(
+            origin_action,
+            text="此按鈕只使用表格目前選定的候選點，不使用預覽窗格點選。",
+            foreground="#455a64",
+            wraplength=360,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
         candidate_frame.rowconfigure(0, weight=1)
         candidate_frame.rowconfigure(1, weight=0)
+        candidate_frame.rowconfigure(2, weight=0)
 
         body.add(member_frame, weight=1)
         body.add(detail_frame, weight=1)
         body.add(candidate_frame, weight=1)
 
-        cad_frame = self.ttk.LabelFrame(parent, text="STEP6 CAD 人工指定工程線（Temp）")
+        cad_frame = self.ttk.LabelFrame(parent, text="STEP6 從 CAD 重新指定工程線")
         cad_frame.pack(side="bottom", fill="x", padx=6, pady=(0, 6))
-        self.ttk.Label(
-            cad_frame,
-            text=f"Temp：{self.cad_event_watcher.temp_path}",
-            foreground="#455a64",
-        ).pack(side="left", padx=8, pady=6)
         self.ttk.Label(
             cad_frame,
             textvariable=self.cad_temp_status_var,
@@ -7235,7 +7287,7 @@ class DXFImportDialog:
             pass
 
     def _build_coordinate_system_settings(self, parent: Any) -> None:
-        frame = self.ttk.LabelFrame(parent, text="STEP2 座標系統設定")
+        frame = self.ttk.LabelFrame(parent, text="STEP2 座標系統狀態")
         frame.pack(fill="x", padx=10, pady=(0, 8))
         self.coordinate_mode_var = self.tk.StringVar(value="world")
         self.coordinate_error_var = self.tk.StringVar(value="")
@@ -7247,16 +7299,11 @@ class DXFImportDialog:
             text="使用原始 CAD 座標",
             command=self._reset_coordinate_settings,
         ).grid(row=0, column=0, padx=8, pady=(7, 3), sticky="w")
-        self.ttk.Button(
-            frame,
-            text="以候選點表格選定點設定原點",
-            command=self._set_selected_point_as_origin,
-        ).grid(row=0, column=1, padx=8, pady=(7, 3), sticky="w")
         self.ttk.Label(
             frame,
-            text="請先在 STEP5 候選點明細表格中選取一個點；預覽窗格只用於修正起終點。",
+            text="預設使用原始 CAD 座標。完成構件辨識後，可在 STEP5 候選點明細表格選取一點並設定為局部原點。",
             foreground="#455a64",
-        ).grid(row=0, column=2, columnspan=3, padx=(12, 8), pady=(7, 3), sticky="w")
+        ).grid(row=0, column=1, columnspan=4, padx=(12, 8), pady=(7, 3), sticky="w")
 
         self.tk.Label(frame, textvariable=self.coordinate_error_var, foreground="#c62828", anchor="w").grid(
             row=1, column=0, columnspan=2, padx=8, pady=(1, 5), sticky="w"
@@ -7277,7 +7324,7 @@ class DXFImportDialog:
         self.ttk.Label(summary_frame, textvariable=self.summary_file_var, font=("Microsoft JhengHei", 10, "bold")).pack(anchor="w", padx=8, pady=(5, 2))
         columns = ("role", "layer", "source", "recognized", "skipped")
         self.summary_tree = self.ttk.Treeview(summary_frame, columns=columns, show="headings", height=6)
-        headings = {"role": "類別", "layer": "選定圖層", "source": "原始 Entity", "recognized": "辨識成功", "skipped": "略過"}
+        headings = {"role": "類別", "layer": "選定圖層", "source": "原始 DXF 圖元", "recognized": "辨識成功", "skipped": "略過"}
         widths = {"role": 75, "layer": 460, "source": 105, "recognized": 105, "skipped": 80}
         for column in columns:
             self.summary_tree.heading(column, text=headings[column])
@@ -7290,7 +7337,7 @@ class DXFImportDialog:
         self.validation_content = self.ttk.Frame(validation_frame)
         self.validation_content.pack(fill="x", padx=8, pady=5)
 
-        problem_frame = self.ttk.LabelFrame(parent, text="STEP7 錯誤與警告（點選後自動定位）")
+        problem_frame = self.ttk.LabelFrame(parent, text="錯誤與警告（點選後自動定位）")
         problem_frame.pack(fill="both", expand=True, padx=6, pady=3)
         filters = self.ttk.Frame(problem_frame)
         filters.pack(fill="x", padx=6, pady=4)
@@ -7429,6 +7476,22 @@ class DXFImportDialog:
         )
         self.coordinate_mode_var.set("local")
         self._apply_coordinate_settings(show_error=False)
+
+    def _update_set_origin_button_state(self) -> None:
+        button = getattr(self, "set_origin_button", None)
+        if button is None:
+            return
+        state = self.selection_state
+        candidate = self.candidate_point_store.get(
+            state.selected_component_id,
+            state.selected_candidate_point_id,
+        )
+        enabled = (
+            self.world_result is not None
+            and state.selected_candidate_source == "candidate_tree"
+            and candidate is not None
+        )
+        button.configure(state="normal" if enabled else "disabled")
 
     def _apply_coordinate_settings(
         self,
@@ -7885,6 +7948,7 @@ class DXFImportDialog:
         if member is None:
             self.candidate_tree_adapter.rebuild("", (), lambda _point: ())
             self.performance_diagnostics.candidate_tree_rebuilds += 1
+            self._update_set_origin_button_state()
             return
         points = self.candidate_point_store.component_points(member.id)
         self.candidate_tree_adapter.rebuild(
@@ -7900,6 +7964,7 @@ class DXFImportDialog:
         self.candidate_tree_adapter.set_hover(
             self.selection_state.hovered_candidate_point_id
         )
+        self._update_set_origin_button_state()
 
     def _update_candidate_tree_rows(self) -> None:
         member = self._selected_member()
@@ -8024,6 +8089,7 @@ class DXFImportDialog:
             self.candidate_action_status_var.set(
                 "可直接在預覽圖點擊藍色起點或紅色終點，再點選新的黃色候選點。"
             )
+        self._update_set_origin_button_state()
 
     @staticmethod
     def _selection_source_label(source: str) -> str:
@@ -8054,6 +8120,7 @@ class DXFImportDialog:
             center_if_hidden=True,
             source="candidate_tree",
         )
+        self._update_set_origin_button_state()
 
     def _select_candidate_point(
         self,

@@ -1627,6 +1627,101 @@ class DXFSelectionArchitectureTests(unittest.TestCase):
         self.assertTrue(DXFImportDialog._widget_can_scroll(at_bottom, -1))
         self.assertFalse(DXFImportDialog._widget_can_scroll(at_bottom, 1))
 
+    def test_form_scroll_moves_outer_page_after_inner_canvas_reaches_bottom(self):
+        class Scrollable:
+            def __init__(self, first, last):
+                self.view = first, last
+                self.scroll_calls = []
+
+            def winfo_class(self):
+                return "Canvas"
+
+            def yview(self):
+                return self.view
+
+            def yview_scroll(self, units, mode):
+                self.scroll_calls.append((units, mode))
+
+        inner = Scrollable(0.6, 1.0)
+        outer = Scrollable(0.2, 0.8)
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.form_canvas = outer
+
+        result = dialog._on_form_mousewheel(
+            SimpleNamespace(widget=inner, delta=-120, num=0)
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(inner.scroll_calls, [])
+        self.assertEqual(outer.scroll_calls, [(1, "units")])
+
+    def test_form_scroll_prefers_inner_canvas_before_its_boundary(self):
+        class Scrollable:
+            def __init__(self, first, last):
+                self.view = first, last
+                self.scroll_calls = []
+
+            def winfo_class(self):
+                return "Canvas"
+
+            def yview(self):
+                return self.view
+
+            def yview_scroll(self, units, mode):
+                self.scroll_calls.append((units, mode))
+
+        inner = Scrollable(0.2, 0.8)
+        outer = Scrollable(0.2, 0.8)
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.form_canvas = outer
+
+        result = dialog._on_form_mousewheel(
+            SimpleNamespace(widget=inner, delta=-120, num=0)
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(inner.scroll_calls, [(1, "units")])
+        self.assertEqual(outer.scroll_calls, [])
+
+    def test_form_scroll_routes_layer_row_children_to_classification_canvas(self):
+        class Scrollable:
+            def __init__(self, first, last, master=None):
+                self.view = first, last
+                self.master = master
+                self.scroll_calls = []
+
+            def winfo_class(self):
+                return "Canvas"
+
+            def yview(self):
+                return self.view
+
+            def yview_scroll(self, units, mode):
+                self.scroll_calls.append((units, mode))
+
+        class RowWidget:
+            def __init__(self, master):
+                self.master = master
+
+            def winfo_class(self):
+                return "TLabel"
+
+        inner = Scrollable(0.2, 0.8)
+        row_frame = SimpleNamespace(master=inner)
+        row_label = RowWidget(row_frame)
+        outer = Scrollable(0.2, 0.8)
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.form_canvas = outer
+        dialog.classification_canvas = inner
+
+        result = dialog._on_form_mousewheel(
+            SimpleNamespace(widget=row_label, delta=-120, num=0)
+        )
+
+        self.assertEqual(result, "break")
+        self.assertEqual(inner.scroll_calls, [(1, "units")])
+        self.assertEqual(outer.scroll_calls, [])
+
     @staticmethod
     def candidate(identifier, x, y, recommended_for=()):
         return CandidatePoint(

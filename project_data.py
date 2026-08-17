@@ -97,8 +97,11 @@ TABLE_SPECS = {
     "inventory": {
         "id_field": None,
         "id_prefix": None,
-        "columns": ("Length", "Qty"),
+        "columns": ("ItemCode", "Spec", "Usage", "Length", "Qty"),
         "defaults": {
+            "ItemCode": "",
+            "Spec": "",
+            "Usage": "支撐",
             "Length": "",
             "Qty": "",
         },
@@ -124,11 +127,21 @@ DEFAULT_MATERIAL_SPECS = (
     {"Usage": "圍令", "Spec": "RC"},
     {"Usage": "圍令", "Spec": "H300x300"},
     {"Usage": "圍令", "Spec": "H350x350"},
-    {"Usage": "圍令", "Spec": "BOX400x400"},
+    {"Usage": "圍令", "Spec": "H400x400"},
+    {"Usage": "圍令", "Spec": "H400x408"},
+    {"Usage": "圍令", "Spec": "H414x405"},
+    {"Usage": "圍令", "Spec": "H428x407"},
+    {"Usage": "圍令", "Spec": "H458x417"},
     {"Usage": "支撐", "Spec": "H300x300"},
     {"Usage": "支撐", "Spec": "H350x350"},
-    {"Usage": "支撐", "Spec": "BOX400x400"},
+    {"Usage": "支撐", "Spec": "H400x400"},
+    {"Usage": "支撐", "Spec": "H400x408"},
+    {"Usage": "支撐", "Spec": "H414x405"},
+    {"Usage": "支撐", "Spec": "H428x407"},
+    {"Usage": "支撐", "Spec": "H458x417"},
 )
+
+REQUIRED_RC_SPEC = {"Usage": "圍令", "Spec": "RC"}
 
 
 def _legacy_position_list(values: Sequence[Any]) -> str:
@@ -144,17 +157,7 @@ def _legacy_position_list(values: Sequence[Any]) -> str:
 
 def normalize_legacy_fields(table_name: str, source: Mapping[str, Any]) -> dict[str, Any]:
     values = copy.deepcopy(dict(source))
-    if table_name == "walers":
-        # WalerType used to duplicate the visible material specification.
-        # Preserve legacy RC projects by migrating the construction-bearing
-        # value into the single material_spec field.
-        legacy_type = str(values.pop("WalerType", "") or "").strip()
-        if (
-            not str(values.get("material_spec", "") or "").strip()
-            and legacy_type.upper() == "RC"
-        ):
-            values["material_spec"] = "RC"
-    elif table_name == "struts":
+    if table_name == "struts":
         if "BeamPositions" not in values:
             values["BeamPositions"] = _legacy_position_list(
                 [values.get("Beam1"), values.get("Beam2")]
@@ -225,6 +228,20 @@ def normalize_project_row(
     }
 
 
+def ensure_required_material_specs(
+    rows: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized = [normalize_project_row("material_specs", row) for row in rows]
+    has_rc = any(
+        str(row.get("Usage", "") or "").strip() == REQUIRED_RC_SPEC["Usage"]
+        and str(row.get("Spec", "") or "").strip().upper() == "RC"
+        for row in normalized
+    )
+    if not has_rc:
+        normalized.insert(0, copy.deepcopy(REQUIRED_RC_SPEC))
+    return normalized
+
+
 class ProjectDataModel:
     """Own the Solver's only mutable copy of all input tables."""
 
@@ -261,6 +278,8 @@ class ProjectDataModel:
         if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
             raise ValueError(f"{table_name} 必須是資料列陣列。")
         normalized = [normalize_project_row(table_name, row) for row in rows]
+        if table_name == "material_specs":
+            normalized = ensure_required_material_specs(normalized)
         setattr(self, table_name, normalized)
 
     def geometry_rows(self) -> dict[str, list[dict[str, Any]]]:
@@ -280,6 +299,7 @@ __all__ = [
     "GEOMETRY_TABLES",
     "PROJECT_SETTING_TABLES",
     "DEFAULT_MATERIAL_SPECS",
+    "REQUIRED_RC_SPEC",
     "TABLE_COLUMNS",
     "TABLE_SPECS",
     "ProjectDataModel",
@@ -287,4 +307,5 @@ __all__ = [
     "next_identifier",
     "normalize_legacy_fields",
     "normalize_project_row",
+    "ensure_required_material_specs",
 ]

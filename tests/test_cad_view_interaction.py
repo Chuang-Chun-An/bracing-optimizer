@@ -105,6 +105,178 @@ class CADViewInteractionControllerTests(unittest.TestCase):
         self.assertTrue(callable(SupportInputApp._on_preview_motion))
         self.assertTrue(callable(SupportInputApp._on_preview_button_release))
 
+    def test_main_preview_draws_blue_overlay_for_selected_strut(self):
+        class Artist:
+            def remove(self):
+                pass
+
+        class Axes:
+            def __init__(self):
+                self.plot_calls = []
+
+            def plot(self, *args, **kwargs):
+                self.plot_calls.append((args, kwargs))
+                return (Artist(),)
+
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.ax = Axes()
+        app._preview_selection_overlay = []
+        app._preview_selected_key = "strut:S1"
+        app._preview_selection_targets = [{
+            "key": "strut:S1",
+            "kind": "strut",
+            "geometry": "segment",
+            "start": (0.0, 0.0),
+            "end": (1000.0, 0.0),
+        }]
+
+        app._draw_preview_selection_highlight()
+
+        self.assertEqual(len(app._preview_selection_overlay), 1)
+        self.assertEqual(app.ax.plot_calls[0][1]["color"], "#1565c0")
+        self.assertEqual(app.ax.plot_calls[0][1]["linewidth"], 7)
+
+    def test_blank_preview_click_clears_all_geometry_table_selections(self):
+        class Tree:
+            def __init__(self, selected):
+                self.selected = list(selected)
+
+            def selection(self):
+                return tuple(self.selected)
+
+            def selection_remove(self, *items):
+                self.selected = [item for item in self.selected if item not in items]
+
+        class Toolbar:
+            def __init__(self):
+                self.message = ""
+
+            def set_message(self, message):
+                self.message = message
+
+        class Canvas:
+            def __init__(self):
+                self.draw_count = 0
+
+            def draw_idle(self):
+                self.draw_count += 1
+
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.treeviews = {
+            "walers": Tree(("walers_0",)),
+            "struts": Tree(("struts_1",)),
+            "braces": Tree(("braces_2",)),
+        }
+        app.preview_toolbar = Toolbar()
+        app.canvas = Canvas()
+        app._preview_selected_key = "strut:S2"
+        app._draw_preview_selection_highlight = lambda: None
+
+        app._select_preview_target(None)
+
+        self.assertEqual(app._preview_selected_key, "")
+        self.assertTrue(
+            all(not tree.selection() for tree in app.treeviews.values())
+        )
+        self.assertEqual(
+            app.preview_toolbar.message,
+            "左鍵選取｜中鍵平移｜滾輪縮放",
+        )
+        self.assertEqual(app.canvas.draw_count, 1)
+
+    def test_waler_and_brace_tree_selection_use_shared_preview_sync(self):
+        class SelectedTree:
+            def __init__(self, item_id):
+                self.item_id = item_id
+
+            def selection(self):
+                return (self.item_id,)
+
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.treeviews = {
+            "walers": SelectedTree("walers_2"),
+            "braces": SelectedTree("braces_4"),
+        }
+        calls = []
+        app._sync_preview_to_geometry_selection = (
+            lambda table_name, kind, index: calls.append(
+                (table_name, kind, index)
+            )
+        )
+
+        app._on_geometry_tree_select("walers")
+        app._on_geometry_tree_select("braces")
+
+        self.assertEqual(
+            calls,
+            [
+                ("walers", "waler", 2),
+                ("braces", "brace", 4),
+            ],
+        )
+
+    def test_preview_waler_and_brace_clicks_navigate_to_matching_rows(self):
+        class Notebook:
+            labels = {"w": "圍令", "b": "斜撐"}
+
+            def __init__(self):
+                self.selected = []
+
+            def tabs(self):
+                return tuple(self.labels)
+
+            def tab(self, tab_id, option):
+                self.assert_option(option)
+                return self.labels[tab_id]
+
+            @staticmethod
+            def assert_option(option):
+                if option != "text":
+                    raise AssertionError(option)
+
+            def select(self, tab_id):
+                self.selected.append(tab_id)
+
+        class Toolbar:
+            def set_message(self, _message):
+                pass
+
+        class Canvas:
+            def draw_idle(self):
+                pass
+
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.treeviews = {"walers": object(), "braces": object()}
+        app.table_tab_labels = {"walers": "圍令", "braces": "斜撐"}
+        app.notebook = Notebook()
+        app.preview_toolbar = Toolbar()
+        app.canvas = Canvas()
+        app._draw_preview_selection_highlight = lambda: None
+        selected_rows = []
+        app._select_input_row = (
+            lambda table_name, row_index: selected_rows.append(
+                (table_name, row_index)
+            )
+        )
+
+        app._select_preview_target({
+            "key": "waler:W2",
+            "kind": "waler",
+            "identifier": "W2",
+            "table_name": "walers",
+            "row_index": 1,
+        })
+        app._select_preview_target({
+            "key": "brace:B4",
+            "kind": "brace",
+            "identifier": "B4",
+            "table_name": "braces",
+            "row_index": 3,
+        })
+
+        self.assertEqual(selected_rows, [("walers", 1), ("braces", 3)])
+        self.assertEqual(app.notebook.selected, ["w", "b"])
+
 
 if __name__ == "__main__":
     unittest.main()

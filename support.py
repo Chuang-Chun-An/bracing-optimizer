@@ -46,7 +46,8 @@ class SupportPlan:
 def normalize_waler_type(value: object) -> str:
     """Return the construction-rule waler type; legacy blanks mean Steel."""
 
-    return "RC" if str(value or "").strip().upper() == "RC" else "Steel"
+    normalized = str(value or "").strip().upper()
+    return "RC" if normalized in ("RC", "RC WALER") else "Steel"
 
 
 def configured_steel_lengths(config: SupportConfig) -> List[int]:

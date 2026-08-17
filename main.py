@@ -1,6 +1,7 @@
 import copy
 import json
 import math
+import os
 import queue
 import shutil
 import sys
@@ -31,10 +32,16 @@ from cad_builder import (
     CadEventMapper,
     TempEventWatcher,
 )
-from project_data import DEFAULT_MATERIAL_SPECS
+from project_data import DEFAULT_MATERIAL_SPECS, REQUIRED_RC_SPEC
 from project_data import TABLE_COLUMNS as PROJECT_TABLE_COLUMNS
 from project_data import ProjectDataModel
-from DXFinput import DXFImportDialog, DXFImportError
+from inventory_repository import JsonInventoryRepository
+from DXFinput import (
+    DXFImportDialog,
+    DXFImportError,
+    _active_monitor_work_areas,
+    fit_window_geometry_to_work_areas,
+)
 from cad_view_interaction import CADViewInteractionController
 from dxf_result_export import (
     DXFResultExportError,
@@ -59,6 +66,7 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else RESOURCE_DIR
 )
+UNLIMITED_INVENTORY_QTY = 99
 
 
 class PreviewNavigationToolbar(NavigationToolbar2Tk):
@@ -203,6 +211,19 @@ class SupportInputApp:
         ("ToBraceToWalerStartLen", "終點角撐長度(往圍令起點)"),
         ("ToBraceToWalerEndLen", "終點角撐長度(往圍令終點)"),
     )
+    STRUT_SUMMARY_COLUMNS = (
+        "No",
+        "StrutID",
+        "FromWaler",
+        "ToWaler",
+        "material_spec",
+        "TargetJackRegion",
+        "Zoning",
+    )
+    GEOMETRY_SUMMARY_COLUMNS = {
+        "walers": ("No", "WalerID", "material_spec"),
+        "braces": ("No", "BraceID", "FromWaler", "ToWaler"),
+    }
 
     def _project_display_name(self):
         path = getattr(self, "current_project_path", None)
@@ -293,7 +314,15 @@ class SupportInputApp:
     def __init__(self, root):
         self.root = root
         self.root.title(self.WINDOW_TITLE)
-        self._set_window_size(1600, 900)
+        self.main_ui_state = self._load_main_ui_state()
+        self._last_normal_geometry = self._restore_main_window_geometry()
+        primary_area = self._main_work_areas[0]
+        self.root.minsize(
+            min(900, primary_area[2] - primary_area[0]),
+            min(600, primary_area[3] - primary_area[1]),
+        )
+        self.root.resizable(True, True)
+        self.root.bind("<Configure>", self._on_main_window_configure)
 
         self.project_data = ProjectDataModel()
         self.result_items = {}
@@ -321,7 +350,10 @@ class SupportInputApp:
         self.dxf_last_import_debug = None
         self._cad_poll_after_id = None
         self.data_dir = RESOURCE_DIR / "data"
-        self.default_inventory_path = self.data_dir / "default_inventory.json"
+        self.default_inventory_path = self.data_dir / "inventory.json"
+        self.inventory_repository = JsonInventoryRepository(
+            self.default_inventory_path
+        )
         self.project_cases_dir = APP_DIR / "project_cases"
         self.project_cases_dir.mkdir(exist_ok=True)
         self.inventory = self._load_default_inventory()
@@ -338,6 +370,7 @@ class SupportInputApp:
             "inventory": "庫存",
             "material_specs": "材料規格",
         }
+        self.settings_tab_label = "設定"
 
         self.table_column_labels = {
             "walers": {
@@ -383,6 +416,9 @@ class SupportInputApp:
             },
             "inventory": {
                 "No": "列號",
+                "ItemCode": "機料編號",
+                "Spec": "規格",
+                "Usage": "用途",
                 "Length": "料長(mm)",
                 "Qty": "庫存數量",
             },
@@ -417,7 +453,9 @@ class SupportInputApp:
 
         self._build_ui()
         self._load_initial_data()
-        self.root.after(300, lambda: self.main_paned.sashpos(0, self.main_paned.winfo_width() // 2))
+        self.root.after(300, self._restore_main_paned_position)
+        if bool(self.main_ui_state.get("maximized", False)):
+            self.root.after_idle(lambda: self._set_main_window_maximized(True))
         self.update_preview()
         self._schedule_cad_event_poll()
         self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
@@ -435,50 +473,74 @@ class SupportInputApp:
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        self._create_table_tab("walers", self.table_tab_labels["walers"])
-        self._create_table_tab("struts", self.table_tab_labels["struts"])
-        self._create_table_tab("braces", self.table_tab_labels["braces"])
-        self._create_table_tab("inventory", self.table_tab_labels["inventory"])
-        self._create_table_tab(
-            "material_specs",
-            self.table_tab_labels["material_specs"],
-        )
+        self._create_geometry_table_tab("walers", self.table_tab_labels["walers"])
+        self._create_strut_tab()
+        self._create_geometry_table_tab("braces", self.table_tab_labels["braces"])
+        self._create_settings_tab()
         self._create_cad_import_tab()
         self._create_project_cases_tab()
         self._create_results_tab()
 
-        button_frame = ttk.Frame(self.root)
-        button_frame.pack(fill="x", padx=8, pady=4)
+        self.context_toolbar = ttk.Frame(self.root)
+        self.context_toolbar.pack(fill="x", padx=8, pady=4)
 
-        add_button = ttk.Button(button_frame, text="新增列", command=self.add_row)
-        delete_button = ttk.Button(button_frame, text="刪除選取列", command=self.delete_row)
-        move_up_button = ttk.Button(button_frame, text="上移", command=lambda: self._move_current_table_row(-1))
-        move_down_button = ttk.Button(button_frame, text="下移", command=lambda: self._move_current_table_row(1))
-        validate_button = ttk.Button(button_frame, text="驗證資料", command=self.validate_data)
-        redraw_button = ttk.Button(button_frame, text="更新圖面", command=self.update_preview)
+        self.context_toolbar_context_var = tk.StringVar(value="目前區域：圍令")
+        ttk.Label(
+            self.context_toolbar,
+            textvariable=self.context_toolbar_context_var,
+            font=("Microsoft JhengHei", 9, "bold"),
+            foreground="#37474f",
+        ).pack(side="left", padx=(4, 10))
+        ttk.Separator(self.context_toolbar, orient="vertical").pack(
+            side="left",
+            fill="y",
+            padx=(0, 6),
+        )
 
-        add_button.pack(side="left", padx=6)
-        delete_button.pack(side="left", padx=6)
-        move_up_button.pack(side="left", padx=6)
-        move_down_button.pack(side="left", padx=6)
-        validate_button.pack(side="left", padx=6)
-        redraw_button.pack(side="left", padx=6)
+        self.context_toolbar_buttons = {}
 
-        run_waler_solver_button = ttk.Button(button_frame, text="執行圍令配置", command=self._open_waler_solver)
+        def add_context_button(name, text, command):
+            button = ttk.Button(self.context_toolbar, text=text, command=command)
+            self.context_toolbar_buttons[name] = button
+            return button
+
+        add_context_button("add", "新增列", self.add_row)
+        add_context_button("delete", "刪除選取列", self.delete_row)
+        add_context_button("up", "上移", lambda: self._move_current_table_row(-1))
+        add_context_button("down", "下移", lambda: self._move_current_table_row(1))
+        add_context_button("validate", "驗證資料", self.validate_data)
+        add_context_button("redraw", "更新圖面", self.update_preview)
+        add_context_button("waler_solver", "執行圍令配置", self._open_waler_solver)
         self.run_support_solver_button = ttk.Button(
-            button_frame,
+            self.context_toolbar,
             text="支撐配置",
             command=self._open_support_solver,
         )
-        run_waler_solver_button.pack(side="left", padx=6)
-        self.run_support_solver_button.pack(side="left", padx=6)
+        self.context_toolbar_buttons["support_solver"] = self.run_support_solver_button
 
-        result_frame = ttk.LabelFrame(self.root, text="求解結果")
-        result_frame.pack(fill="both", padx=8, pady=(0, 8))
+        self.execution_message_frame = ttk.LabelFrame(self.root, text="執行訊息")
+        self.execution_message_frame.pack(fill="x", padx=8, pady=(0, 8))
+
+        message_header = ttk.Frame(self.execution_message_frame)
+        message_header.pack(fill="x", padx=4, pady=4)
+        self.execution_message_summary_var = tk.StringVar(value="狀態：尚未執行計算")
+        ttk.Label(
+            message_header,
+            textvariable=self.execution_message_summary_var,
+        ).pack(side="left", fill="x", expand=True)
+        self.execution_message_expanded = False
+        self.execution_message_toggle_button = ttk.Button(
+            message_header,
+            text="顯示詳細訊息 ▼",
+            command=self._toggle_execution_messages,
+        )
+        self.execution_message_toggle_button.pack(side="right")
+
+        self.execution_message_body = ttk.Frame(self.execution_message_frame)
 
         self.ascii_art_code_var = tk.StringVar()
         self.ascii_art_entry = tk.Entry(
-            result_frame,
+            self.execution_message_body,
             textvariable=self.ascii_art_code_var,
             width=7,
             relief="flat",
@@ -496,15 +558,17 @@ class SupportInputApp:
         self.ascii_art_entry.bind("<FocusIn>", self._on_ascii_art_entry_focus_in)
         self.ascii_art_entry.bind("<FocusOut>", self._on_ascii_art_entry_focus_out)
 
-        self.result_text = scrolledtext.ScrolledText(result_frame, height=14, wrap="none", state="disabled", font=("Consolas", 10))
+        self.result_text = scrolledtext.ScrolledText(self.execution_message_body, height=10, wrap="none", state="disabled", font=("Consolas", 10))
         self.result_text.pack(fill="both", expand=True, padx=4, pady=4)
         self.ascii_art_entry.lift()
 
         self._build_preview(self.right_frame)
+        self._update_context_toolbar()
 
-    def _create_table_tab(self, table_name, tab_text):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text=tab_text)
+    def _create_table_tab(self, table_name, tab_text, parent_notebook=None):
+        notebook = parent_notebook or self.notebook
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text=tab_text)
 
         container = ttk.Frame(frame)
         container.pack(fill="both", expand=True, padx=4, pady=4)
@@ -520,6 +584,12 @@ class SupportInputApp:
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
 
+        ttk.Label(
+            container,
+            text="提示：雙擊儲存格可編輯；新增、刪除與檢查請使用下方的目前區域工具列。",
+            foreground="#546e7a",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+
         container.rowconfigure(0, weight=1)
         container.columnconfigure(0, weight=1)
 
@@ -534,7 +604,796 @@ class SupportInputApp:
 
         tree.tag_configure("error", background="#ffdddd")
         tree.bind("<Double-1>", self._on_tree_double_click)
+        if table_name in ("walers", "braces"):
+            tree.bind(
+                "<<TreeviewSelect>>",
+                lambda _event, name=table_name: self._on_geometry_tree_select(
+                    name
+                ),
+            )
         self.treeviews[table_name] = tree
+
+    def _create_geometry_table_tab(self, table_name, tab_text):
+        """Create a consistent summary-and-detail editor for line members."""
+
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=tab_text)
+
+        paned = ttk.PanedWindow(frame, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=4, pady=4)
+        list_frame = ttk.Frame(paned)
+        detail_outer = ttk.LabelFrame(paned, text=f"{tab_text}詳細資訊")
+        paned.add(list_frame, weight=3)
+        paned.add(detail_outer, weight=2)
+
+        columns = self.GEOMETRY_SUMMARY_COLUMNS[table_name]
+        tree = ttk.Treeview(
+            list_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=y_scroll.set)
+        ttk.Label(
+            list_frame,
+            text="提示：選取列可在右側編輯；也可雙擊摘要欄位快速修改。",
+            foreground="#546e7a",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        widths = {
+            "No": (52, False),
+            "WalerID": (120, True),
+            "BraceID": (120, True),
+            "FromWaler": (110, True),
+            "ToWaler": (110, True),
+            "material_spec": (150, True),
+        }
+        for column in columns:
+            label = self.table_column_labels[table_name].get(column, column)
+            width, stretch = widths.get(column, (100, True))
+            tree.heading(column, text=label)
+            tree.column(
+                column,
+                width=width,
+                minwidth=max(45, width - 20),
+                anchor="center",
+                stretch=stretch,
+            )
+        tree.tag_configure("error", background="#ffdddd")
+        tree.bind("<Double-1>", self._on_tree_double_click)
+        tree.bind(
+            "<<TreeviewSelect>>",
+            lambda _event, name=table_name: self._on_geometry_tree_select(name),
+        )
+        self.treeviews[table_name] = tree
+
+        detail_frame = ttk.Frame(detail_outer, padding=(8, 6))
+        detail_frame.pack(fill="both", expand=True)
+        detail_frame.columnconfigure(1, weight=1)
+
+        if not hasattr(self, "geometry_detail_vars"):
+            self.geometry_detail_vars = {}
+            self.geometry_detail_widgets = {}
+            self.geometry_detail_status_vars = {}
+            self.geometry_detail_status_labels = {}
+            self.geometry_detail_headers = {}
+            self.selected_geometry_indices = {}
+            self._loading_geometry_detail = False
+
+        fields = (
+            (
+                ("WalerID", "entry"),
+                ("material_spec", "material"),
+                ("StartX", "entry"),
+                ("StartY", "entry"),
+                ("EndX", "entry"),
+                ("EndY", "entry"),
+                ("Remark", "entry"),
+            )
+            if table_name == "walers"
+            else (
+                ("BraceID", "entry"),
+                ("FromWaler", "waler"),
+                ("ToWaler", "waler"),
+                ("StartX", "entry"),
+                ("StartY", "entry"),
+                ("EndX", "entry"),
+                ("EndY", "entry"),
+            )
+        )
+        header_var = tk.StringVar(value=f"請先從左側列表選取一筆{tab_text}。")
+        self.geometry_detail_headers[table_name] = header_var
+        ttk.Label(
+            detail_frame,
+            textvariable=header_var,
+            foreground="#555555",
+            wraplength=360,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+
+        detail_vars = {}
+        detail_widgets = {}
+        for row_index, (column, kind) in enumerate(fields, start=1):
+            ttk.Label(
+                detail_frame,
+                text=self._field_label(table_name, column),
+            ).grid(row=row_index, column=0, sticky="e", padx=(0, 6), pady=4)
+            variable = tk.StringVar()
+            if kind in ("material", "waler"):
+                widget = ttk.Combobox(
+                    detail_frame,
+                    textvariable=variable,
+                    state="readonly",
+                )
+            else:
+                widget = ttk.Entry(detail_frame, textvariable=variable)
+            widget.grid(row=row_index, column=1, sticky="ew", pady=4)
+            widget.bind(
+                "<Return>",
+                lambda _event, name=table_name, field=column: self._commit_geometry_detail_field(name, field),
+            )
+            widget.bind(
+                "<FocusOut>",
+                lambda _event, name=table_name, field=column: self._commit_geometry_detail_field(name, field),
+            )
+            widget.bind(
+                "<Escape>",
+                lambda _event, name=table_name, field=column: self._reload_geometry_detail_field(name, field),
+            )
+            if isinstance(widget, ttk.Combobox):
+                widget.bind(
+                    "<<ComboboxSelected>>",
+                    lambda _event, name=table_name, field=column: self._commit_geometry_detail_field(name, field),
+                )
+            detail_vars[column] = variable
+            detail_widgets[column] = widget
+
+        status_var = tk.StringVar(value="")
+        status_label = ttk.Label(
+            detail_frame,
+            textvariable=status_var,
+            foreground="#b71c1c",
+            wraplength=360,
+            justify="left",
+        )
+        status_label.grid(
+            row=len(fields) + 1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(8, 3),
+        )
+        ttk.Label(
+            detail_frame,
+            text="輸入後按 Enter 或移開游標即可儲存；按 Esc 還原目前欄位。",
+            foreground="#555555",
+            wraplength=360,
+            justify="left",
+        ).grid(row=len(fields) + 2, column=0, columnspan=2, sticky="ew")
+
+        self.geometry_detail_vars[table_name] = detail_vars
+        self.geometry_detail_widgets[table_name] = detail_widgets
+        self.geometry_detail_status_vars[table_name] = status_var
+        self.geometry_detail_status_labels[table_name] = status_label
+        self.selected_geometry_indices[table_name] = None
+        self._set_geometry_detail_enabled(table_name, False)
+
+    def _create_strut_tab(self):
+        """Create the compact strut list and its single-field edit panel."""
+
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=self.table_tab_labels["struts"])
+
+        paned = ttk.PanedWindow(frame, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=4, pady=4)
+
+        list_frame = ttk.Frame(paned)
+        detail_outer = ttk.LabelFrame(paned, text="支撐詳細資訊")
+        paned.add(list_frame, weight=3)
+        paned.add(detail_outer, weight=2)
+        self.strut_content_paned = paned
+
+        columns = self.STRUT_SUMMARY_COLUMNS
+        tree = ttk.Treeview(
+            list_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        tree.configure(yscrollcommand=y_scroll.set)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+
+        widths = {
+            "No": (52, False),
+            "StrutID": (82, True),
+            "FromWaler": (82, True),
+            "ToWaler": (82, True),
+            "material_spec": (110, True),
+            "TargetJackRegion": (86, False),
+            "Zoning": (72, True),
+        }
+        for column in columns:
+            label = self.table_column_labels["struts"].get(column, column)
+            if column == "No":
+                label = "順序"
+            width, stretch = widths[column]
+            tree.heading(column, text=label)
+            tree.column(
+                column,
+                width=width,
+                minwidth=max(45, width - 18),
+                anchor="center",
+                stretch=stretch,
+            )
+        tree.tag_configure("error", background="#ffdddd")
+        tree.bind("<Double-1>", self._on_tree_double_click)
+        tree.bind("<<TreeviewSelect>>", self._on_strut_tree_select)
+        self.treeviews["struts"] = tree
+
+        detail_canvas = tk.Canvas(detail_outer, highlightthickness=0)
+        detail_scroll = ttk.Scrollbar(
+            detail_outer,
+            orient="vertical",
+            command=detail_canvas.yview,
+        )
+        detail_canvas.configure(yscrollcommand=detail_scroll.set)
+        detail_canvas.pack(side="left", fill="both", expand=True)
+        detail_scroll.pack(side="right", fill="y")
+
+        detail_frame = ttk.Frame(detail_canvas, padding=(6, 4))
+        detail_window = detail_canvas.create_window(
+            (0, 0),
+            window=detail_frame,
+            anchor="nw",
+        )
+        detail_frame.bind(
+            "<Configure>",
+            lambda _event: detail_canvas.configure(
+                scrollregion=detail_canvas.bbox("all")
+            ),
+        )
+        detail_canvas.bind(
+            "<Configure>",
+            lambda event: detail_canvas.itemconfigure(
+                detail_window,
+                width=event.width,
+            ),
+        )
+
+        self.strut_detail_vars = {}
+        self.strut_detail_widgets = {}
+        self.selected_strut_index = None
+        self._loading_strut_detail = False
+
+        self.strut_detail_empty_var = tk.StringVar(
+            value="請先從左側列表選取一支支撐。"
+        )
+        ttk.Label(
+            detail_frame,
+            textvariable=self.strut_detail_empty_var,
+            foreground="#555555",
+            wraplength=330,
+            justify="left",
+        ).pack(fill="x", pady=(0, 6))
+
+        def add_section(title, fields):
+            section = ttk.LabelFrame(detail_frame, text=title)
+            section.pack(fill="x", pady=(0, 7))
+            section.columnconfigure(1, weight=1)
+            for row_index, (column, label, kind) in enumerate(fields):
+                ttk.Label(section, text=label).grid(
+                    row=row_index,
+                    column=0,
+                    sticky="e",
+                    padx=(7, 5),
+                    pady=3,
+                )
+                variable = tk.StringVar()
+                self.strut_detail_vars[column] = variable
+                if kind == "material":
+                    widget = ttk.Combobox(
+                        section,
+                        textvariable=variable,
+                        state="readonly",
+                    )
+                elif kind == "waler":
+                    widget = ttk.Combobox(
+                        section,
+                        textvariable=variable,
+                        state="readonly",
+                    )
+                elif kind == "jack":
+                    widget = ttk.Spinbox(
+                        section,
+                        from_=1,
+                        to=99,
+                        textvariable=variable,
+                    )
+                else:
+                    widget = ttk.Entry(section, textvariable=variable)
+                widget.grid(
+                    row=row_index,
+                    column=1,
+                    sticky="ew",
+                    padx=(0, 7),
+                    pady=3,
+                )
+                widget.bind(
+                    "<Return>",
+                    lambda _event, field=column: self._commit_strut_detail_field(field),
+                )
+                widget.bind(
+                    "<FocusOut>",
+                    lambda _event, field=column: self._commit_strut_detail_field(field),
+                )
+                widget.bind(
+                    "<Escape>",
+                    lambda _event, field=column: self._reload_strut_detail_field(field),
+                )
+                if isinstance(widget, ttk.Combobox):
+                    widget.bind(
+                        "<<ComboboxSelected>>",
+                        lambda _event, field=column: self._commit_strut_detail_field(field),
+                    )
+                self.strut_detail_widgets[column] = widget
+            return section
+
+        add_section(
+            "基本資訊",
+            (
+                ("StrutID", "支撐編號", "entry"),
+                ("material_spec", "材料規格", "material"),
+                ("TargetJackRegion", "目標千斤頂區域", "jack"),
+                ("Zoning", "分區", "entry"),
+            ),
+        )
+        geometry = add_section(
+            "幾何資訊",
+            (
+                ("FromWaler", "起點圍令", "waler"),
+                ("ToWaler", "終點圍令", "waler"),
+                ("StartX", "起點 X", "entry"),
+                ("StartY", "起點 Y", "entry"),
+                ("EndX", "終點 X", "entry"),
+                ("EndY", "終點 Y", "entry"),
+            ),
+        )
+        length_row = len(("FromWaler", "ToWaler", "StartX", "StartY", "EndX", "EndY"))
+        ttk.Label(geometry, text="支撐長度").grid(
+            row=length_row,
+            column=0,
+            sticky="e",
+            padx=(7, 5),
+            pady=3,
+        )
+        self.strut_length_var = tk.StringVar(value="—")
+        ttk.Label(geometry, textvariable=self.strut_length_var).grid(
+            row=length_row,
+            column=1,
+            sticky="w",
+            padx=(0, 7),
+            pady=3,
+        )
+        add_section(
+            "構件資訊",
+            (
+                ("BeamPositions", "托梁位置 (mm)", "entry"),
+                ("ColumnPositions", "中間柱位置 (mm)", "entry"),
+                ("AssociatedBeamIDs", "關聯托梁", "entry"),
+                ("AssociatedColumnIDs", "關聯中間柱", "entry"),
+            ),
+        )
+        add_section(
+            "角撐資訊",
+            tuple(
+                (field, label, "entry")
+                for field, label in self.STRUT_BRACE_LENGTH_FIELDS
+            ),
+        )
+
+        self.strut_detail_status_var = tk.StringVar(value="")
+        self.strut_detail_status_label = ttk.Label(
+            detail_frame,
+            textvariable=self.strut_detail_status_var,
+            foreground="#b71c1c",
+            wraplength=330,
+            justify="left",
+        )
+        self.strut_detail_status_label.pack(fill="x", pady=(0, 5))
+        ttk.Label(
+            detail_frame,
+            text="每個欄位在按 Enter、選擇完成或離開欄位時立即儲存；按 Esc 可還原目前欄位。",
+            foreground="#555555",
+            wraplength=330,
+            justify="left",
+        ).pack(fill="x")
+        self._set_strut_detail_enabled(False)
+
+    def _set_strut_detail_enabled(self, enabled):
+        for column, widget in getattr(self, "strut_detail_widgets", {}).items():
+            if not enabled:
+                widget.configure(state="disabled")
+            elif column in ("material_spec", "FromWaler", "ToWaler"):
+                widget.configure(state="readonly")
+            else:
+                widget.configure(state="normal")
+
+    def _on_strut_tree_select(self, _event=None):
+        tree = self.treeviews.get("struts")
+        if tree is None:
+            return
+        selection = tree.selection()
+        index = self._item_id_to_index(selection[0]) if selection else None
+        previous_index = getattr(self, "selected_strut_index", None)
+        if index != previous_index and previous_index is not None:
+            focused = tree.focus_get()
+            for column, widget in self.strut_detail_widgets.items():
+                if focused is widget:
+                    self._commit_strut_detail_field(column)
+                    break
+        if index is None or not (0 <= index < len(self.struts)):
+            self.selected_strut_index = None
+            self._set_strut_detail_enabled(False)
+            self.strut_detail_empty_var.set("請先從左側列表選取一支支撐。")
+            self.strut_length_var.set("—")
+            return
+        self._load_strut_detail(index)
+        self._sync_preview_to_strut_selection(index)
+
+    def _sync_preview_to_strut_selection(self, index):
+        self._sync_preview_to_geometry_selection("struts", "strut", index)
+
+    def _on_geometry_tree_select(self, table_name):
+        tree = self.treeviews.get(table_name)
+        if tree is None:
+            return
+        selection = tree.selection()
+        index = self._item_id_to_index(selection[0]) if selection else None
+        rows = getattr(self, table_name, None)
+        has_detail = table_name in getattr(self, "geometry_detail_widgets", {})
+        invalid_index = index is None or (
+            has_detail and rows is not None and not (0 <= index < len(rows))
+        )
+        if invalid_index:
+            if table_name in getattr(self, "geometry_detail_widgets", {}):
+                self.selected_geometry_indices[table_name] = None
+                self._set_geometry_detail_enabled(table_name, False)
+                self.geometry_detail_headers[table_name].set(
+                    f"請先從左側列表選取一筆{self._table_label(table_name)}。"
+                )
+            return
+        if rows is not None and has_detail:
+            self._load_geometry_detail(table_name, index)
+        kind = {
+            "walers": "waler",
+            "struts": "strut",
+            "braces": "brace",
+        }.get(table_name)
+        if kind is not None:
+            self._sync_preview_to_geometry_selection(table_name, kind, index)
+
+    def _set_geometry_detail_enabled(self, table_name, enabled):
+        for column, widget in self.geometry_detail_widgets.get(table_name, {}).items():
+            if not enabled:
+                widget.configure(state="disabled")
+            elif column in ("material_spec", "FromWaler", "ToWaler"):
+                widget.configure(state="readonly")
+            else:
+                widget.configure(state="normal")
+
+    def _load_geometry_detail(self, table_name, index):
+        rows = getattr(self, table_name, ())
+        if not (0 <= index < len(rows)):
+            return
+        row = rows[index]
+        self.selected_geometry_indices[table_name] = index
+        self._loading_geometry_detail = True
+        try:
+            widgets = self.geometry_detail_widgets[table_name]
+            if table_name == "walers":
+                material_options = tuple(self._material_spec_options("圍令"))
+                current = str(row.get("material_spec", "") or "").strip()
+                if current and current not in material_options:
+                    material_options = (*material_options, current)
+                widgets["material_spec"].configure(values=("", *material_options))
+            elif table_name == "braces":
+                waler_ids = tuple(
+                    str(item.get("WalerID", "") or "").strip()
+                    for item in self.walers
+                    if str(item.get("WalerID", "") or "").strip()
+                )
+                for column in ("FromWaler", "ToWaler"):
+                    current = str(row.get(column, "") or "").strip()
+                    choices = waler_ids
+                    if current and current not in choices:
+                        choices = (*choices, current)
+                    widgets[column].configure(values=("", *choices))
+            for column, variable in self.geometry_detail_vars[table_name].items():
+                variable.set(self._format_display_value(row.get(column, "")))
+        finally:
+            self._loading_geometry_detail = False
+
+        identifier_column = "WalerID" if table_name == "walers" else "BraceID"
+        identifier = str(row.get(identifier_column, "") or "").strip()
+        if not identifier:
+            identifier = f"未命名{self._table_label(table_name)}"
+        self.geometry_detail_headers[table_name].set(
+            f"{identifier}（第 {index + 1} 列）"
+        )
+        self.geometry_detail_status_vars[table_name].set("")
+        self.geometry_detail_status_labels[table_name].configure(
+            foreground="#2e7d32"
+        )
+        self._set_geometry_detail_enabled(table_name, True)
+
+    def _reload_geometry_detail_field(self, table_name, column):
+        index = self.selected_geometry_indices.get(table_name)
+        rows = getattr(self, table_name, ())
+        if index is None or not (0 <= index < len(rows)):
+            return "break"
+        self._loading_geometry_detail = True
+        try:
+            self.geometry_detail_vars[table_name][column].set(
+                self._format_display_value(rows[index].get(column, ""))
+            )
+        finally:
+            self._loading_geometry_detail = False
+        self.geometry_detail_status_vars[table_name].set("")
+        return "break"
+
+    def _validate_geometry_detail_value(
+        self,
+        table_name,
+        index,
+        column,
+        raw_value,
+        value,
+    ):
+        identifier_column = "WalerID" if table_name == "walers" else "BraceID"
+        if column == identifier_column:
+            if not raw_value:
+                return f"{self._field_label(table_name, column)}不可空白。"
+            duplicate = any(
+                row_index != index
+                and str(row.get(identifier_column, "") or "").strip() == raw_value
+                for row_index, row in enumerate(getattr(self, table_name))
+            )
+            if duplicate:
+                return f"{self._field_label(table_name, column)}「{raw_value}」已存在。"
+        if column in self.numeric_columns.get(table_name, ()):
+            if raw_value == "" or isinstance(value, str):
+                return f"{self._field_label(table_name, column)}必須是數字。"
+            if not math.isfinite(float(value)):
+                return f"{self._field_label(table_name, column)}必須是有限數字。"
+        if table_name == "braces" and column in ("FromWaler", "ToWaler") and raw_value:
+            other = "ToWaler" if column == "FromWaler" else "FromWaler"
+            if raw_value == str(self.braces[index].get(other, "") or "").strip():
+                return "起點圍令與終點圍令不可相同。"
+        return ""
+
+    def _commit_geometry_detail_field(self, table_name, column):
+        if getattr(self, "_loading_geometry_detail", False):
+            return
+        index = self.selected_geometry_indices.get(table_name)
+        rows = getattr(self, table_name, ())
+        if index is None or not (0 <= index < len(rows)):
+            return
+        raw_value = self.geometry_detail_vars[table_name][column].get().strip()
+        value = self._parse_cell_value(table_name, column, raw_value)
+        error = self._validate_geometry_detail_value(
+            table_name,
+            index,
+            column,
+            raw_value,
+            value,
+        )
+        status_label = self.geometry_detail_status_labels[table_name]
+        status_var = self.geometry_detail_status_vars[table_name]
+        if error:
+            status_label.configure(foreground="#b71c1c")
+            status_var.set(error + " 已保留原值；按 Esc 可還原欄位。")
+            return
+        if value == rows[index].get(column, ""):
+            status_var.set("")
+            return
+
+        rows[index][column] = value
+        tree = self.treeviews[table_name]
+        row_id = f"{table_name}_{index}"
+        if row_id in tree.get_children() and column in tree["columns"]:
+            tree.set(row_id, column, self._format_display_value(value))
+        self._handle_input_data_changed(
+            preserve_view=True,
+            table_name=table_name,
+            field_name=column,
+        )
+        self._load_geometry_detail(table_name, index)
+        status_label.configure(foreground="#2e7d32")
+        status_var.set(f"已儲存：{self._field_label(table_name, column)}")
+        kind = "waler" if table_name == "walers" else "brace"
+        self._sync_preview_to_geometry_selection(table_name, kind, index)
+
+    def _sync_preview_to_geometry_selection(self, table_name, kind, index):
+        if not hasattr(self, "canvas"):
+            return
+        target = next(
+            (
+                item
+                for item in getattr(self, "_preview_selection_targets", ())
+                if item.get("table_name") == table_name
+                and item.get("row_index") == index
+                and item.get("kind") == kind
+            ),
+            None,
+        )
+        if target is None:
+            return
+        self._preview_selected_key = target["key"]
+        self._draw_preview_selection_highlight()
+        self.canvas.draw_idle()
+
+    def _load_strut_detail(self, index):
+        if not (0 <= index < len(self.struts)):
+            return
+        row = self.struts[index]
+        self._migrate_strut_position_fields(row)
+        self.selected_strut_index = index
+        self._loading_strut_detail = True
+        try:
+            waler_ids = tuple(
+                str(item.get("WalerID", "") or "").strip()
+                for item in self.walers
+                if str(item.get("WalerID", "") or "").strip()
+            )
+            material_options = tuple(self._material_spec_options("支撐"))
+            current_material = str(row.get("material_spec", "") or "").strip()
+            if current_material and current_material not in material_options:
+                material_options = (*material_options, current_material)
+            self.strut_detail_widgets["material_spec"].configure(
+                values=("", *material_options)
+            )
+            for column in ("FromWaler", "ToWaler"):
+                current = str(row.get(column, "") or "").strip()
+                choices = waler_ids
+                if current and current not in choices:
+                    choices = (*choices, current)
+                self.strut_detail_widgets[column].configure(values=("", *choices))
+            for column, variable in self.strut_detail_vars.items():
+                variable.set(self._format_display_value(row.get(column, "")))
+        finally:
+            self._loading_strut_detail = False
+
+        strut_id = str(row.get("StrutID", "") or "").strip() or "未命名支撐"
+        self.strut_detail_empty_var.set(f"{strut_id}（第 {index + 1} 列）")
+        self.strut_detail_status_var.set("")
+        self.strut_detail_status_label.configure(foreground="#2e7d32")
+        self._set_strut_detail_enabled(True)
+        self._update_strut_detail_length(row)
+
+    def _update_strut_detail_length(self, row=None):
+        if row is None:
+            index = getattr(self, "selected_strut_index", None)
+            if index is None or not (0 <= index < len(self.struts)):
+                self.strut_length_var.set("—")
+                return
+            row = self.struts[index]
+        coordinates = [
+            self._to_number(row.get(column, ""))
+            for column in ("StartX", "StartY", "EndX", "EndY")
+        ]
+        if any(value is None for value in coordinates):
+            self.strut_length_var.set("資料未完整")
+            return
+        length = self._line_length(*coordinates)
+        self.strut_length_var.set(f"{length:,.1f} mm")
+
+    def _reload_strut_detail_field(self, column):
+        index = getattr(self, "selected_strut_index", None)
+        if index is None or not (0 <= index < len(self.struts)):
+            return "break"
+        self._loading_strut_detail = True
+        try:
+            self.strut_detail_vars[column].set(
+                self._format_display_value(self.struts[index].get(column, ""))
+            )
+        finally:
+            self._loading_strut_detail = False
+        self.strut_detail_status_var.set("")
+        return "break"
+
+    def _validate_strut_detail_value(self, index, column, raw_value, value):
+        label = self._field_label("struts", column)
+        if column == "StrutID":
+            if not raw_value:
+                return "支撐編號不可空白。"
+            duplicate = any(
+                row_index != index
+                and str(row.get("StrutID", "") or "").strip() == raw_value
+                for row_index, row in enumerate(self.struts)
+            )
+            if duplicate:
+                return f"支撐編號「{raw_value}」已存在。"
+        if column in ("BeamPositions", "ColumnPositions"):
+            _positions, error = self._parse_position_list(raw_value)
+            if error:
+                return f"{label}格式錯誤：{error}。"
+        if column in self.numeric_columns["struts"]:
+            if raw_value == "" or isinstance(value, str):
+                return f"{label}必須是數字。"
+            if not math.isfinite(float(value)):
+                return f"{label}必須是有限數字。"
+        if column in dict(self.STRUT_BRACE_LENGTH_FIELDS) and float(value) < 0:
+            return f"{label}不可為負數。"
+        if column == "TargetJackRegion":
+            if not float(value).is_integer() or value <= 0:
+                return "目標千斤頂區域必須是大於 0 的整數。"
+        if column in ("FromWaler", "ToWaler") and raw_value:
+            other = "ToWaler" if column == "FromWaler" else "FromWaler"
+            if raw_value == str(self.struts[index].get(other, "") or "").strip():
+                return "起點圍令與終點圍令不可相同。"
+        return ""
+
+    def _commit_strut_detail_field(self, column):
+        if getattr(self, "_loading_strut_detail", False):
+            return
+        index = getattr(self, "selected_strut_index", None)
+        if index is None or not (0 <= index < len(self.struts)):
+            return
+        raw_value = self.strut_detail_vars[column].get().strip()
+        value = self._parse_cell_value("struts", column, raw_value)
+        error = self._validate_strut_detail_value(index, column, raw_value, value)
+        if error:
+            self.strut_detail_status_label.configure(foreground="#b71c1c")
+            self.strut_detail_status_var.set(error + " 已保留原值；按 Esc 可還原欄位。")
+            return
+
+        row = self.struts[index]
+        if value == row.get(column, ""):
+            self.strut_detail_status_var.set("")
+            return
+        row[column] = value
+        tree = self.treeviews["struts"]
+        row_id = f"struts_{index}"
+        if row_id in tree.get_children() and column in tree["columns"]:
+            tree.set(row_id, column, self._format_display_value(value))
+        self._update_strut_detail_length(row)
+        self.strut_detail_status_label.configure(foreground="#2e7d32")
+        self.strut_detail_status_var.set(f"已儲存：{self._field_label('struts', column)}")
+        self._handle_input_data_changed(
+            preserve_view=True,
+            table_name="struts",
+            field_name=column,
+        )
+        self._sync_preview_to_strut_selection(index)
+
+    def _create_settings_tab(self):
+        frame = ttk.Frame(self.notebook)
+        self.notebook.add(frame, text=self.settings_tab_label)
+        self.settings_notebook = ttk.Notebook(frame)
+        self.settings_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+        self._create_table_tab(
+            "material_specs",
+            self.table_tab_labels["material_specs"],
+            parent_notebook=self.settings_notebook,
+        )
+        self._create_table_tab(
+            "inventory",
+            self.table_tab_labels["inventory"],
+            parent_notebook=self.settings_notebook,
+        )
+        self.settings_notebook.bind(
+            "<<NotebookTabChanged>>",
+            self._on_settings_tab_changed,
+        )
 
     def _create_cad_import_tab(self):
         frame = ttk.Frame(self.notebook)
@@ -641,6 +1500,10 @@ class SupportInputApp:
         y_scroll.grid(row=0, column=1, sticky="ns")
         self.project_case_listbox.configure(yscrollcommand=y_scroll.set)
         self.project_case_listbox.bind("<Double-1>", lambda _event: self._load_selected_project_case())
+        self.project_case_listbox.bind(
+            "<<ListboxSelect>>",
+            self._update_project_action_states,
+        )
 
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill="x", padx=8, pady=(0, 8))
@@ -649,11 +1512,12 @@ class SupportInputApp:
             text="新增專案",
             command=self._new_project,
         ).pack(side="left", padx=(0, 6))
-        ttk.Button(
+        self.open_project_button = ttk.Button(
             button_frame,
             text="開啟專案",
             command=self._load_selected_project_case,
-        ).pack(side="left", padx=(0, 6))
+        )
+        self.open_project_button.pack(side="left", padx=(0, 6))
         ttk.Button(
             button_frame,
             text="儲存專案",
@@ -669,11 +1533,12 @@ class SupportInputApp:
             text="重新連結 DXF",
             command=self._relink_dxf,
         ).pack(side="left", padx=(0, 6))
-        ttk.Button(
+        self.delete_project_button = ttk.Button(
             button_frame,
             text="刪除專案",
             command=self._delete_selected_project_case,
-        ).pack(side="left", padx=(0, 6))
+        )
+        self.delete_project_button.pack(side="right", padx=(12, 0))
 
         status_frame = ttk.LabelFrame(frame, text="專案與 DXF 狀態")
         status_frame.pack(fill="x", padx=8, pady=(0, 8))
@@ -687,6 +1552,7 @@ class SupportInputApp:
 
         self._refresh_project_case_list()
         self._refresh_project_status_display()
+        self._update_project_action_states()
 
     def _create_results_tab(self):
         frame = ttk.Frame(self.notebook)
@@ -742,6 +1608,10 @@ class SupportInputApp:
         self.results_tree.bind("<ButtonRelease-1>", self._on_results_tree_click)
         self.results_tree.bind("<space>", self._on_results_tree_space)
         self.results_tree.bind("<Double-1>", self._on_results_tree_double_click)
+        self.results_tree.bind(
+            "<<TreeviewSelect>>",
+            self._update_result_action_states,
+        )
 
         ttk.Label(
             frame,
@@ -751,28 +1621,46 @@ class SupportInputApp:
             ),
         ).pack(fill="x", padx=6, pady=(0, 4))
 
+        self.result_scope_var = tk.StringVar(value="目前沒有顯示中的配置成果。")
+        self.result_scope_label = ttk.Label(
+            frame,
+            textvariable=self.result_scope_var,
+            foreground="#37474f",
+            wraplength=900,
+            justify="left",
+        )
+        self.result_scope_label.pack(fill="x", padx=6, pady=(0, 5))
+
         result_action_frame = ttk.Frame(frame)
         result_action_frame.pack(fill="x", padx=4, pady=(0, 6))
-        ttk.Button(
+        self.create_custom_plan_button = ttk.Button(
             result_action_frame,
             text="建立自訂方案",
             command=self._create_custom_waler_plan_from_selection,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
+        )
+        self.create_custom_plan_button.pack(side="left", padx=(0, 6))
+        self.delete_result_plan_button = ttk.Button(
             result_action_frame,
             text="刪除方案",
             command=self._delete_selected_result_plan,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
+        )
+        self.delete_result_plan_button.pack(side="left", padx=(0, 6))
+        self.export_results_dxf_button = ttk.Button(
             result_action_frame,
-            text="匯出支撐配置成果DXF",
+            text="匯出目前 0 個配置成果 DXF",
             command=self._export_visible_results_to_dxf,
-        ).pack(side="left", padx=(0, 6))
+        )
+        self.export_results_dxf_button.pack(side="left", padx=(0, 6))
 
         material_frame = ttk.LabelFrame(frame, text="材料統計")
         material_frame.pack(fill="both", padx=4, pady=(0, 6))
-        material_frame.rowconfigure(0, weight=1)
+        material_frame.rowconfigure(1, weight=1)
         material_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            material_frame,
+            text="統計範圍：目前顯示方案",
+            foreground="#455a64",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(4, 2))
 
         material_columns = (
             "Material Spec",
@@ -787,13 +1675,13 @@ class SupportInputApp:
             show="headings",
             height=7,
         )
-        self.material_summary_tree.grid(row=0, column=0, sticky="nsew")
+        self.material_summary_tree.grid(row=1, column=0, sticky="nsew")
         material_scroll = ttk.Scrollbar(
             material_frame,
             orient="vertical",
             command=self.material_summary_tree.yview,
         )
-        material_scroll.grid(row=0, column=1, sticky="ns")
+        material_scroll.grid(row=1, column=1, sticky="ns")
         self.material_summary_tree.configure(yscrollcommand=material_scroll.set)
 
         material_column_labels = {
@@ -971,6 +1859,7 @@ class SupportInputApp:
         if selected_index is not None:
             self.project_case_listbox.selection_set(selected_index)
             self.project_case_listbox.see(selected_index)
+        self._update_project_action_states()
 
     def _selected_project_case_name(self):
         if not hasattr(self, "project_case_listbox"):
@@ -979,6 +1868,14 @@ class SupportInputApp:
         if not selection:
             return None
         return self.project_case_listbox.get(selection[0])
+
+    def _update_project_action_states(self, _event=None):
+        has_selection = bool(self._selected_project_case_name())
+        state = "normal" if has_selection else "disabled"
+        for attribute in ("open_project_button", "delete_project_button"):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.configure(state=state)
 
     def _refresh_project_status_display(self):
         variable = getattr(self, "project_asset_status_var", None)
@@ -1093,9 +1990,20 @@ class SupportInputApp:
             self._refresh_project_case_list(select_first=True)
             return
 
+        managed_dxf = target_path.parent / "source" / "source.dxf"
+        managed_dxf_text = (
+            "是（將連同專案資料夾刪除）"
+            if is_managed and managed_dxf.is_file()
+            else "否"
+        )
         confirmed = messagebox.askyesno(
             "確認刪除",
-            f"確定要刪除專案：\n\n{project_name}\n\n此動作無法復原。",
+            (
+                f"確定要刪除專案：{project_name}\n\n"
+                f"專案路徑：\n{target_path}\n\n"
+                f"包含管理 DXF：{managed_dxf_text}\n\n"
+                "此動作無法復原。"
+            ),
         )
         if not confirmed:
             return
@@ -1331,19 +2239,13 @@ class SupportInputApp:
             self.show_result(f"DXF 重新連結失敗：{exc}")
 
     def _load_default_inventory(self):
-        path = getattr(self, "default_inventory_path", None)
-        if path is None or not path.is_file():
-            return []
-
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(payload, dict):
-            inventory = payload.get("inventory", [])
-        else:
-            inventory = payload
-
-        if not isinstance(inventory, list):
-            return []
-        return copy.deepcopy(inventory)
+        repository = getattr(self, "inventory_repository", None)
+        if repository is None:
+            path = getattr(self, "default_inventory_path", None)
+            if path is None:
+                return []
+            repository = JsonInventoryRepository(path)
+        return repository.list_items()
 
     def save_project_case(self, project_name):
         path = self._managed_project_case_path(project_name)
@@ -1451,13 +2353,21 @@ class SupportInputApp:
 
     def _build_material_summary_payload(self):
         usage = self._collect_visible_material_usage()
-        inventory_quantities = self._collect_inventory_quantities()
         summary = []
-        for material_spec, length in sorted(usage):
-            used_quantity = usage[(material_spec, length)]
-            inventory_quantity = inventory_quantities.get(length, 0)
-            remaining_quantity = inventory_quantity - used_quantity
+        for usage_name, material_spec, length in sorted(usage):
+            used_quantity = usage[(usage_name, material_spec, length)]
+            inventory_quantity = self._inventory_quantity(
+                material_spec,
+                usage_name,
+                length,
+            )
+            remaining_quantity = (
+                UNLIMITED_INVENTORY_QTY
+                if not material_spec
+                else inventory_quantity - used_quantity
+            )
             summary.append({
+                "usage": usage_name,
                 "material_spec": material_spec,
                 "length": length,
                 "used_qty": used_quantity,
@@ -1686,6 +2596,81 @@ class SupportInputApp:
         else:
             self._toggle_result_visibility(item_id)
         return "break"
+
+    def _visible_result_scope(self):
+        counts = {"waler": 0, "support": 0}
+        member_occurrences = Counter()
+        for result_id, item in self.result_items.items():
+            result_type = item.get("type")
+            result = item.get("result")
+            if result_type == "waler":
+                if not item.get("visible", True) or not isinstance(result, dict):
+                    continue
+                member_id = str(result.get("waler_id", "") or result_id).strip()
+                counts["waler"] += 1
+                member_occurrences[("圍令", member_id)] += 1
+                continue
+            if result_type != "support" or result is None:
+                continue
+            for plan in list(getattr(result, "plans", []) or []):
+                support_id = str(getattr(plan, "support_id", "") or "").strip()
+                if support_id and self._support_plan_visible(item, support_id):
+                    counts["support"] += 1
+                    member_occurrences[("支撐", support_id)] += 1
+        conflicts = tuple(
+            (kind, member_id, quantity)
+            for (kind, member_id), quantity in sorted(member_occurrences.items())
+            if quantity > 1
+        )
+        return counts, conflicts
+
+    def _update_result_action_states(self, _event=None):
+        if not hasattr(self, "results_tree"):
+            return
+        selected = self.results_tree.selection()
+        selected_id = selected[0] if selected else None
+        selected_item = self.result_items.get(selected_id)
+
+        can_create_custom = bool(
+            selected_item and selected_item.get("type") == "waler"
+        )
+        can_delete = bool(
+            selected_item and self._is_custom_result_item(selected_item)
+        )
+        self.create_custom_plan_button.configure(
+            state="normal" if can_create_custom else "disabled"
+        )
+        self.delete_result_plan_button.configure(
+            state="normal" if can_delete else "disabled"
+        )
+
+        counts, conflicts = self._visible_result_scope()
+        total = counts["waler"] + counts["support"]
+        has_dxf = isinstance(getattr(self, "dxf_last_import_debug", None), dict)
+        can_export = total > 0 and not conflicts and has_dxf
+        self.export_results_dxf_button.configure(
+            text=f"匯出目前 {total} 個配置成果 DXF",
+            state="normal" if can_export else "disabled",
+        )
+
+        scope_text = (
+            f"目前顯示：圍令 {counts['waler']} 個、支撐 {counts['support']} 支；"
+            "材料統計與 DXF 匯出皆以這些顯示方案為範圍。"
+        )
+        if conflicts:
+            conflict_text = "、".join(
+                f"{kind} {member_id} 同時顯示 {quantity} 個方案"
+                for kind, member_id, quantity in conflicts
+            )
+            scope_text += f"  ⚠ {conflict_text}；匯出前請每個構件只保留一個方案。"
+            color = "#b71c1c"
+        elif total and not has_dxf:
+            scope_text += "  尚未有已確認的 DXF 工程幾何，因此目前不能匯出 DXF。"
+            color = "#8a5a00"
+        else:
+            color = "#37474f"
+        self.result_scope_var.set(scope_text)
+        self.result_scope_label.configure(foreground=color)
 
     def _on_results_tree_space(self, event=None):
         selected = self.results_tree.selection()
@@ -1928,6 +2913,25 @@ class SupportInputApp:
             messagebox.showwarning(
                 "匯出 DXF",
                 "目前沒有勾選為可見的圍令或支撐配置。",
+                parent=self.root,
+            )
+            return
+        duplicate_members = [
+            (role, member_id, quantity)
+            for (role, member_id), quantity in Counter(
+                (plan.role, plan.member_id) for plan in plans
+            ).items()
+            if quantity > 1
+        ]
+        if duplicate_members:
+            labels = {"waler": "圍令", "strut": "支撐"}
+            details = "\n".join(
+                f"- {labels.get(role, role)} {member_id}：{quantity} 個方案"
+                for role, member_id, quantity in duplicate_members
+            )
+            messagebox.showwarning(
+                "匯出範圍衝突",
+                f"同一構件不能同時匯出多個方案：\n\n{details}\n\n請先取消多餘方案的顯示。",
                 parent=self.root,
             )
             return
@@ -3220,6 +4224,13 @@ class SupportInputApp:
         result_context=None,
     ):
         base_plan = base_plan or {}
+        material_spec = str(
+            (result_context or {}).get(
+                "material_spec",
+                base_plan.get("material_spec", ""),
+            )
+            or ""
+        ).strip()
         segments = [int(round(value)) for value in segments]
         joints = []
         position = 0
@@ -3239,7 +4250,10 @@ class SupportInputApp:
             "mid": target_value("mid", "mid_segment_ratio_target", 0.5),
             "long": target_value("long", "long_segment_ratio_target", 0.3),
         }
-        purchasable_lengths = self._get_purchasable_lengths()
+        purchasable_lengths = self._get_purchasable_lengths(
+            material_spec,
+            "圍令",
+        )
         steel_length = sum(segments)
         required_length = (
             self._get_waler_required_length(waler_id, result_context or {})
@@ -3274,7 +4288,7 @@ class SupportInputApp:
         ratio_penalty, segment_ratios = wales.calculate_ratio_penalty(segments, cfg)
         allocation = wales.allocate_stock_best_fit(
             segments,
-            self._get_inventory_items(),
+            self._get_inventory_items(material_spec, "圍令"),
             purchasable_lengths,
         )
 
@@ -3388,7 +4402,11 @@ class SupportInputApp:
         joint_clearance = int(round(float(result.get("joint_clearance", 300) or 300)))
         min_piece_length = int(round(float(result.get("min_piece_length", 1000) or 1000)))
         max_piece_length = int(round(float(result.get("max_piece_length", 10000) or 10000)))
-        purchasable_lengths = self._get_purchasable_lengths()
+        material_spec = str(result.get("material_spec", "") or "").strip()
+        purchasable_lengths = self._get_purchasable_lengths(
+            material_spec,
+            "圍令",
+        )
 
         tail_adjustment = 0
         tail_gap = None
@@ -3463,11 +4481,14 @@ class SupportInputApp:
             violations.append(error)
             details.append(f"❌ {error}")
 
-        inventory_quantities = self._collect_inventory_quantities()
         required_quantities = Counter(segments)
         warnings = []
         for length, required_quantity in sorted(required_quantities.items()):
-            inventory_quantity = inventory_quantities.get(length, 0)
+            inventory_quantity = self._inventory_quantity(
+                material_spec,
+                "圍令",
+                length,
+            )
             if required_quantity > inventory_quantity and length in allowed_lengths:
                 warnings.extend([
                     "庫存不足（會以購買數計入分數）",
@@ -3785,6 +4806,7 @@ class SupportInputApp:
                 self.results_tree.item(selected_id, open=True)
 
         self._update_material_summary()
+        self._update_result_action_states()
 
     def _select_results_tab(self):
         if hasattr(self, "notebook") and hasattr(self, "results_tab"):
@@ -3849,7 +4871,7 @@ class SupportInputApp:
                 for value in material_lengths:
                     length = self._material_length_key(value)
                     if length is not None:
-                        usage[(material_spec, length)] += 1
+                        usage[("圍令", material_spec, length)] += 1
                 continue
 
             if item.get("type") == "support":
@@ -3858,10 +4880,12 @@ class SupportInputApp:
                     if not self._support_plan_visible(item, support_id):
                         continue
                     material_spec = str(getattr(plan, "material_spec", "") or "").strip()
-                    for _piece_type, value in getattr(plan, "pieces", []) or []:
+                    for piece_type, value in getattr(plan, "pieces", []) or []:
+                        if str(piece_type).lower() != "steel":
+                            continue
                         length = self._material_length_key(value)
                         if length is not None:
-                            usage[(material_spec, length)] += 1
+                            usage[("支撐", material_spec, length)] += 1
         return usage
 
     def _collect_inventory_quantities(self):
@@ -3871,8 +4895,19 @@ class SupportInputApp:
             quantity = self._to_number(row.get("Qty"))
             if length is None or quantity is None or quantity < 0:
                 continue
-            inventory_quantities[length] += quantity
+            usage = str(row.get("Usage", "") or "").strip()
+            material_spec = str(row.get("Spec", "") or "").strip()
+            inventory_quantities[(usage, material_spec, length)] += quantity
         return inventory_quantities
+
+    def _inventory_quantity(self, material_spec, usage, length):
+        material_spec = str(material_spec or "").strip()
+        if not material_spec:
+            return UNLIMITED_INVENTORY_QTY
+        return self._collect_inventory_quantities().get(
+            (str(usage or "").strip(), material_spec, length),
+            0,
+        )
 
     def _update_material_summary(self):
         if not hasattr(self, "material_summary_tree"):
@@ -3883,12 +4918,23 @@ class SupportInputApp:
             self.material_summary_tree.delete(*children)
 
         usage = self._collect_visible_material_usage()
-        inventory_quantities = self._collect_inventory_quantities()
-        for material_spec, length in sorted(usage):
-            used_quantity = usage[(material_spec, length)]
-            inventory_quantity = inventory_quantities.get(length, 0)
-            remaining_quantity = inventory_quantity - used_quantity
-            tags = ("shortage",) if remaining_quantity < 0 else ()
+        for usage_name, material_spec, length in sorted(usage):
+            used_quantity = usage[(usage_name, material_spec, length)]
+            inventory_quantity = self._inventory_quantity(
+                material_spec,
+                usage_name,
+                length,
+            )
+            remaining_quantity = (
+                UNLIMITED_INVENTORY_QTY
+                if not material_spec
+                else inventory_quantity - used_quantity
+            )
+            tags = (
+                ("shortage",)
+                if material_spec and remaining_quantity < 0
+                else ()
+            )
             self.material_summary_tree.insert(
                 "",
                 "end",
@@ -4297,6 +5343,13 @@ class SupportInputApp:
     def _select_preview_target(self, target):
         self._preview_selected_key = target["key"] if target is not None else ""
         if target is None:
+            for table_name in ("walers", "struts", "braces"):
+                tree = self.treeviews.get(table_name)
+                if tree is None:
+                    continue
+                selection = tree.selection()
+                if selection:
+                    tree.selection_remove(*selection)
             self.preview_toolbar.set_message("左鍵選取｜中鍵平移｜滾輪縮放")
         else:
             table_name = target.get("table_name")
@@ -4318,10 +5371,15 @@ class SupportInputApp:
         self.canvas.draw_idle()
 
     def _on_preview_button_press(self, event):
-        if event.inaxes is not self.ax:
-            return
         if self.preview_interaction.is_select_button(event.button):
-            self._select_preview_target(self._preview_target_at_event(event))
+            target = (
+                self._preview_target_at_event(event)
+                if event.inaxes is self.ax
+                else None
+            )
+            self._select_preview_target(target)
+            return
+        if event.inaxes is not self.ax:
             return
         if not self.preview_interaction.is_pan_button(event.button):
             return
@@ -4566,13 +5624,7 @@ class SupportInputApp:
         table_name=None,
         field_name=None,
     ):
-        metadata_only = (
-            table_name == "material_specs"
-            or (
-                table_name == "struts"
-                and field_name == "material_spec"
-            )
-        )
+        metadata_only = table_name == "material_specs"
         if not metadata_only and table_name in (
             None,
             "walers",
@@ -4596,6 +5648,8 @@ class SupportInputApp:
         tree.selection_set(item_id)
         tree.focus(item_id)
         tree.see(item_id)
+        if table_name == "struts":
+            self._load_strut_detail(index)
 
     def _apply_cad_event(self, event):
         table_name, row = self.cad_event_mapper.map_event(
@@ -4632,7 +5686,117 @@ class SupportInputApp:
             self._set_cad_import_status("CAD 事件匯入失敗", error=exc)
             if report_errors:
                 messagebox.showerror("CAD 匯入失敗", str(exc), parent=self.root)
-            return False
+        return False
+
+    @staticmethod
+    def _main_ui_state_path():
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home())))
+        return base / "SupportDistributionUV" / "main_ui_state.json"
+
+    @classmethod
+    def _load_main_ui_state(cls):
+        try:
+            payload = json.loads(
+                cls._main_ui_state_path().read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _default_main_window_geometry(self):
+        areas = _active_monitor_work_areas(self.root)
+        self._main_work_areas = areas
+        left, top, right, bottom = areas[0]
+        available_width = max(right - left, 1)
+        available_height = max(bottom - top, 1)
+        width = min(1600, available_width, max(720, int(available_width * 0.90)))
+        height = min(900, available_height, max(560, int(available_height * 0.90)))
+        x = left + max((available_width - width) // 2, 0)
+        y = top + max((available_height - height) // 2, 0)
+        x_offset = f"+{x}" if x >= 0 else str(x)
+        y_offset = f"+{y}" if y >= 0 else str(y)
+        return f"{width}x{height}{x_offset}{y_offset}"
+
+    def _restore_main_window_geometry(self):
+        fallback = self._default_main_window_geometry()
+        requested = str(self.main_ui_state.get("geometry", fallback))
+        geometry = fit_window_geometry_to_work_areas(
+            requested,
+            fallback,
+            self._main_work_areas,
+        )
+        try:
+            self.root.geometry(geometry)
+        except tk.TclError:
+            self.root.geometry(fallback)
+            geometry = fallback
+        return geometry
+
+    def _is_main_window_maximized(self):
+        try:
+            return self.root.state() == "zoomed"
+        except tk.TclError:
+            try:
+                return bool(self.root.attributes("-zoomed"))
+            except tk.TclError:
+                return False
+
+    def _set_main_window_maximized(self, maximized):
+        try:
+            self.root.state("zoomed" if maximized else "normal")
+        except tk.TclError:
+            try:
+                self.root.attributes("-zoomed", bool(maximized))
+            except tk.TclError:
+                pass
+
+    def _on_main_window_configure(self, event):
+        if event.widget is not self.root or self._is_main_window_maximized():
+            return
+        geometry = self.root.geometry()
+        if geometry:
+            self._last_normal_geometry = geometry
+
+    def _restore_main_paned_position(self):
+        paned = getattr(self, "main_paned", None)
+        if paned is None:
+            return
+        try:
+            ratio = float(self.main_ui_state.get("main_sash_ratio", 0.60))
+        except (TypeError, ValueError):
+            ratio = 0.60
+        ratio = min(max(ratio, 0.30), 0.80)
+        try:
+            width = paned.winfo_width()
+            if width > 1:
+                paned.sashpos(0, int(width * ratio))
+        except tk.TclError:
+            pass
+
+    def _save_main_ui_state(self):
+        paned = getattr(self, "main_paned", None)
+        sash_ratio = 0.60
+        if paned is not None:
+            try:
+                width = paned.winfo_width()
+                if width > 1:
+                    sash_ratio = paned.sashpos(0) / width
+            except tk.TclError:
+                pass
+        payload = {
+            "geometry": self._last_normal_geometry,
+            "maximized": self._is_main_window_maximized(),
+            "main_sash_ratio": min(max(float(sash_ratio), 0.30), 0.80),
+        }
+        try:
+            path = self._main_ui_state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def _on_main_window_close(self):
         if getattr(self, "project_dirty", False):
@@ -4653,14 +5817,77 @@ class SupportInputApp:
             except tk.TclError:
                 pass
             self._cad_poll_after_id = None
+        self._save_main_ui_state()
         self.root.destroy()
 
     def _on_tab_changed(self, event):
         selected = self.notebook.tab(self.notebook.select(), "text")
-        for table_name, tab_label in self.table_tab_labels.items():
-            if selected == tab_label:
+        if selected == self.settings_tab_label:
+            self._sync_current_settings_table()
+        else:
+            self.current_table = None
+            for table_name in ("walers", "struts", "braces"):
+                if selected == self.table_tab_labels[table_name]:
+                    self.current_table = table_name
+                    break
+        self._update_context_toolbar()
+
+    def _on_settings_tab_changed(self, event):
+        self._sync_current_settings_table()
+        self._update_context_toolbar()
+
+    def _sync_current_settings_table(self):
+        notebook = getattr(self, "settings_notebook", None)
+        if notebook is None:
+            return
+        selected_tab = notebook.select()
+        if not selected_tab:
+            return
+        selected = notebook.tab(selected_tab, "text")
+        for table_name in ("material_specs", "inventory"):
+            if selected == self.table_tab_labels[table_name]:
                 self.current_table = table_name
-                break
+                return
+
+    def _update_context_toolbar(self):
+        toolbar = getattr(self, "context_toolbar", None)
+        if toolbar is None:
+            return
+        selected = self.notebook.tab(self.notebook.select(), "text")
+        context_name = selected
+        if selected == self.settings_tab_label:
+            self._sync_current_settings_table()
+            nested_name = self.table_tab_labels.get(self.current_table, "")
+            if nested_name:
+                context_name = f"{selected}／{nested_name}"
+        if hasattr(self, "context_toolbar_context_var"):
+            self.context_toolbar_context_var.set(f"目前區域：{context_name}")
+        actions = {
+            self.table_tab_labels["walers"]: (
+                "add", "delete", "up", "down", "validate", "redraw", "waler_solver"
+            ),
+            self.table_tab_labels["struts"]: (
+                "add", "delete", "up", "down", "validate", "redraw", "support_solver"
+            ),
+            self.table_tab_labels["braces"]: (
+                "add", "delete", "up", "down", "validate", "redraw"
+            ),
+            self.settings_tab_label: ("add", "delete", "validate"),
+        }.get(selected, ())
+        for button in self.context_toolbar_buttons.values():
+            button.pack_forget()
+        for name in actions:
+            self.context_toolbar_buttons[name].pack(side="left", padx=6)
+
+    def _toggle_execution_messages(self):
+        self.execution_message_expanded = not self.execution_message_expanded
+        if self.execution_message_expanded:
+            self.execution_message_body.pack(fill="both", expand=True)
+            self.execution_message_toggle_button.configure(text="隱藏詳細訊息 ▲")
+            self.ascii_art_entry.lift()
+        else:
+            self.execution_message_body.pack_forget()
+            self.execution_message_toggle_button.configure(text="顯示詳細訊息 ▼")
 
     def _load_initial_data(self):
         for table_name in (
@@ -4676,16 +5903,31 @@ class SupportInputApp:
 
     def _refresh_tree(self, table_name):
         tree = self.treeviews[table_name]
+        selected_index = None
+        selection = tree.selection()
+        if selection:
+            selected_index = self._item_id_to_index(selection[0])
         tree.delete(*tree.get_children())
         data = getattr(self, table_name)
+        display_columns = tuple(tree["columns"])
+        row_columns = tuple(column for column in display_columns if column != "No")
         for index, row in enumerate(data):
             if table_name == "struts":
                 self._migrate_strut_position_fields(row)
             values = [index + 1] + [
                 self._format_display_value(row.get(col, ""))
-                for col in self.table_columns[table_name]
+                for col in row_columns
             ]
             tree.insert("", "end", iid=f"{table_name}_{index}", values=values)
+        if selected_index is not None and data:
+            selected_index = min(selected_index, len(data) - 1)
+            item_id = f"{table_name}_{selected_index}"
+            tree.selection_set(item_id)
+            tree.focus(item_id)
+        if table_name == "struts":
+            self._on_strut_tree_select()
+        elif table_name in ("walers", "braces"):
+            self._on_geometry_tree_select(table_name)
         if table_name == "inventory":
             self._update_material_summary()
 
@@ -4771,12 +6013,122 @@ class SupportInputApp:
         return self.table_column_labels.get(table_name, {}).get(field_name, field_name)
 
     def _material_spec_options(self, usage):
-        return sorted({
-            str(row.get("Spec", "") or "").strip()
-            for row in self.material_specs
-            if str(row.get("Usage", "") or "").strip() == usage
-            and str(row.get("Spec", "") or "").strip()
-        })
+        options = []
+        seen = set()
+        for row in self.material_specs:
+            if str(row.get("Usage", "") or "").strip() != usage:
+                continue
+            spec = str(row.get("Spec", "") or "").strip()
+            key = spec.casefold()
+            if spec and key not in seen:
+                options.append(spec)
+                seen.add(key)
+        return options
+
+    @staticmethod
+    def _material_spec_key(usage, spec):
+        return (
+            str(usage or "").strip().casefold(),
+            str(spec or "").strip().casefold(),
+        )
+
+    def _material_spec_key_exists(self, usage, spec, *, exclude_index=None):
+        target = self._material_spec_key(usage, spec)
+        if not target[1]:
+            return False
+        return any(
+            index != exclude_index
+            and self._material_spec_key(row.get("Usage"), row.get("Spec"))
+            == target
+            for index, row in enumerate(self.material_specs)
+        )
+
+    def _material_spec_references(self, usage, spec):
+        """Return every current string reference to one (Usage, Spec) key."""
+
+        target = self._material_spec_key(usage, spec)
+        references = {
+            "inventory": [],
+            "walers": [],
+            "struts": [],
+        }
+        if not target[1]:
+            return references
+        references["inventory"] = [
+            index
+            for index, row in enumerate(self.inventory)
+            if self._material_spec_key(row.get("Usage"), row.get("Spec"))
+            == target
+        ]
+        if target[0] == "圍令".casefold():
+            references["walers"] = [
+                index
+                for index, row in enumerate(self.walers)
+                if self._material_spec_key("圍令", row.get("material_spec"))
+                == target
+            ]
+        if target[0] == "支撐".casefold():
+            references["struts"] = [
+                index
+                for index, row in enumerate(self.struts)
+                if self._material_spec_key("支撐", row.get("material_spec"))
+                == target
+            ]
+        return references
+
+    @staticmethod
+    def _material_spec_reference_count(references):
+        return sum(len(indices) for indices in references.values())
+
+    @staticmethod
+    def _material_spec_reference_text(references):
+        return (
+            f"庫存：{len(references.get('inventory', ()))} 筆\n"
+            f"圍令：{len(references.get('walers', ()))} 筆\n"
+            f"支撐：{len(references.get('struts', ()))} 筆"
+        )
+
+    def _rename_material_spec_references(
+        self,
+        usage,
+        old_spec,
+        new_spec,
+        *,
+        references=None,
+    ):
+        references = references or self._material_spec_references(
+            usage,
+            old_spec,
+        )
+        for index in references["inventory"]:
+            self.inventory[index]["Spec"] = new_spec
+        for index in references["walers"]:
+            self.walers[index]["material_spec"] = new_spec
+        for index in references["struts"]:
+            self.struts[index]["material_spec"] = new_spec
+        return references
+
+    @staticmethod
+    def _is_required_rc_spec(row):
+        return (
+            str(row.get("Usage", "") or "").strip() == REQUIRED_RC_SPEC["Usage"]
+            and str(row.get("Spec", "") or "").strip().upper() == "RC"
+        )
+
+    def _cell_editor_options(self, table_name, column, index):
+        """Return (choices, state) for table cells with controlled values."""
+
+        if table_name == "material_specs" and column == "Usage":
+            return ("支撐", "圍令"), "readonly"
+        if table_name == "inventory" and column == "Usage":
+            return ("支撐", "圍令"), "readonly"
+        if table_name == "inventory" and column == "Spec":
+            usage = str(self.inventory[index].get("Usage", "") or "").strip()
+            return ("", *self._material_spec_options(usage)), "readonly"
+        if column == "material_spec" and table_name in ("walers", "struts"):
+            usage = "圍令" if table_name == "walers" else "支撐"
+            return ("", *self._material_spec_options(usage)), "readonly"
+        return None, "normal"
 
     def _on_tree_double_click(self, event):
         tree = event.widget
@@ -4788,9 +6140,38 @@ class SupportInputApp:
         column = self._tree_column_key(tree, column_id)
         if column in (None, "No"):
             return
-        bbox = tree.bbox(row_id, column_id)
-        if not bbox:
+        table_name = self._get_table_name_by_tree(tree)
+        index = self._item_id_to_index(row_id)
+        if table_name is None or index is None:
             return
+        self._begin_cell_edit(table_name, index, column, row_id=row_id)
+
+    def _begin_cell_edit(self, table_name, index, column, *, row_id=None):
+        """Open the shared in-place editor for mouse and programmatic use."""
+
+        tree = self.treeviews.get(table_name)
+        rows = getattr(self, table_name, None)
+        if tree is None or rows is None or not (0 <= index < len(rows)):
+            return False
+        if column in (None, "No"):
+            return False
+        row_id = row_id or f"{table_name}_{index}"
+        if (
+            table_name == "material_specs"
+            and self._is_required_rc_spec(self.material_specs[index])
+            and column in ("Usage", "Spec")
+        ):
+            messagebox.showinfo(
+                "必要規格",
+                "圍令規格 RC 為必要施工規格，不可修改或刪除。",
+                parent=self.root,
+            )
+            return False
+        tree.see(row_id)
+        tree.update_idletasks()
+        bbox = tree.bbox(row_id, column)
+        if not bbox:
+            return False
 
         x, y, width, height = bbox
         current_value = tree.set(row_id, column)
@@ -4798,15 +6179,11 @@ class SupportInputApp:
         if self.editing_entry is not None:
             self.editing_entry.destroy()
 
-        table_name = self._get_table_name_by_tree(tree)
-        combobox_values = None
-        combobox_state = "normal"
-        if table_name == "material_specs" and column == "Usage":
-            combobox_values = ("支撐", "圍令")
-            combobox_state = "readonly"
-        elif column == "material_spec" and table_name in ("walers", "struts"):
-            usage = "圍令" if table_name == "walers" else "支撐"
-            combobox_values = self._material_spec_options(usage)
+        combobox_values, combobox_state = self._cell_editor_options(
+            table_name,
+            column,
+            index,
+        )
 
         if combobox_values is None:
             entry = tk.Entry(tree)
@@ -4829,6 +6206,7 @@ class SupportInputApp:
             entry.bind("<<ComboboxSelected>>", save_edit)
         entry.bind("<FocusOut>", save_edit)
         self.editing_entry = entry
+        return True
 
     def _finish_edit(self, tree, row_id, column, entry_widget):
         if not entry_widget.winfo_exists():
@@ -4846,19 +6224,135 @@ class SupportInputApp:
             return
 
         value = self._parse_cell_value(table_name, column, new_value)
-        getattr(self, table_name)[index][column] = value
-        tree.set(row_id, column, self._format_display_value(value))
+        rows = getattr(self, table_name)
+        old_value = rows[index].get(column, "")
+        if value == old_value:
+            return
+
+        if table_name == "material_specs":
+            row = self.material_specs[index]
+            old_usage = str(row.get("Usage", "") or "").strip()
+            old_spec = str(row.get("Spec", "") or "").strip()
+            proposed_usage = value if column == "Usage" else old_usage
+            proposed_spec = value if column == "Spec" else old_spec
+            if proposed_spec and self._material_spec_key_exists(
+                proposed_usage,
+                proposed_spec,
+                exclude_index=index,
+            ):
+                messagebox.showwarning(
+                    "規格重複",
+                    f"{proposed_usage}的材料規格「{proposed_spec}」已存在。",
+                    parent=self.root,
+                )
+                return
+
+            references = self._material_spec_references(old_usage, old_spec)
+            reference_count = self._material_spec_reference_count(references)
+            if column == "Usage" and reference_count:
+                messagebox.showwarning(
+                    "用途不可變更",
+                    (
+                        f"材料規格「{old_spec}」仍被使用，不可直接變更用途。\n\n"
+                        f"{self._material_spec_reference_text(references)}\n\n"
+                        "請先移除或更換引用。"
+                    ),
+                    parent=self.root,
+                )
+                return
+            if column == "Spec" and old_spec and not proposed_spec:
+                messagebox.showwarning(
+                    "材料規格不可空白",
+                    "既有材料規格不可改為空白。",
+                    parent=self.root,
+                )
+                return
+            references_changed = False
+            if column == "Spec" and reference_count:
+                confirmed = messagebox.askyesno(
+                    "同步更新材料規格",
+                    (
+                        f"材料規格「{old_spec}」目前正在被引用。\n\n"
+                        f"{self._material_spec_reference_text(references)}\n\n"
+                        f"是否同步更新為「{proposed_spec}」？"
+                    ),
+                    parent=self.root,
+                )
+                if not confirmed:
+                    return
+                self._rename_material_spec_references(
+                    old_usage,
+                    old_spec,
+                    proposed_spec,
+                    references=references,
+                )
+                references_changed = True
+
+            row[column] = value
+            tree.set(row_id, column, self._format_display_value(value))
+            if references_changed:
+                for changed_table in ("inventory", "walers", "struts"):
+                    if references[changed_table]:
+                        self._refresh_tree(changed_table)
+                if references["inventory"]:
+                    self._update_material_summary()
+                self._handle_input_data_changed(
+                    preserve_view=True,
+                    table_name=None,
+                    field_name="material_spec",
+                )
+            else:
+                self._handle_input_data_changed(
+                    preserve_view=True,
+                    table_name="material_specs",
+                    field_name=column,
+                )
+            return
+
+        rows[index][column] = value
+        tree_columns = (
+            tuple(tree["columns"])
+            if hasattr(tree, "__getitem__")
+            else tuple(
+                getattr(self, "table_columns", self.TABLE_COLUMNS).get(
+                    table_name,
+                    (),
+                )
+            )
+        )
+        if column in tree_columns:
+            tree.set(row_id, column, self._format_display_value(value))
         if table_name == "inventory":
+            if column == "Usage":
+                current_spec = str(rows[index].get("Spec", "") or "").strip()
+                if (
+                    current_spec
+                    and not any(
+                        self._material_spec_key(value, option)
+                        == self._material_spec_key(value, current_spec)
+                        for option in self._material_spec_options(value)
+                    )
+                ):
+                    rows[index]["Spec"] = ""
+                    tree.set(row_id, "Spec", "")
             self._update_material_summary()
         self._handle_input_data_changed(
             preserve_view=True,
             table_name=table_name,
             field_name=column,
         )
+        if table_name == "struts" and index == getattr(self, "selected_strut_index", None):
+            self._load_strut_detail(index)
+            self._sync_preview_to_strut_selection(index)
+        elif table_name in ("walers", "braces"):
+            if index == getattr(self, "selected_geometry_indices", {}).get(table_name):
+                self._load_geometry_detail(table_name, index)
+            kind = "waler" if table_name == "walers" else "brace"
+            self._sync_preview_to_geometry_selection(table_name, kind, index)
 
     def _item_id_to_index(self, item_id):
         try:
-            return int(item_id.split("_")[1])
+            return int(str(item_id).rsplit("_", 1)[1])
         except (IndexError, ValueError):
             return None
 
@@ -4888,17 +6382,34 @@ class SupportInputApp:
 
     def add_row(self):
         table_name = self.current_table
+        if table_name not in self.table_columns:
+            return
         new_row = {col: "" for col in self.table_columns[table_name]}
         if table_name == "struts":
             new_row["TargetJackRegion"] = 2
         elif table_name == "material_specs":
             new_row["Usage"] = "支撐"
+        elif table_name == "inventory":
+            new_row["Usage"] = "支撐"
         getattr(self, table_name).append(new_row)
         self._refresh_tree(table_name)
+        new_index = len(getattr(self, table_name)) - 1
+        self._select_input_row(table_name, new_index)
         self._handle_input_data_changed(preserve_view=True, table_name=table_name)
+        if table_name == "material_specs":
+            def edit_new_material_spec():
+                self._begin_cell_edit(
+                    "material_specs",
+                    new_index,
+                    "Spec",
+                )
+
+            self.root.after_idle(edit_new_material_spec)
 
     def delete_row(self):
         table_name = self.current_table
+        if table_name not in self.treeviews:
+            return
         tree = self.treeviews[table_name]
         selection = tree.selection()
         if not selection:
@@ -4908,6 +6419,34 @@ class SupportInputApp:
         index = self._item_id_to_index(selection[0])
         if index is None:
             return
+
+        if (
+            table_name == "material_specs"
+            and self._is_required_rc_spec(self.material_specs[index])
+        ):
+            messagebox.showwarning(
+                "不可刪除",
+                "圍令規格 RC 為必要施工規格，不可刪除。",
+                parent=self.root,
+            )
+            return
+
+        if table_name == "material_specs":
+            row = self.material_specs[index]
+            usage = str(row.get("Usage", "") or "").strip()
+            spec = str(row.get("Spec", "") or "").strip()
+            references = self._material_spec_references(usage, spec)
+            if self._material_spec_reference_count(references):
+                messagebox.showwarning(
+                    "材料規格仍被使用",
+                    (
+                        f"材料規格「{spec}」仍被使用。\n\n"
+                        f"{self._material_spec_reference_text(references)}\n\n"
+                        "請先移除或更換引用後再刪除。"
+                    ),
+                    parent=self.root,
+                )
+                return
 
         getattr(self, table_name).pop(index)
         self._refresh_tree(table_name)
@@ -4983,6 +6522,10 @@ class SupportInputApp:
                 length = self._line_length(coords[0], coords[1], coords[2], coords[3])
                 if length <= 0:
                     row_errors.append("圍令長度必須大於 0")
+
+            material_spec = str(row.get("material_spec", "") or "").strip()
+            if material_spec and material_spec not in self._material_spec_options("圍令"):
+                row_errors.append("材料規格必須從設定頁的圍令規格選擇")
 
             if row_errors:
                 errors.append(("walers", row_index, row_errors))
@@ -5106,6 +6649,10 @@ class SupportInputApp:
             elif target_jack_region <= 0:
                 row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須大於 0")
 
+            material_spec = str(row.get("material_spec", "") or "").strip()
+            if material_spec and material_spec not in self._material_spec_options("支撐"):
+                row_errors.append("材料規格必須從設定頁的支撐規格選擇")
+
             if row_errors:
                 errors.append(("struts", row_index, row_errors))
                 self._tag_error_row("struts", row_index - 1)
@@ -5170,6 +6717,12 @@ class SupportInputApp:
 
         for row_index, row in enumerate(self.inventory, start=1):
             row_errors = []
+            usage = str(row.get("Usage", "") or "").strip()
+            spec = str(row.get("Spec", "") or "").strip()
+            if usage and usage not in ("支撐", "圍令"):
+                row_errors.append("用途必須是支撐或圍令")
+            if spec and usage and spec not in self._material_spec_options(usage):
+                row_errors.append("規格必須存在於材料規格表")
             for field in ["Length", "Qty"]:
                 value = row.get(field, "")
                 number = self._to_number(value)
@@ -5183,6 +6736,23 @@ class SupportInputApp:
             if row_errors:
                 errors.append(("inventory", row_index, row_errors))
                 self._tag_error_row("inventory", row_index - 1)
+
+        material_spec_keys = set()
+        for row_index, row in enumerate(self.material_specs, start=1):
+            row_errors = []
+            usage = str(row.get("Usage", "") or "").strip()
+            spec = str(row.get("Spec", "") or "").strip()
+            if usage not in ("支撐", "圍令"):
+                row_errors.append("用途必須是支撐或圍令")
+            if not spec:
+                row_errors.append("材料規格不可空白")
+            key = (usage, spec.casefold())
+            if spec and key in material_spec_keys:
+                row_errors.append("用途與材料規格不可重複")
+            material_spec_keys.add(key)
+            if row_errors:
+                errors.append(("material_specs", row_index, row_errors))
+                self._tag_error_row("material_specs", row_index - 1)
 
         if errors:
             error_messages = ["【錯誤】"]
@@ -5997,9 +7567,39 @@ class SupportInputApp:
                 zorder=15,
             )
 
-    def _get_inventory_items(self) -> List[Dict[str, object]]:
+    def _inventory_rows_for(self, material_spec: str, usage: str):
+        spec_key = str(material_spec or "").strip().casefold()
+        usage_key = str(usage or "").strip().casefold()
+        if not spec_key:
+            return []
+        return [
+            row
+            for row in self.inventory
+            if str(row.get("Spec", "") or "").strip().casefold() == spec_key
+            and str(row.get("Usage", "") or "").strip().casefold() == usage_key
+        ]
+
+    def _get_inventory_items(
+        self,
+        material_spec: str = "",
+        usage: str = "",
+    ) -> List[Dict[str, object]]:
+        material_spec = str(material_spec or "").strip()
+        if not material_spec:
+            return [
+                {
+                    "id": f"UNLIMITED-{length}",
+                    "length": length,
+                    "qty": UNLIMITED_INVENTORY_QTY,
+                }
+                for length in self._get_purchasable_lengths("", usage)
+            ]
+
         stock_items = []
-        for row in self.inventory:
+        for index, row in enumerate(
+            self._inventory_rows_for(material_spec, usage),
+            start=1,
+        ):
             length = self._to_number(row.get("Length"))
             qty = self._to_number(row.get("Qty"))
             if length is None or qty is None:
@@ -6007,19 +7607,39 @@ class SupportInputApp:
             if qty <= 0:
                 continue
             stock_items.append({
-                "id": f"A{length}",
+                "id": str(row.get("ItemCode", "") or "").strip()
+                or f"{material_spec}-{length}-{index}",
                 "length": length,
                 "qty": qty,
             })
         return stock_items
 
-    def _get_purchasable_lengths(self) -> List[int]:
+    def _get_purchasable_lengths(
+        self,
+        material_spec: str = "",
+        usage: str = "",
+    ) -> List[int]:
+        material_spec = str(material_spec or "").strip()
+        usage_key = str(usage or "").strip().casefold()
+        rows = (
+            self._inventory_rows_for(material_spec, usage)
+            if material_spec
+            else [
+                row
+                for row in self.inventory
+                if not usage_key
+                or str(row.get("Usage", "") or "").strip().casefold()
+                in ("", usage_key)
+            ]
+        )
         lengths = set()
-        for row in self.inventory:
+        for row in rows:
             length = self._to_number(row.get("Length"))
             if length is None or length <= 0:
                 continue
             lengths.add(int(round(length)))
+        if not lengths and not material_spec:
+            return list(support.STEEL_LENGTHS)
         return sorted(lengths)
 
     def _open_waler_solver(self):
@@ -6038,6 +7658,16 @@ class SupportInputApp:
             return
 
         waler_data = waler_inputs[selected_waler]
+        material_spec = str(waler_data.get("material_spec", "") or "").strip()
+        purchasable_lengths = self._get_purchasable_lengths(
+            material_spec,
+            "圍令",
+        )
+        if material_spec and not purchasable_lengths:
+            self.show_result(
+                f"錯誤：圍令 {selected_waler} 所選規格 {material_spec} 沒有可用庫存料長"
+            )
+            return
         solver_dialog = WalerSolverDialog(
             self.root,
             selected_waler,
@@ -6046,8 +7676,8 @@ class SupportInputApp:
             waler_data["length"],
             len(waler_data.get("forbidden_points", [])),
             waler_data.get("forbidden_points", []),
-            self._get_inventory_items(),
-            self._get_purchasable_lengths(),
+            self._get_inventory_items(material_spec, "圍令"),
+            purchasable_lengths,
             self.solver_memory,
             self._store_waler_result,
         )
@@ -6055,10 +7685,6 @@ class SupportInputApp:
 
     def _open_support_solver(self):
         if not self.validate_data():
-            return
-
-        if not self._get_purchasable_lengths():
-            self.show_result("錯誤：材料長度庫存沒有可供支撐 Solver 使用的有效長度")
             return
 
         zonings = sorted({
@@ -6078,6 +7704,17 @@ class SupportInputApp:
         configs = self.build_support_inputs(zoning=selected_zoning)
         if not configs:
             self.show_result(f"錯誤：分區 {selected_zoning} 沒有可供計算的支撐")
+            return
+        missing_inventory = [
+            config.support_id
+            for config in configs
+            if config.material_spec and not config.steel_lengths
+        ]
+        if missing_inventory:
+            self.show_result(
+                "錯誤：下列支撐所選規格沒有可用庫存料長："
+                + ", ".join(missing_inventory)
+            )
             return
 
         solver_dialog = SupportSolverDialog(
@@ -6174,7 +7811,6 @@ class SupportInputApp:
             for row in self.walers
             if str(row.get("WalerID", "") or "").strip()
         }
-        available_steel_lengths = self._get_purchasable_lengths()
         for row in self.struts:
             row_zoning = str(row.get("Zoning", "") or "").strip()
             if zoning is not None and row_zoning != zoning:
@@ -6219,6 +7855,7 @@ class SupportInputApp:
             )
             from_waler_id = str(row.get("FromWaler", "") or "").strip()
             to_waler_id = str(row.get("ToWaler", "") or "").strip()
+            material_spec = str(row.get("material_spec", "") or "").strip()
             supports.append(
                 support.SupportConfig(
                     support_id=support_id,
@@ -6226,10 +7863,13 @@ class SupportInputApp:
                     pile_centers=pile_centers,
                     waler_centers=waler_centers,
                     target_jack_region=target_jack_region,
-                    material_spec=str(row.get("material_spec", "") or "").strip(),
+                    material_spec=material_spec,
                     from_waler_type=waler_type_by_id.get(from_waler_id, "Steel"),
                     to_waler_type=waler_type_by_id.get(to_waler_id, "Steel"),
-                    steel_lengths=list(available_steel_lengths),
+                    steel_lengths=self._get_purchasable_lengths(
+                        material_spec,
+                        "支撐",
+                    ),
                 )
             )
         return supports
@@ -6334,6 +7974,14 @@ class SupportInputApp:
         message = str(text or "").rstrip()
         if not message:
             return
+        summary = next(
+            (line.strip() for line in message.splitlines() if line.strip()),
+            "已更新執行訊息",
+        )
+        if len(summary) > 90:
+            summary = summary[:87] + "..."
+        if hasattr(self, "execution_message_summary_var"):
+            self.execution_message_summary_var.set(f"狀態：{summary}")
         self.result_text.configure(state="normal")
         existing = self.result_text.get("1.0", "end-1c")
         if existing.strip():
@@ -6341,15 +7989,6 @@ class SupportInputApp:
         self.result_text.insert("end", message)
         self.result_text.see("end")
         self.result_text.configure(state="disabled")
-
-    def _set_window_size(self, width, height):
-        self.root.geometry(f"{width}x{height}")
-        self.root.update_idletasks()
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - width) // 2
-        y = (screen_height - height) // 2
-        self.root.geometry(f"{width}x{height}+{x}+{y}")
 
 class WalerSelectionDialog:
     def __init__(self, parent, waler_ids: List[str]):
@@ -6546,8 +8185,20 @@ class SupportSolverDialog:
 
         info_items = [
             ("分區", zoning, "支撐數量", str(len(configs))),
-            ("重複設定數量", str(duplicate_config_count), "目標千斤頂區域統計", region_statistics),
         ]
+        if duplicate_config_count:
+            info_items.append(
+                (
+                    "重複設定提醒",
+                    f"有 {duplicate_config_count} 組設定重複",
+                    "目標千斤頂區域統計",
+                    region_statistics,
+                )
+            )
+        else:
+            info_items.append(
+                ("目標千斤頂區域統計", region_statistics, "", "")
+            )
         for row_index, (left_label, left_value, right_label, right_value) in enumerate(info_items):
             ttk.Label(info_frame, text=f"{left_label}：").grid(
                 row=row_index,
@@ -6563,20 +8214,21 @@ class SupportSolverDialog:
                 padx=(0, 12),
                 pady=3,
             )
-            ttk.Label(info_frame, text=f"{right_label}：").grid(
-                row=row_index,
-                column=2,
-                sticky="ne",
-                padx=(8, 4),
-                pady=3,
-            )
-            ttk.Label(info_frame, text=right_value).grid(
-                row=row_index,
-                column=3,
-                sticky="nw",
-                padx=(0, 8),
-                pady=3,
-            )
+            if right_label:
+                ttk.Label(info_frame, text=f"{right_label}：").grid(
+                    row=row_index,
+                    column=2,
+                    sticky="ne",
+                    padx=(8, 4),
+                    pady=3,
+                )
+                ttk.Label(info_frame, text=right_value).grid(
+                    row=row_index,
+                    column=3,
+                    sticky="nw",
+                    padx=(0, 8),
+                    pady=3,
+                )
 
         ttk.Label(info_frame, text="支撐編號清單：").grid(
             row=len(info_items),
@@ -6599,47 +8251,11 @@ class SupportSolverDialog:
             pady=3,
         )
 
-        settings_frame = ttk.LabelFrame(frame, text="求解設定")
+        settings_frame = ttk.LabelFrame(frame, text="材料比例設定")
         settings_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
-        ttk.Label(settings_frame, text="鋼材組合探索數").grid(
-            row=0, column=0, sticky="e", padx=(8, 4), pady=5
-        )
-        self.max_steel_combination_count_var = tk.StringVar(value="100")
-        ttk.Spinbox(
-            settings_frame,
-            from_=1,
-            to=5000,
-            textvariable=self.max_steel_combination_count_var,
-            width=8,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
-
-        ttk.Label(settings_frame, text="合法候選保留數").grid(
-            row=0, column=2, sticky="e", padx=(8, 4), pady=5
-        )
-        self.target_valid_candidate_count_var = tk.StringVar(
-            value=str(support.SUPPORT_DEFAULT_FINAL_CANDIDATE_COUNT)
-        )
-        ttk.Spinbox(
-            settings_frame,
-            from_=1,
-            to=1000,
-            textvariable=self.target_valid_candidate_count_var,
-            width=8,
-        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
-
-        ttk.Label(
-            settings_frame,
-            text=(
-                "鋼材組合探索數越大，搜尋範圍越廣但計算量會增加；"
-                "合法候選保留數越大，後續全域最佳化的選擇越多。"
-            ),
-            wraplength=360,
-            justify="left",
-        ).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=5)
-
         ttk.Label(settings_frame, text="短料目標比例（%）").grid(
-            row=1, column=0, sticky="e", padx=(8, 4), pady=5
+            row=0, column=0, sticky="e", padx=(8, 4), pady=5
         )
         self.short_ratio_var = tk.StringVar(
             value=str(support.SUPPORT_DEFAULT_SHORT_MATERIAL_RATIO)
@@ -6648,10 +8264,10 @@ class SupportSolverDialog:
             settings_frame,
             textvariable=self.short_ratio_var,
             width=8,
-        ).grid(row=1, column=1, sticky="w", padx=(0, 18), pady=5)
+        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
 
         ttk.Label(settings_frame, text="中料目標比例（%）").grid(
-            row=1, column=2, sticky="e", padx=(8, 4), pady=5
+            row=0, column=2, sticky="e", padx=(8, 4), pady=5
         )
         self.mid_ratio_var = tk.StringVar(
             value=str(support.SUPPORT_DEFAULT_MID_MATERIAL_RATIO)
@@ -6660,10 +8276,10 @@ class SupportSolverDialog:
             settings_frame,
             textvariable=self.mid_ratio_var,
             width=8,
-        ).grid(row=1, column=3, sticky="w", padx=(0, 18), pady=5)
+        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
 
         ttk.Label(settings_frame, text="長料目標比例（%）").grid(
-            row=1, column=4, sticky="e", padx=(8, 4), pady=5
+            row=0, column=4, sticky="e", padx=(8, 4), pady=5
         )
         self.long_ratio_var = tk.StringVar(
             value=str(support.SUPPORT_DEFAULT_LONG_MATERIAL_RATIO)
@@ -6672,7 +8288,57 @@ class SupportSolverDialog:
             settings_frame,
             textvariable=self.long_ratio_var,
             width=8,
-        ).grid(row=1, column=5, sticky="w", padx=(0, 8), pady=5)
+        ).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=5)
+
+        self.max_steel_combination_count_var = tk.StringVar(value="100")
+        self.target_valid_candidate_count_var = tk.StringVar(
+            value=str(support.SUPPORT_DEFAULT_FINAL_CANDIDATE_COUNT)
+        )
+        self.support_advanced_expanded = False
+        self.support_advanced_button = ttk.Button(
+            settings_frame,
+            text="顯示進階設定 ▼",
+            command=self._toggle_support_advanced_settings,
+        )
+        self.support_advanced_button.grid(
+            row=1,
+            column=0,
+            columnspan=6,
+            sticky="w",
+            padx=8,
+            pady=(2, 5),
+        )
+        self.support_advanced_frame = ttk.Frame(settings_frame)
+        self.support_advanced_frame.columnconfigure(4, weight=1)
+        ttk.Label(self.support_advanced_frame, text="鋼材組合探索數").grid(
+            row=0, column=0, sticky="e", padx=(0, 4), pady=5
+        )
+        ttk.Spinbox(
+            self.support_advanced_frame,
+            from_=1,
+            to=5000,
+            textvariable=self.max_steel_combination_count_var,
+            width=8,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
+        ttk.Label(self.support_advanced_frame, text="合法候選保留數").grid(
+            row=0, column=2, sticky="e", padx=(8, 4), pady=5
+        )
+        ttk.Spinbox(
+            self.support_advanced_frame,
+            from_=1,
+            to=1000,
+            textvariable=self.target_valid_candidate_count_var,
+            width=8,
+        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
+        ttk.Label(
+            self.support_advanced_frame,
+            text=(
+                "探索數越大，搜尋範圍越廣但計算量會增加；"
+                "候選保留數越大，後續全域最佳化的選擇越多。"
+            ),
+            wraplength=300,
+            justify="left",
+        ).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=5)
 
         log_frame = ttk.LabelFrame(frame, text="支撐求解執行訊息")
         log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
@@ -6704,6 +8370,22 @@ class SupportSolverDialog:
         ).pack(side="right", padx=6)
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _toggle_support_advanced_settings(self):
+        self.support_advanced_expanded = not self.support_advanced_expanded
+        if self.support_advanced_expanded:
+            self.support_advanced_frame.grid(
+                row=2,
+                column=0,
+                columnspan=6,
+                sticky="ew",
+                padx=8,
+                pady=(0, 6),
+            )
+            self.support_advanced_button.configure(text="隱藏進階設定 ▲")
+        else:
+            self.support_advanced_frame.grid_remove()
+            self.support_advanced_button.configure(text="顯示進階設定 ▼")
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)
@@ -7287,7 +8969,6 @@ class WalerSolverDialog:
         detail_items = [
             ("禁止點列表", forbidden_text),
             ("可購買材料長度", purchasable_text),
-            ("評分權重說明", score_weight_text),
         ]
         detail_start_row = len(info_items)
         for offset, (label, value) in enumerate(detail_items):
@@ -7301,15 +8982,56 @@ class WalerSolverDialog:
             ).grid(row=row_index, column=1, columnspan=3, sticky="nw", padx=(0, 8), pady=2)
 
         solver_settings_row = detail_start_row + len(detail_items)
-        solver_settings_frame = ttk.LabelFrame(info_frame, text="演算法設定")
-        solver_settings_frame.grid(
+        ratio_frame = ttk.LabelFrame(info_frame, text="短／中／長段比例設定")
+        ratio_frame.grid(
             row=solver_settings_row,
             column=0,
             columnspan=4,
             sticky="ew",
             padx=8,
-            pady=(6, 0),
+            pady=(6, 4),
         )
+
+        ttk.Label(ratio_frame, text="短段").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=4)
+        self.short_ratio_var = tk.StringVar(value="20")
+        ttk.Entry(ratio_frame, textvariable=self.short_ratio_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        ttk.Label(ratio_frame, text="中段").grid(row=0, column=2, sticky="e", padx=(8, 4), pady=4)
+        self.mid_ratio_var = tk.StringVar(value="50")
+        ttk.Entry(ratio_frame, textvariable=self.mid_ratio_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=4)
+
+        ttk.Label(ratio_frame, text="長段").grid(row=0, column=4, sticky="e", padx=(8, 4), pady=4)
+        self.long_ratio_var = tk.StringVar(value="30")
+        ttk.Entry(ratio_frame, textvariable=self.long_ratio_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=4)
+
+        self.waler_advanced_expanded = False
+        self.waler_advanced_button = ttk.Button(
+            info_frame,
+            text="顯示進階設定 ▼",
+            command=self._toggle_waler_advanced_settings,
+        )
+        self.waler_advanced_button.grid(
+            row=solver_settings_row + 1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            padx=8,
+            pady=(2, 7),
+        )
+        self.waler_advanced_frame = ttk.Frame(info_frame)
+        self.waler_advanced_row = solver_settings_row + 2
+        self.waler_advanced_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.waler_advanced_frame,
+            text=f"評分權重說明：{score_weight_text}",
+            justify="left",
+            wraplength=800,
+        ).pack(fill="x", pady=(0, 5))
+        solver_settings_frame = ttk.LabelFrame(
+            self.waler_advanced_frame,
+            text="演算法設定",
+        )
+        solver_settings_frame.pack(fill="x")
 
         ttk.Label(solver_settings_frame, text="演化代數").grid(
             row=0, column=0, sticky="e", padx=(8, 4), pady=4
@@ -7341,28 +9063,6 @@ class WalerSolverDialog:
             row=0, column=5, sticky="w", padx=(0, 8), pady=4
         )
 
-        ratio_frame = ttk.LabelFrame(info_frame, text="短／中／長段比例設定")
-        ratio_frame.grid(
-            row=solver_settings_row + 1,
-            column=0,
-            columnspan=4,
-            sticky="ew",
-            padx=8,
-            pady=(6, 8),
-        )
-
-        ttk.Label(ratio_frame, text="短段").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=4)
-        self.short_ratio_var = tk.StringVar(value="20")
-        ttk.Entry(ratio_frame, textvariable=self.short_ratio_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
-
-        ttk.Label(ratio_frame, text="中段").grid(row=0, column=2, sticky="e", padx=(8, 4), pady=4)
-        self.mid_ratio_var = tk.StringVar(value="50")
-        ttk.Entry(ratio_frame, textvariable=self.mid_ratio_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=4)
-
-        ttk.Label(ratio_frame, text="長段").grid(row=0, column=4, sticky="e", padx=(8, 4), pady=4)
-        self.long_ratio_var = tk.StringVar(value="30")
-        ttk.Entry(ratio_frame, textvariable=self.long_ratio_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=4)
-
         log_frame = ttk.LabelFrame(frame, text="求解執行資訊")
         log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
         log_frame.rowconfigure(0, weight=1)
@@ -7379,6 +9079,22 @@ class WalerSolverDialog:
         self.run_button.pack(side="left", padx=6)
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _toggle_waler_advanced_settings(self):
+        self.waler_advanced_expanded = not self.waler_advanced_expanded
+        if self.waler_advanced_expanded:
+            self.waler_advanced_frame.grid(
+                row=self.waler_advanced_row,
+                column=0,
+                columnspan=4,
+                sticky="ew",
+                padx=8,
+                pady=(0, 8),
+            )
+            self.waler_advanced_button.configure(text="隱藏進階設定 ▲")
+        else:
+            self.waler_advanced_frame.grid_remove()
+            self.waler_advanced_button.configure(text="顯示進階設定 ▼")
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)

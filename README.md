@@ -142,12 +142,15 @@ cad_builder.lsp
 support_distribution_uv\
 ├─ main.py
 ├─ project_data.py
+├─ inventory_repository.py
+├─ inventory_conversion.py
 ├─ cad_builder.py
 ├─ cad_builder.lsp
 ├─ cad_bridge_event_examples.json
 ├─ wales.py
 ├─ support.py
 ├─ data\
+│  ├─ inventory.json
 │  └─ default_inventory.json
 ├─ picture\
 │  └─ 001.txt
@@ -172,11 +175,14 @@ support_distribution_uv\
 |---|---|---:|---:|---|
 | `main.py` | 主應用程式 | 是 | 協調 | Tkinter GUI、資料表、驗證、預覽、案例、結果、Solver Dialog |
 | `project_data.py` | 資料模型 | 否 | 否 | TABLE schema、legacy migration、ID、ProjectDataModel |
+| `inventory_repository.py` | 資料來源介面 | 否 | 否 | InventoryRepository 及 JSON 實作；隔離未來 SQL/API 資料源 |
+| `inventory_conversion.py` | 資料整理工具 | 否 | 否 | 將機料清冊 JSON 轉為執行期 `inventory.json`，不是 Solver 依賴 |
 | `cad_builder.py` | CAD 工具模組 | 否 | 否 | CAD event JSON 讀取、映射、監看、acknowledge |
 | `cad_builder.lsp` | progeCAD 外掛 | CAD 命令列 | 否 | 點選座標、產生 JSON、寫入 TEMP |
 | `wales.py` | 圍令 Solver | 含舊版獨立 GUI | 是 | 接頭型 GA、分段、材料配置、評分 |
 | `support.py` | 支撐 Solver | 否 | 是 | 單支候選與多支全域最佳化 |
-| `default_inventory.json` | 資料 | 否 | 輸入 | 預設 Inventory |
+| `inventory.json` | 資料 | 否 | 間接輸入 | 系統預設 Inventory，由設定頁籤載入後才交給 Solver |
+| `default_inventory.json` | 歷史資料 | 否 | 否 | 舊版預設庫存，不再是執行期資料源 |
 | `test_cases/*.json` | 資料 | 否 | 輸入 | 可載入與儲存的工程案例 |
 | `cad_bridge_event_examples.json` | 文件／測試資料 | 否 | 否 | 三種 CAD 事件範例 |
 | `picture/*.txt` | 資源 | 否 | 否 | 彩蛋 ASCII art |
@@ -760,7 +766,7 @@ WALER_FORBIDDEN_HALF = 550
 MIN_JACK_DISTANCE_BETWEEN_SUPPORTS = 600
 ```
 
-正式執行時，Support Solver 使用專案「庫存」頁籤的 `Length` 作為可用鋼材長度；`support.py` 的固定 `STEEL_LENGTHS` 只供沒有庫存資料的舊流程 fallback。`Qty` 仍由庫存配置與材料統計獨立使用。
+正式執行時，預設資料流為 `inventory.json → JsonInventoryRepository → 設定頁籤 → Solver`。Solver 不直接讀取 Excel 或 JSON，而是使用目前專案設定中，符合用途與已選規格的庫存列。`Length` 供候選生成，`Qty` 供既有庫存配置與缺料評分；評分公式未改變。規格未選時不檢查庫存，結果數量統一顯示 `99`。
 
 ## 7.2 Phase 1：每根支撐候選
 
@@ -780,7 +786,7 @@ beam_search_steel_orders()
       ▼
 beam_search_layout()
       │
-      └─ 依圍令材料規格判定施工型式並直接生成合法 shim／jack 位置
+      └─ 依圍令材料規格推導施工規則並直接生成合法 shim／jack 位置
       │
       ▼
 evaluate_single_support()
@@ -833,7 +839,7 @@ heuristic 偏好：
 - 呼叫 `evaluate_single_support()`。
 - 依最終單支分數排序並截斷。
 
-圍令材料規格為 `RC` 時採 RC 規則，其餘規格採 Steel 規則。此施工型式只用於配置生成，不進入單體評分、Pattern、Material Ratio 或 Phase 2 評分，也不採用「先生成非法排列再扣分／淘汰」的方式。
+使用者只選擇 `material_spec`。規格為 `RC` 時內部採 RC 圍令施工規則；其他鋼材規格或未指定時採鋼圍令規則。這個內部推導值只限制 Layout Generation 的生成空間，不進入單體評分、Pattern、Material Ratio、Spec Distribution 或 Phase 2 評分。
 
 RC 接觸面上的終端調整塊界面不套用該側 `MIN_END_CLEAR` 端部禁止區；這項豁免不延伸到下一個接頭，也不忽略樁位或托梁禁止區。
 
@@ -1346,6 +1352,9 @@ B1, B2...
 {
   "inventory": [
     {
+      "ItemCode": "MAT-001",
+      "Spec": "H350x350",
+      "Usage": "支撐",
       "Length": 9500,
       "Qty": 0
     }
@@ -1356,11 +1365,14 @@ B1, B2...
 規則：
 
 ```text
-所有有效 Length → purchasable_lengths
-Qty > 0          → stock_items
+已選 Spec + Usage 的所有有效 Length → purchasable_lengths
+同規格且 Qty > 0                         → stock_items
+未選規格                                  → 不檢查庫存，Qty = 99
 ```
 
-因此 `Qty=0` 仍代表可以購買該長度。
+因此已選規格時，`Qty=0` 仍代表可以購買該長度。庫存列保留機料編號、規格、用途、長度與數量，但 Solver 查詢邊界只取得指定用途與規格的可用材料。
+
+目前預設庫存由「機料庫存.json」轉換：326 筆原始資料中納入 229 筆支撐樑與圍令樑本體，排除 28 筆調整塊與 69 筆其他機料。轉換時將 `H400*408` 正規化為 `H400x408`，並將 `L=4.5M` 轉為 `4500` mm。調整塊不會被當作一般 Solver 鋼料；AN／BN 不同機料編號則各自保留。
 
 ## 11.4 材料規格
 
@@ -1373,7 +1385,7 @@ Qty > 0          → stock_items
 }
 ```
 
-材料規格表不含長度。它只提供專案設定、構件欄位選擇、圖面標示與報表資料，不傳入 Solver 候選或評分。材料長度仍只由獨立的 `inventory` 表管理。
+材料規格表不含長度。「設定」頁籤內分為「材料規格」與「庫存」；支撐與圍令只能從對應用途的規格下拉選擇，不接受自由輸入。圍令 `RC` 為必要規格，資料模型會自動補回，UI 也不允許修改或刪除。規格名稱供專案設定、圖面標示與報表，不是新的評分因子；材料長度仍由獨立 `inventory` 表管理。
 
 ## 11.5 案例 JSON
 
@@ -1879,26 +1891,24 @@ GUI 只顯示 breakdown，不重算。
 
 ## 15.5 Support Solver 與 Inventory 的責任邊界
 
-Support 候選鋼材長度已改由目前專案 Inventory 的所有有效 `Length` 提供；`Qty=0` 仍表示該長度可購買。Inventory 改變時會清除候選快取，並且 Inventory 會隨專案保存及開啟。
+Support 候選鋼材長度由目前專案 Inventory 中符合「支撐 + 已選規格」的有效 `Length` 提供；Waler 使用「圍令 + 已選規格」。`Qty=0` 仍表示該長度可購買。規格未選時跳過庫存檢查並以 `99` 表示不限庫存。Inventory 或構件規格改變時會清除候選快取，並隨專案保存及開啟。
 
 目前仍維持以下責任邊界：
 
 - `Length` 決定 Solver 可生成的鋼材長度。
-- `Qty` 供庫存配置與材料統計，不是 Waler Type 或材料規格評分。
+- `Qty` 供庫存配置與材料統計，不是材料規格評分。
 - 材料規格表完全不提供長度。
-- jack、shim 是否屬於 Inventory 統計？
+- Support 庫存統計只計入 `kind == "steel"`，jack 與 shim 不當作鋼材庫存。
 
-## 15.6 材料統計可能把 jack/shim 當鋼材
+## 15.6 材料統計鍵值
 
-`_collect_visible_material_usage()` 對 Support pieces 沒有過濾 kind。
-
-目前：
+`_collect_visible_material_usage()` 將使用量依下列鍵值分開統計：
 
 ```text
-steel、shim、jack 全部按 length 計數
+Usage + Spec + Length
 ```
 
-若 Inventory 只代表鋼材，應只統計 `kind == "steel"`；若要統計所有材料，應將材料種類加入 key，而不是只用 length。
+這樣不同用途或規格的同長度材料不會共用庫存數量。
 
 ## 15.7 JSON schema 與 runtime 設定未完全對稱
 
@@ -2287,7 +2297,7 @@ AutoLISP
 | `_on_ascii_art_entry_focus_in` | 彩蛋輸入框取得焦點時調整外觀 |
 | `_on_ascii_art_entry_focus_out` | 彩蛋輸入框失焦時恢復外觀 |
 | `_on_ascii_art_code_enter` | Enter 後載入並顯示 ASCII art |
-| `_load_default_inventory` | 從 `data/default_inventory.json` 載入預設庫存 |
+| `_load_default_inventory` | 透過 `JsonInventoryRepository` 從 `data/inventory.json` 載入預設庫存 |
 | `_tree_column_key` | 把 Treeview `#n` 欄位轉成正式欄名 |
 | `_selected_result_id_for_custom_plan` | 解析目前選取項目對應的圍令方案 |
 | `_selected_result_id_for_delete` | 解析目前可刪除的結果 ID |
