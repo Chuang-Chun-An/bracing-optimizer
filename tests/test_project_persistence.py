@@ -6,8 +6,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ezdxf
+import support
 
 from main import SupportInputApp
+from solver_search import SolverDiagnostics
 from project_data import ProjectDataModel
 from project_persistence import (
     DxfAssetManager,
@@ -521,6 +523,35 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
             app.save_project_case("dirty")
 
         self.assertTrue(app.project_dirty)
+
+    def test_support_solver_diagnostics_round_trip_is_optional(self):
+        app = self.app()
+        diagnostics = SolverDiagnostics(
+            solver_type="support",
+            search_stage="ENHANCED",
+            legal_solution_found=True,
+        )
+        solution = support.GlobalSolution(
+            plans=[],
+            total_score=10,
+            valid=True,
+            search_diagnostics=diagnostics.to_dict(),
+        )
+
+        payload = app._serialize_result_item(
+            "Z1",
+            {"type": "support", "result": solution, "visible": True},
+        )
+        restored = app._deserialize_result_item(payload)
+
+        self.assertEqual(
+            restored["result"].search_diagnostics["search_stage"],
+            "ENHANCED",
+        )
+        legacy_payload = copy.deepcopy(payload)
+        legacy_payload["result"].pop("search_diagnostics")
+        legacy = app._deserialize_result_item(legacy_payload)
+        self.assertEqual(legacy["result"].search_diagnostics, {})
 
     def test_main_save_wires_import_state_to_managed_project_asset(self):
         app = self.app()

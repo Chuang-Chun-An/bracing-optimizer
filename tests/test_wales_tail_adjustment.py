@@ -32,13 +32,30 @@ class WalerTailAdjustmentTests(unittest.TestCase):
         self.assertEqual(cfg.tail_gap, 36)
 
         previous_logger = wales.logger
+        diagnostics = {}
         try:
             wales.set_logger(lambda *_args: None)
-            results = wales.evolve(cfg, [], seed=1)
+            results = wales.evolve(cfg, [], seed=1, diagnostics_out=diagnostics)
+            repeated_diagnostics = {}
+            repeated = wales.evolve(
+                cfg,
+                [],
+                seed=1,
+                diagnostics_out=repeated_diagnostics,
+            )
         finally:
             wales.set_logger(previous_logger)
 
         self.assertTrue(results)
+        self.assertEqual(
+            [(item["segments"], item["score"]) for item in results],
+            [(item["segments"], item["score"]) for item in repeated],
+        )
+        self.assertEqual(
+            diagnostics["best_score_history"],
+            repeated_diagnostics["best_score_history"],
+        )
+        self.assertEqual(diagnostics["generations"], 2)
         for result in results:
             self.assertTrue(result["valid"])
             self.assertEqual(sum(result["segments"]), 95_500)

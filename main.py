@@ -16,6 +16,7 @@ from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simple
 
 import ezdxf
 import wales
+import solver_search
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -344,6 +345,8 @@ class SupportInputApp:
         self.cad_event_watcher = TempEventWatcher(DEFAULT_TEMP_PATH)
         self.cad_import_enabled = True
         self.dxf_dialog_active = False
+        self.dxf_import_status = "尚未執行 DXF 批次匯入"
+        self.dxf_import_error = ""
         self.cad_import_status = "等待 CAD 事件"
         self.cad_last_event = None
         self.cad_last_error = None
@@ -367,10 +370,15 @@ class SupportInputApp:
             "walers": "圍令",
             "struts": "支撐",
             "braces": "斜撐",
-            "inventory": "庫存",
+            "inventory": "機料庫存",
             "material_specs": "材料規格",
         }
-        self.settings_tab_label = "設定"
+        self.workspace_tab_labels = {
+            "engineering": "工程配置",
+            "materials": "材料設定",
+            "analysis": "分析結果",
+        }
+        self.settings_tab_label = self.workspace_tab_labels["materials"]
 
         self.table_column_labels = {
             "walers": {
@@ -461,6 +469,8 @@ class SupportInputApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
 
     def _build_ui(self):
+        self._build_project_menu_and_toolbar()
+
         self.main_paned = ttk.PanedWindow(self.root, orient="horizontal")
         self.main_paned.pack(fill="both", expand=True)
 
@@ -473,13 +483,61 @@ class SupportInputApp:
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-        self._create_geometry_table_tab("walers", self.table_tab_labels["walers"])
-        self._create_strut_tab()
-        self._create_geometry_table_tab("braces", self.table_tab_labels["braces"])
-        self._create_settings_tab()
-        self._create_cad_import_tab()
-        self._create_project_cases_tab()
-        self._create_results_tab()
+        self.engineering_workspace = ttk.Frame(self.notebook)
+        self.notebook.add(
+            self.engineering_workspace,
+            text=self.workspace_tab_labels["engineering"],
+        )
+        self.engineering_notebook = ttk.Notebook(self.engineering_workspace)
+        self.engineering_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+        self.engineering_notebook.bind(
+            "<<NotebookTabChanged>>",
+            self._on_engineering_tab_changed,
+        )
+        self._create_strut_tab(parent_notebook=self.engineering_notebook)
+        self._create_geometry_table_tab(
+            "walers",
+            self.table_tab_labels["walers"],
+            parent_notebook=self.engineering_notebook,
+        )
+        self._create_geometry_table_tab(
+            "braces",
+            self.table_tab_labels["braces"],
+            parent_notebook=self.engineering_notebook,
+        )
+        self._create_dxf_import_tab(parent_notebook=self.engineering_notebook)
+        self._create_cad_import_tab(parent_notebook=self.engineering_notebook)
+
+        self.materials_workspace = ttk.Frame(self.notebook)
+        self.notebook.add(
+            self.materials_workspace,
+            text=self.workspace_tab_labels["materials"],
+        )
+        self.materials_notebook = ttk.Notebook(self.materials_workspace)
+        self.materials_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+        self.settings_notebook = self.materials_notebook
+        self._create_table_tab(
+            "material_specs",
+            self.table_tab_labels["material_specs"],
+            parent_notebook=self.materials_notebook,
+        )
+        self._create_table_tab(
+            "inventory",
+            self.table_tab_labels["inventory"],
+            parent_notebook=self.materials_notebook,
+        )
+        self.materials_notebook.bind(
+            "<<NotebookTabChanged>>",
+            self._on_settings_tab_changed,
+        )
+
+        self.analysis_workspace = ttk.Frame(self.notebook)
+        self.results_tab = self.analysis_workspace
+        self.notebook.add(
+            self.analysis_workspace,
+            text=self.workspace_tab_labels["analysis"],
+        )
+        self._create_results_tab(parent=self.analysis_workspace)
 
         self.context_toolbar = ttk.Frame(self.root)
         self.context_toolbar.pack(fill="x", padx=8, pady=4)
@@ -518,8 +576,12 @@ class SupportInputApp:
         )
         self.context_toolbar_buttons["support_solver"] = self.run_support_solver_button
 
-        self.execution_message_frame = ttk.LabelFrame(self.root, text="執行訊息")
-        self.execution_message_frame.pack(fill="x", padx=8, pady=(0, 8))
+        self._build_preview(self.right_frame)
+        self._update_context_toolbar()
+
+    def _build_execution_messages(self, parent):
+        self.execution_message_frame = ttk.LabelFrame(parent, text="Solver 診斷與執行訊息")
+        self.execution_message_frame.pack(fill="both", expand=True, padx=8, pady=8)
 
         message_header = ttk.Frame(self.execution_message_frame)
         message_header.pack(fill="x", padx=4, pady=4)
@@ -528,15 +590,16 @@ class SupportInputApp:
             message_header,
             textvariable=self.execution_message_summary_var,
         ).pack(side="left", fill="x", expand=True)
-        self.execution_message_expanded = False
+        self.execution_message_expanded = True
         self.execution_message_toggle_button = ttk.Button(
             message_header,
-            text="顯示詳細訊息 ▼",
+            text="隱藏詳細訊息 ▲",
             command=self._toggle_execution_messages,
         )
         self.execution_message_toggle_button.pack(side="right")
 
         self.execution_message_body = ttk.Frame(self.execution_message_frame)
+        self.execution_message_body.pack(fill="both", expand=True)
 
         self.ascii_art_code_var = tk.StringVar()
         self.ascii_art_entry = tk.Entry(
@@ -558,17 +621,23 @@ class SupportInputApp:
         self.ascii_art_entry.bind("<FocusIn>", self._on_ascii_art_entry_focus_in)
         self.ascii_art_entry.bind("<FocusOut>", self._on_ascii_art_entry_focus_out)
 
-        self.result_text = scrolledtext.ScrolledText(self.execution_message_body, height=10, wrap="none", state="disabled", font=("Consolas", 10))
+        self.result_text = scrolledtext.ScrolledText(
+            self.execution_message_body,
+            height=10,
+            wrap="none",
+            state="disabled",
+            font=("Consolas", 10),
+        )
         self.result_text.pack(fill="both", expand=True, padx=4, pady=4)
         self.ascii_art_entry.lift()
-
-        self._build_preview(self.right_frame)
-        self._update_context_toolbar()
 
     def _create_table_tab(self, table_name, tab_text, parent_notebook=None):
         notebook = parent_notebook or self.notebook
         frame = ttk.Frame(notebook)
         notebook.add(frame, text=tab_text)
+        if not hasattr(self, "table_tabs"):
+            self.table_tabs = {}
+        self.table_tabs[table_name] = frame
 
         container = ttk.Frame(frame)
         container.pack(fill="both", expand=True, padx=4, pady=4)
@@ -613,11 +682,20 @@ class SupportInputApp:
             )
         self.treeviews[table_name] = tree
 
-    def _create_geometry_table_tab(self, table_name, tab_text):
+    def _create_geometry_table_tab(
+        self,
+        table_name,
+        tab_text,
+        parent_notebook=None,
+    ):
         """Create a consistent summary-and-detail editor for line members."""
 
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text=tab_text)
+        notebook = parent_notebook or self.notebook
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text=tab_text)
+        if not hasattr(self, "table_tabs"):
+            self.table_tabs = {}
+        self.table_tabs[table_name] = frame
 
         paned = ttk.PanedWindow(frame, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=4, pady=4)
@@ -783,11 +861,15 @@ class SupportInputApp:
         self.selected_geometry_indices[table_name] = None
         self._set_geometry_detail_enabled(table_name, False)
 
-    def _create_strut_tab(self):
+    def _create_strut_tab(self, parent_notebook=None):
         """Create the compact strut list and its single-field edit panel."""
 
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text=self.table_tab_labels["struts"])
+        notebook = parent_notebook or self.notebook
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text=self.table_tab_labels["struts"])
+        if not hasattr(self, "table_tabs"):
+            self.table_tabs = {}
+        self.table_tabs["struts"] = frame
 
         paned = ttk.PanedWindow(frame, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1375,29 +1457,131 @@ class SupportInputApp:
         )
         self._sync_preview_to_strut_selection(index)
 
-    def _create_settings_tab(self):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text=self.settings_tab_label)
-        self.settings_notebook = ttk.Notebook(frame)
-        self.settings_notebook.pack(fill="both", expand=True, padx=4, pady=4)
-        self._create_table_tab(
-            "material_specs",
-            self.table_tab_labels["material_specs"],
-            parent_notebook=self.settings_notebook,
+    def _build_project_menu_and_toolbar(self):
+        """Expose project file operations without consuming a workspace tab."""
+
+        menu_bar = tk.Menu(self.root)
+        file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="新建專案", command=self._new_project)
+        file_menu.add_command(label="開啟選取專案", command=self._load_selected_project_case)
+        file_menu.add_command(label="儲存專案", command=self._save_current_project)
+        file_menu.add_command(label="另存新專案", command=self._save_project_as)
+        file_menu.add_separator()
+        file_menu.add_command(label="重新連結 DXF", command=self._relink_dxf)
+        file_menu.add_command(label="專案與 DXF 狀態", command=self._show_project_status)
+        file_menu.add_command(label="刪除選取專案", command=self._delete_selected_project_case)
+        file_menu.add_separator()
+        file_menu.add_command(label="結束", command=self._on_main_window_close)
+        menu_bar.add_cascade(label="檔案", menu=file_menu)
+        self.root.configure(menu=menu_bar)
+        self.file_menu = file_menu
+
+        toolbar = ttk.Frame(self.root, padding=(8, 5))
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="新建", command=self._new_project).pack(
+            side="left",
+            padx=(0, 4),
         )
-        self._create_table_tab(
-            "inventory",
-            self.table_tab_labels["inventory"],
-            parent_notebook=self.settings_notebook,
+        ttk.Label(toolbar, text="專案：").pack(side="left", padx=(8, 3))
+        self.project_case_var = tk.StringVar(value="")
+        self.project_case_selector = ttk.Combobox(
+            toolbar,
+            textvariable=self.project_case_var,
+            state="readonly",
+            width=26,
         )
-        self.settings_notebook.bind(
-            "<<NotebookTabChanged>>",
-            self._on_settings_tab_changed,
+        self.project_case_selector.pack(side="left", padx=(0, 4))
+        self.project_case_selector.bind(
+            "<<ComboboxSelected>>",
+            self._update_project_action_states,
+        )
+        self.open_project_button = ttk.Button(
+            toolbar,
+            text="開啟",
+            command=self._load_selected_project_case,
+        )
+        self.open_project_button.pack(side="left", padx=(0, 4))
+        ttk.Button(toolbar, text="儲存", command=self._save_current_project).pack(
+            side="left",
+            padx=(0, 4),
+        )
+        ttk.Button(toolbar, text="另存", command=self._save_project_as).pack(
+            side="left",
+            padx=(0, 8),
         )
 
-    def _create_cad_import_tab(self):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="CAD 匯入")
+        self.project_quick_status_var = tk.StringVar(value="目前專案：未命名專案")
+        ttk.Label(
+            toolbar,
+            textvariable=self.project_quick_status_var,
+            foreground="#455a64",
+        ).pack(side="right", padx=(8, 4))
+        self.project_asset_status_var = tk.StringVar(value="")
+        self._refresh_project_case_list()
+        self._refresh_project_status_display()
+        self._update_project_action_states()
+
+    def _show_project_status(self):
+        self._refresh_project_status_display()
+        messagebox.showinfo(
+            "專案與 DXF 狀態",
+            self.project_asset_status_var.get() or "目前沒有專案狀態。",
+            parent=self.root,
+        )
+
+    def _create_dxf_import_tab(self, parent_notebook=None):
+        notebook = parent_notebook or self.notebook
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="DXF 批次匯入")
+        self.dxf_import_tab = frame
+
+        intro = ttk.LabelFrame(frame, text="建立或更新工程模型")
+        intro.pack(fill="x", padx=12, pady=12)
+        ttk.Label(
+            intro,
+            text=(
+                "讀取整張 DXF，完成圖層用途分類、構件辨識、人工確認與工程線修正後，"
+                "再匯入圍令、支撐與斜撐工程模型。"
+            ),
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(10, 6))
+        ttk.Button(
+            intro,
+            text="選擇 DXF 並開始批次匯入…",
+            command=self._import_dxf_file,
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
+        status_frame = ttk.LabelFrame(frame, text="最近一次 DXF 匯入")
+        status_frame.pack(fill="x", padx=12, pady=(0, 12))
+        self.dxf_import_status_var = tk.StringVar(value=self.dxf_import_status)
+        self.dxf_import_error_var = tk.StringVar(value=self.dxf_import_error)
+        self.dxf_import_source_var = tk.StringVar(value="來源檔案：—")
+        ttk.Label(
+            status_frame,
+            textvariable=self.dxf_import_source_var,
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Label(
+            status_frame,
+            textvariable=self.dxf_import_status_var,
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=4)
+        ttk.Label(
+            status_frame,
+            textvariable=self.dxf_import_error_var,
+            foreground="#b71c1c",
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(4, 10))
+
+    def _create_cad_import_tab(self, parent_notebook=None):
+        notebook = parent_notebook or self.notebook
+        frame = ttk.Frame(notebook)
+        notebook.add(frame, text="CAD 新增構件")
+        self.cad_add_tab = frame
 
         self.cad_import_enabled_var = tk.BooleanVar(value=self.cad_import_enabled)
         self.cad_import_status_var = tk.StringVar(value=self.cad_import_status)
@@ -1458,11 +1642,6 @@ class SupportInputApp:
         action_frame.grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 10))
         ttk.Button(
             action_frame,
-            text="匯入 DXF…",
-            command=self._import_dxf_file,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            action_frame,
             text="立即讀取",
             command=self._manual_read_cad_event,
         ).pack(side="left", padx=(0, 6))
@@ -1473,7 +1652,8 @@ class SupportInputApp:
         ).pack(side="left")
 
         instructions = (
-            "使用方式：先在 progeCAD 載入 cad_builder.lsp，再執行 "
+            "本頁只負責在既有工程模型中新增單一構件。使用方式：先在 progeCAD 載入 "
+            "cad_builder.lsp，再執行 "
             "ADDWALER、ADDSTRUT 或 ADDBRACE，依 CAD 指令列提示點選起點與終點。"
             "匯入資料會直接加入"
             "既有圍令／支撐／斜撐分頁，並更新預覽；本頁不保存第二份資料。"
@@ -1485,79 +1665,27 @@ class SupportInputApp:
             justify="left",
         ).pack(fill="x", padx=16, pady=(0, 12))
 
-    def _create_project_cases_tab(self):
-        frame = ttk.Frame(self.notebook)
-        self.notebook.add(frame, text="專案")
-
-        container = ttk.Frame(frame)
-        container.pack(fill="both", expand=True, padx=8, pady=8)
-        container.rowconfigure(0, weight=1)
-        container.columnconfigure(0, weight=1)
-
-        self.project_case_listbox = tk.Listbox(container, exportselection=False)
-        self.project_case_listbox.grid(row=0, column=0, sticky="nsew")
-        y_scroll = ttk.Scrollbar(container, orient="vertical", command=self.project_case_listbox.yview)
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        self.project_case_listbox.configure(yscrollcommand=y_scroll.set)
-        self.project_case_listbox.bind("<Double-1>", lambda _event: self._load_selected_project_case())
-        self.project_case_listbox.bind(
-            "<<ListboxSelect>>",
-            self._update_project_action_states,
+    def _create_results_tab(self, parent=None):
+        parent = parent or self.notebook
+        self.analysis_notebook = ttk.Notebook(parent)
+        self.analysis_notebook.pack(fill="both", expand=True, padx=4, pady=4)
+        self.analysis_notebook.bind(
+            "<<NotebookTabChanged>>",
+            self._on_analysis_tab_changed,
         )
 
-        button_frame = ttk.Frame(frame)
-        button_frame.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Button(
-            button_frame,
-            text="新增專案",
-            command=self._new_project,
-        ).pack(side="left", padx=(0, 6))
-        self.open_project_button = ttk.Button(
-            button_frame,
-            text="開啟專案",
-            command=self._load_selected_project_case,
-        )
-        self.open_project_button.pack(side="left", padx=(0, 6))
-        ttk.Button(
-            button_frame,
-            text="儲存專案",
-            command=self._save_current_project,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            button_frame,
-            text="另存新專案",
-            command=self._save_project_as,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            button_frame,
-            text="重新連結 DXF",
-            command=self._relink_dxf,
-        ).pack(side="left", padx=(0, 6))
-        self.delete_project_button = ttk.Button(
-            button_frame,
-            text="刪除專案",
-            command=self._delete_selected_project_case,
-        )
-        self.delete_project_button.pack(side="right", padx=(12, 0))
-
-        status_frame = ttk.LabelFrame(frame, text="專案與 DXF 狀態")
-        status_frame.pack(fill="x", padx=8, pady=(0, 8))
-        self.project_asset_status_var = tk.StringVar(value="")
-        ttk.Label(
-            status_frame,
-            textvariable=self.project_asset_status_var,
-            justify="left",
-            wraplength=900,
-        ).pack(fill="x", padx=8, pady=8)
-
-        self._refresh_project_case_list()
-        self._refresh_project_status_display()
-        self._update_project_action_states()
-
-    def _create_results_tab(self):
-        frame = ttk.Frame(self.notebook)
-        self.results_tab = frame
-        self.notebook.add(frame, text="結果")
+        frame = ttk.Frame(self.analysis_notebook)
+        self.configuration_results_tab = frame
+        self.analysis_notebook.add(frame, text="配置結果")
+        material_tab = ttk.Frame(self.analysis_notebook)
+        self.material_results_tab = material_tab
+        self.analysis_notebook.add(material_tab, text="材料統計")
+        diagnostics_tab = ttk.Frame(self.analysis_notebook)
+        self.solver_diagnostics_tab = diagnostics_tab
+        self.analysis_notebook.add(diagnostics_tab, text="Solver 診斷")
+        export_tab = ttk.Frame(self.analysis_notebook)
+        self.result_export_tab = export_tab
+        self.analysis_notebook.add(export_tab, text="成果匯出")
 
         container = ttk.Frame(frame)
         container.pack(fill="both", expand=True, padx=4, pady=4)
@@ -1645,15 +1773,8 @@ class SupportInputApp:
             command=self._delete_selected_result_plan,
         )
         self.delete_result_plan_button.pack(side="left", padx=(0, 6))
-        self.export_results_dxf_button = ttk.Button(
-            result_action_frame,
-            text="匯出目前 0 個配置成果 DXF",
-            command=self._export_visible_results_to_dxf,
-        )
-        self.export_results_dxf_button.pack(side="left", padx=(0, 6))
-
-        material_frame = ttk.LabelFrame(frame, text="材料統計")
-        material_frame.pack(fill="both", padx=4, pady=(0, 6))
+        material_frame = ttk.LabelFrame(material_tab, text="目前顯示方案的材料用量與庫存比較")
+        material_frame.pack(fill="both", expand=True, padx=8, pady=8)
         material_frame.rowconfigure(1, weight=1)
         material_frame.columnconfigure(0, weight=1)
         ttk.Label(
@@ -1703,6 +1824,26 @@ class SupportInputApp:
             "shortage",
             foreground="#c62828",
         )
+
+        self._build_execution_messages(diagnostics_tab)
+
+        export_frame = ttk.LabelFrame(export_tab, text="DXF 配置成果")
+        export_frame.pack(fill="x", padx=12, pady=12)
+        ttk.Label(
+            export_frame,
+            text=(
+                "將「配置結果」中目前勾選顯示的圍令與支撐方案寫回 DXF。"
+                "右側共用預覽圖仍顯示相同的最終工程模型與配置結果。"
+            ),
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(10, 8))
+        self.export_results_dxf_button = ttk.Button(
+            export_frame,
+            text="匯出目前 0 個配置成果 DXF",
+            command=self._export_visible_results_to_dxf,
+        )
+        self.export_results_dxf_button.pack(anchor="w", padx=10, pady=(0, 10))
 
     def _on_ascii_art_entry_focus_in(self, event=None):
         if hasattr(self, "ascii_art_entry"):
@@ -1845,12 +1986,28 @@ class SupportInputApp:
         return path.parent.name if path.name == "project.json" else path.stem
 
     def _refresh_project_case_list(self, selected_name=None, select_first=False):
+        project_names = [
+            self._project_case_name_from_path(path)
+            for path in self._project_case_json_files()
+        ]
+        selector = getattr(self, "project_case_selector", None)
+        if selector is not None:
+            current_var = getattr(self, "project_case_var", None)
+            current = str(current_var.get() or "") if current_var is not None else ""
+            selector.configure(values=project_names)
+            target = selected_name
+            if target is None and current in project_names:
+                target = current
+            if target is None and select_first and project_names:
+                target = project_names[0]
+            self.project_case_var.set(target if target in project_names else "")
+
         if not hasattr(self, "project_case_listbox"):
+            self._update_project_action_states()
             return
         self.project_case_listbox.delete(0, "end")
         selected_index = None
-        for index, path in enumerate(self._project_case_json_files()):
-            display_name = self._project_case_name_from_path(path)
+        for index, display_name in enumerate(project_names):
             self.project_case_listbox.insert("end", display_name)
             if selected_name is not None and display_name == selected_name:
                 selected_index = index
@@ -1862,6 +2019,11 @@ class SupportInputApp:
         self._update_project_action_states()
 
     def _selected_project_case_name(self):
+        variable = getattr(self, "project_case_var", None)
+        if variable is not None:
+            selected = str(variable.get() or "").strip()
+            if selected:
+                return selected
         if not hasattr(self, "project_case_listbox"):
             return None
         selection = self.project_case_listbox.curselection()
@@ -1876,6 +2038,13 @@ class SupportInputApp:
             button = getattr(self, attribute, None)
             if button is not None:
                 button.configure(state=state)
+        file_menu = getattr(self, "file_menu", None)
+        if file_menu is not None:
+            for label in ("開啟選取專案", "刪除選取專案"):
+                try:
+                    file_menu.entryconfigure(label, state=state)
+                except tk.TclError:
+                    pass
 
     def _refresh_project_status_display(self):
         variable = getattr(self, "project_asset_status_var", None)
@@ -1932,6 +2101,21 @@ class SupportInputApp:
             f"Solver 結果：{'已保留，未重新計算' if self.result_items else '目前無結果'}"
         )
         variable.set("\n".join(lines))
+        quick_variable = getattr(self, "project_quick_status_var", None)
+        if quick_variable is not None:
+            dxf_text = (
+                status_labels.get(report.status, report.status.value)
+                if report is not None
+                else "尚未檢查"
+            )
+            quick_variable.set(
+                f"目前專案：{self._project_display_name()}｜DXF：{dxf_text}"
+            )
+        source_variable = getattr(self, "dxf_import_source_var", None)
+        if source_variable is not None:
+            state = getattr(self, "dxf_last_import_debug", None)
+            source = state.get("source_path") if isinstance(state, dict) else None
+            source_variable.set(f"來源檔案：{source or '—'}")
 
     def _load_selected_project_case(self):
         project_name = self._selected_project_case_name()
@@ -2091,6 +2275,8 @@ class SupportInputApp:
         self.project_result = None
         self.last_calculated_time = None
         self.current_project_path = None
+        if hasattr(self, "project_case_var"):
+            self.project_case_var.set("")
         self.dxf_last_import_debug = None
         self.dxf_asset = None
         self.dxf_asset_status_report = self._ensure_project_services().inspect(
@@ -2200,8 +2386,9 @@ class SupportInputApp:
                         messages=compatibility.summary_lines(),
                     )
                     self._refresh_project_status_display()
-                    self._set_cad_import_status(
+                    self._set_dxf_import_status(
                         "DXF 重新連結尚未通過",
+                        source=file_path,
                         error=details,
                     )
                     self.show_result(
@@ -2218,7 +2405,10 @@ class SupportInputApp:
             )
             self.last_dxf_compatibility_report = compatibility
             self._mark_project_dirty("DXF 已重新連結，尚未保存管理副本")
-            self._set_cad_import_status("DXF 重新連結成功，等待儲存專案")
+            self._set_dxf_import_status(
+                "DXF 重新連結成功，等待儲存專案",
+                source=file_path,
+            )
             detail_lines = (
                 compatibility.summary_lines()
                 if compatibility is not None
@@ -2235,7 +2425,11 @@ class SupportInputApp:
             OSError,
             ValueError,
         ) as exc:
-            self._set_cad_import_status("DXF 重新連結失敗", error=exc)
+            self._set_dxf_import_status(
+                "DXF 重新連結失敗",
+                source=file_path,
+                error=exc,
+            )
             self.show_result(f"DXF 重新連結失敗：{exc}")
 
     def _load_default_inventory(self):
@@ -2431,6 +2625,9 @@ class SupportInputApp:
                 "material_ratio_targets": copy.deepcopy(getattr(result, "material_ratio_targets", {}) or {}),
                 "material_ratio_weight": getattr(result, "material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
                 "min_jack_distance": getattr(result, "min_jack_distance", None),
+                "search_diagnostics": copy.deepcopy(
+                    getattr(result, "search_diagnostics", {}) or {}
+                ),
                 "plans": [
                     self._serialize_support_plan(plan)
                     for plan in list(getattr(result, "plans", []) or [])
@@ -2469,6 +2666,7 @@ class SupportInputApp:
                 material_ratio_targets=dict(result.get("material_ratio_targets", {}) or {}),
                 material_ratio_weight=result.get("material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
                 min_jack_distance=result.get("min_jack_distance", None),
+                search_diagnostics=dict(result.get("search_diagnostics", {}) or {}),
             )
         else:
             result = copy.deepcopy(result)
@@ -4593,6 +4791,37 @@ class SupportInputApp:
         ])
         return lines
 
+    @staticmethod
+    def _solver_diagnostic_summary_lines(value):
+        diagnostics = solver_search.SolverDiagnostics.from_dict(value)
+        if diagnostics is None:
+            return ["搜尋狀態：舊版結果，無診斷資料"]
+        lines = [
+            f"搜尋狀態：{'已找到合法方案' if diagnostics.legal_solution_found else '未找到合法方案'}"
+        ]
+        if diagnostics.search_was_escalated:
+            lines.append("搜尋調整：系統已自動增加計算強度")
+        if diagnostics.result_is_stable:
+            lines.append("搜尋穩定度：已穩定")
+        elif diagnostics.search_limit_reached:
+            lines.append("搜尋穩定度：已達搜尋上限，尚未完全穩定")
+        else:
+            lines.append("搜尋穩定度：未確認")
+        if diagnostics.main_issue_message:
+            lines.append(f"主要限制：{diagnostics.main_issue_message}")
+        if diagnostics.affected_component_ids:
+            component_labels = []
+            for component_id in diagnostics.affected_component_ids:
+                if component_id in diagnostics.component_candidate_counts:
+                    component_labels.append(
+                        f"{component_id}（合法候選 "
+                        f"{diagnostics.component_candidate_counts[component_id]}）"
+                    )
+                else:
+                    component_labels.append(component_id)
+            lines.append("需要檢查：" + "、".join(component_labels))
+        return lines
+
     @classmethod
     def _format_result_details(cls, result_id, item):
         result = item.get("result")
@@ -4606,6 +4835,9 @@ class SupportInputApp:
             lines = [
                 f"圍令：{result.get('waler_id', result_id) if isinstance(result, dict) else result_id}",
             ]
+            lines.extend(cls._solver_diagnostic_summary_lines(
+                result.get("search_diagnostics") if isinstance(result, dict) else None
+            ))
             if isinstance(result, dict) and result.get("custom"):
                 lines.append("[自訂]")
                 legality = plan.get("legality") or {}
@@ -4636,6 +4868,9 @@ class SupportInputApp:
             f"總分：{cls._format_result_value(getattr(result, 'total_score', '無資料'), decimals=2)}",
             f"整體是否合法：{'是' if getattr(result, 'valid', False) else '否'}",
         ]
+        lines.extend(cls._solver_diagnostic_summary_lines(
+            getattr(result, "search_diagnostics", None)
+        ))
         reason = str(getattr(result, "reason", "") or "").strip()
         if reason:
             lines.append(f"說明：{reason}")
@@ -4811,6 +5046,11 @@ class SupportInputApp:
     def _select_results_tab(self):
         if hasattr(self, "notebook") and hasattr(self, "results_tab"):
             self.notebook.select(self.results_tab)
+        if hasattr(self, "analysis_notebook") and hasattr(
+            self,
+            "configuration_results_tab",
+        ):
+            self.analysis_notebook.select(self.configuration_results_tab)
 
     def _describe_result_item(self, item):
         result = item.get("result")
@@ -4827,17 +5067,37 @@ class SupportInputApp:
                 legality = plan.get("legality") or {}
                 status_icon = "✅" if legality.get("valid") else "❌"
                 custom_text = f"[自訂] {status_icon}；"
+            diagnostics = solver_search.SolverDiagnostics.from_dict(
+                result.get("search_diagnostics") if isinstance(result, dict) else None
+            )
+            search_text = (
+                "；搜尋已穩定"
+                if diagnostics and diagnostics.result_is_stable
+                else "；搜尋達上限"
+                if diagnostics and diagnostics.search_limit_reached
+                else ""
+            )
             return (
                 f"{custom_text}總分：{score}；接頭：{joint_count}；"
-                f"材料種類：{distinct_groups}；購買數：{buy_count}"
+                f"材料種類：{distinct_groups}；購買數：{buy_count}{search_text}"
             )
 
         plans = getattr(result, "plans", [])
         total_score = getattr(result, "total_score", 0.0)
         valid = getattr(result, "valid", False)
+        diagnostics = solver_search.SolverDiagnostics.from_dict(
+            getattr(result, "search_diagnostics", None)
+        )
+        search_text = (
+            "；搜尋已穩定"
+            if diagnostics and diagnostics.result_is_stable
+            else "；搜尋達上限"
+            if diagnostics and diagnostics.search_limit_reached
+            else ""
+        )
         return (
             f"支撐數量={len(plans)}；總分={total_score:.1f}；"
-            f"合法={'是' if valid else '否'}"
+            f"合法={'是' if valid else '否'}{search_text}"
         )
 
     @staticmethod
@@ -5356,8 +5616,13 @@ class SupportInputApp:
             row_index = target.get("row_index")
             if table_name in self.treeviews and isinstance(row_index, int):
                 self.current_table = table_name
-                expected_tab_text = self.table_tab_labels.get(table_name)
-                if expected_tab_text:
+                if hasattr(self, "engineering_workspace"):
+                    self.notebook.select(self.engineering_workspace)
+                member_tab = getattr(self, "table_tabs", {}).get(table_name)
+                if member_tab is not None and hasattr(self, "engineering_notebook"):
+                    self.engineering_notebook.select(member_tab)
+                elif not hasattr(self, "engineering_workspace"):
+                    expected_tab_text = self.table_tab_labels.get(table_name)
                     for tab_id in self.notebook.tabs():
                         if self.notebook.tab(tab_id, "text") == expected_tab_text:
                             self.notebook.select(tab_id)
@@ -5518,6 +5783,17 @@ class SupportInputApp:
         finally:
             self._schedule_cad_event_poll()
 
+    def _set_dxf_import_status(self, status, *, source=None, error=None):
+        self.dxf_import_status = str(status)
+        self.dxf_import_error = str(error) if error is not None else ""
+        if hasattr(self, "dxf_import_status_var"):
+            self.dxf_import_status_var.set(self.dxf_import_status)
+        if hasattr(self, "dxf_import_error_var"):
+            self.dxf_import_error_var.set(self.dxf_import_error)
+        if source is not None and hasattr(self, "dxf_import_source_var"):
+            self.dxf_import_source_var.set(f"來源檔案：{Path(source)}")
+        self._refresh_project_status_display()
+
     def _set_cad_import_status(self, status, *, event=None, error=None):
         self.cad_import_status = status
         if event is not None:
@@ -5587,15 +5863,20 @@ class SupportInputApp:
             for table_name in ("walers", "struts", "braces"):
                 self._refresh_tree(table_name)
             self._handle_input_data_changed(preserve_view=False)
-            self._set_cad_import_status(
+            self._set_dxf_import_status(
                 f"DXF 匯入成功：圍令 {len(imported['walers'])}、"
                 f"支撐 {len(imported['struts'])}、斜撐 {len(imported['braces'])}、"
                 f"中間柱 {len(imported['columns'])}、托梁 {len(imported['beams'])}、"
                 f"角撐 {len(imported['corner_braces'])}、"
-                f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}"
+                f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}",
+                source=file_path,
             )
         except (DXFImportError, ProjectPersistenceError, OSError, ValueError) as exc:
-            self._set_cad_import_status("DXF 匯入失敗", error=exc)
+            self._set_dxf_import_status(
+                "DXF 匯入失敗",
+                source=file_path,
+                error=exc,
+            )
             messagebox.showerror("DXF 匯入失敗", str(exc), parent=self.root)
 
     def _manual_read_cad_event(self):
@@ -5821,23 +6102,47 @@ class SupportInputApp:
         self.root.destroy()
 
     def _on_tab_changed(self, event):
-        selected = self.notebook.tab(self.notebook.select(), "text")
-        if selected == self.settings_tab_label:
-            self._sync_current_settings_table()
-        else:
-            self.current_table = None
-            for table_name in ("walers", "struts", "braces"):
-                if selected == self.table_tab_labels[table_name]:
-                    self.current_table = table_name
-                    break
+        self._sync_current_table_from_active_tabs()
+        self._update_context_toolbar()
+
+    def _on_engineering_tab_changed(self, _event=None):
+        self._sync_current_table_from_active_tabs()
         self._update_context_toolbar()
 
     def _on_settings_tab_changed(self, event):
-        self._sync_current_settings_table()
+        self._sync_current_table_from_active_tabs()
         self._update_context_toolbar()
 
+    def _on_analysis_tab_changed(self, _event=None):
+        self._sync_current_table_from_active_tabs()
+        self._update_context_toolbar()
+
+    @staticmethod
+    def _selected_notebook_text(notebook):
+        if notebook is None:
+            return ""
+        selected_tab = notebook.select()
+        return notebook.tab(selected_tab, "text") if selected_tab else ""
+
+    def _sync_current_table_from_active_tabs(self):
+        workspace = self._selected_notebook_text(getattr(self, "notebook", None))
+        self.current_table = None
+        if workspace == self.workspace_tab_labels["engineering"]:
+            selected = self._selected_notebook_text(
+                getattr(self, "engineering_notebook", None)
+            )
+            for table_name in ("struts", "walers", "braces"):
+                if selected == self.table_tab_labels[table_name]:
+                    self.current_table = table_name
+                    break
+        elif workspace == self.workspace_tab_labels["materials"]:
+            self._sync_current_settings_table()
+        return self.current_table
+
     def _sync_current_settings_table(self):
-        notebook = getattr(self, "settings_notebook", None)
+        notebook = getattr(self, "materials_notebook", None)
+        if notebook is None:
+            notebook = getattr(self, "settings_notebook", None)
         if notebook is None:
             return
         selected_tab = notebook.select()
@@ -5853,27 +6158,34 @@ class SupportInputApp:
         toolbar = getattr(self, "context_toolbar", None)
         if toolbar is None:
             return
-        selected = self.notebook.tab(self.notebook.select(), "text")
+        self._sync_current_table_from_active_tabs()
+        selected = self._selected_notebook_text(self.notebook)
         context_name = selected
-        if selected == self.settings_tab_label:
-            self._sync_current_settings_table()
-            nested_name = self.table_tab_labels.get(self.current_table, "")
-            if nested_name:
-                context_name = f"{selected}／{nested_name}"
+        child_notebook = None
+        if selected == self.workspace_tab_labels["engineering"]:
+            child_notebook = getattr(self, "engineering_notebook", None)
+        elif selected == self.workspace_tab_labels["materials"]:
+            child_notebook = getattr(self, "materials_notebook", None)
+        elif selected == self.workspace_tab_labels["analysis"]:
+            child_notebook = getattr(self, "analysis_notebook", None)
+        child_name = self._selected_notebook_text(child_notebook)
+        if child_name:
+            context_name = f"{selected}／{child_name}"
         if hasattr(self, "context_toolbar_context_var"):
             self.context_toolbar_context_var.set(f"目前區域：{context_name}")
         actions = {
-            self.table_tab_labels["walers"]: (
+            "walers": (
                 "add", "delete", "up", "down", "validate", "redraw", "waler_solver"
             ),
-            self.table_tab_labels["struts"]: (
+            "struts": (
                 "add", "delete", "up", "down", "validate", "redraw", "support_solver"
             ),
-            self.table_tab_labels["braces"]: (
+            "braces": (
                 "add", "delete", "up", "down", "validate", "redraw"
             ),
-            self.settings_tab_label: ("add", "delete", "validate"),
-        }.get(selected, ())
+            "material_specs": ("add", "delete", "validate"),
+            "inventory": ("add", "delete", "validate"),
+        }.get(self.current_table, ())
         for button in self.context_toolbar_buttons.values():
             button.pack_forget()
         for name in actions:
@@ -7728,11 +8040,20 @@ class SupportInputApp:
 
     def _store_support_solution(self, zoning, solution):
         self._store_result_item(zoning, "support", solution)
+        diagnostics = solver_search.SolverDiagnostics.from_dict(
+            getattr(solution, "search_diagnostics", None)
+        )
+        search_status = ""
+        if diagnostics is not None:
+            if diagnostics.result_is_stable:
+                search_status = "，搜尋已穩定"
+            elif diagnostics.search_limit_reached:
+                search_status = "，搜尋已達上限"
         self.show_result(
             f"已完成分區 {zoning} 支撐配置："
             f"支撐數量={len(solution.plans)}，"
             f"總分={solution.total_score:.1f}，"
-            f"合法={'是' if solution.valid else '否'}"
+            f"合法={'是' if solution.valid else '否'}{search_status}"
         )
 
     def _store_waler_result(self, result):
@@ -7756,6 +8077,10 @@ class SupportInputApp:
         joint_clearance = result.get("joint_clearance", 300)
         min_piece_length = result.get("min_piece_length", 1000)
         max_piece_length = result.get("max_piece_length", 10000)
+        search_diagnostics = copy.deepcopy(result.get("search_diagnostics"))
+        stored_diagnostics = solver_search.SolverDiagnostics.from_dict(
+            search_diagnostics
+        )
         material_spec = str(result.get("material_spec", "") or "").strip()
         if not material_spec:
             for row in self.walers:
@@ -7788,6 +8113,7 @@ class SupportInputApp:
                     "min_piece_length": min_piece_length,
                     "max_piece_length": max_piece_length,
                     "material_spec": material_spec,
+                    "search_diagnostics": search_diagnostics,
                 },
                 "visible": False,
             }
@@ -7799,7 +8125,12 @@ class SupportInputApp:
         self.update_preview()
         self.show_result(
             f"已產生 {waler_id} 前 {len(top_results)} 名方案並加入結果。"
-            "請在結果頁勾選方案查看圖面，雙擊方案可查看詳細資訊。"
+            + (
+                "搜尋已穩定。"
+                if stored_diagnostics and stored_diagnostics.result_is_stable
+                else ""
+            )
+            + "請在結果頁勾選方案查看圖面，雙擊方案可查看詳細資訊。"
         )
 
     def build_support_inputs(self, zoning: Optional[str] = None) -> List[support.SupportConfig]:
@@ -8138,7 +8469,44 @@ class TextRedirector:
         pass
 
 
-class SupportSolverDialog:
+class SolverDialogThreadBridge:
+    """Queue worker results so only the Tk main thread touches widgets."""
+
+    def _initialize_ui_bridge(self):
+        self._closed = False
+        self._ui_queue = queue.Queue()
+        self.dialog.after(50, self._poll_ui_queue)
+
+    def _post_ui(self, callback):
+        if not self._closed:
+            self._ui_queue.put(callback)
+
+    def _poll_ui_queue(self):
+        if self._closed:
+            return
+        try:
+            while True:
+                try:
+                    callback = self._ui_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if not self._closed:
+                    callback()
+            if not self._closed and self.dialog.winfo_exists():
+                self.dialog.after(50, self._poll_ui_queue)
+        except tk.TclError:
+            self._closed = True
+
+    def _close_ui_bridge(self):
+        self._closed = True
+        try:
+            while True:
+                self._ui_queue.get_nowait()
+        except queue.Empty:
+            pass
+
+
+class SupportSolverDialog(SolverDialogThreadBridge):
     def __init__(
         self,
         parent,
@@ -8290,60 +8658,43 @@ class SupportSolverDialog:
             width=8,
         ).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=5)
 
-        self.max_steel_combination_count_var = tk.StringVar(value="100")
-        self.target_valid_candidate_count_var = tk.StringVar(
-            value=str(support.SUPPORT_DEFAULT_FINAL_CANDIDATE_COUNT)
-        )
-        self.support_advanced_expanded = False
-        self.support_advanced_button = ttk.Button(
+        ttk.Label(
             settings_frame,
-            text="顯示進階設定 ▼",
-            command=self._toggle_support_advanced_settings,
-        )
-        self.support_advanced_button.grid(
+            text=(
+                "搜尋策略：系統自動調整。系統會依合法方案、候選完整度與搜尋穩定度，"
+                "自動調整計算強度；不會自行放寬工程條件。"
+            ),
+            foreground="#4b5563",
+            wraplength=790,
+            justify="left",
+        ).grid(
             row=1,
             column=0,
             columnspan=6,
-            sticky="w",
+            sticky="ew",
             padx=8,
-            pady=(2, 5),
+            pady=(3, 6),
         )
-        self.support_advanced_frame = ttk.Frame(settings_frame)
-        self.support_advanced_frame.columnconfigure(4, weight=1)
-        ttk.Label(self.support_advanced_frame, text="鋼材組合探索數").grid(
-            row=0, column=0, sticky="e", padx=(0, 4), pady=5
-        )
-        ttk.Spinbox(
-            self.support_advanced_frame,
-            from_=1,
-            to=5000,
-            textvariable=self.max_steel_combination_count_var,
-            width=8,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
-        ttk.Label(self.support_advanced_frame, text="合法候選保留數").grid(
-            row=0, column=2, sticky="e", padx=(8, 4), pady=5
-        )
-        ttk.Spinbox(
-            self.support_advanced_frame,
-            from_=1,
-            to=1000,
-            textvariable=self.target_valid_candidate_count_var,
-            width=8,
-        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
-        ttk.Label(
-            self.support_advanced_frame,
-            text=(
-                "探索數越大，搜尋範圍越廣但計算量會增加；"
-                "候選保留數越大，後續全域最佳化的選擇越多。"
-            ),
-            wraplength=300,
-            justify="left",
-        ).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=5)
 
         log_frame = ttk.LabelFrame(frame, text="支撐求解執行訊息")
         log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
-        log_frame.rowconfigure(0, weight=1)
+        log_frame.rowconfigure(2, weight=1)
         log_frame.columnconfigure(0, weight=1)
+
+        self.summary_var = tk.StringVar(value="尚未開始計算。")
+        summary_frame = ttk.LabelFrame(log_frame, text="一般摘要")
+        summary_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        summary_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            summary_frame,
+            textvariable=self.summary_var,
+            justify="left",
+            wraplength=830,
+            padding=(8, 6),
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(log_frame, text="詳細執行訊息").grid(
+            row=1, column=0, sticky="w", padx=6, pady=(3, 0)
+        )
 
         self.result_text = scrolledtext.ScrolledText(
             log_frame,
@@ -8352,7 +8703,7 @@ class SupportSolverDialog:
             state="disabled",
             font=("Consolas", 10),
         )
-        self.result_text.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.result_text.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         self.text_writer = TextRedirector(self.result_text)
 
         button_frame = ttk.Frame(frame)
@@ -8370,22 +8721,7 @@ class SupportSolverDialog:
         ).pack(side="right", padx=6)
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def _toggle_support_advanced_settings(self):
-        self.support_advanced_expanded = not self.support_advanced_expanded
-        if self.support_advanced_expanded:
-            self.support_advanced_frame.grid(
-                row=2,
-                column=0,
-                columnspan=6,
-                sticky="ew",
-                padx=8,
-                pady=(0, 6),
-            )
-            self.support_advanced_button.configure(text="隱藏進階設定 ▲")
-        else:
-            self.support_advanced_frame.grid_remove()
-            self.support_advanced_button.configure(text="顯示進階設定 ▼")
+        self._initialize_ui_bridge()
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)
@@ -8397,37 +8733,17 @@ class SupportSolverDialog:
 
     def _run_solver(self):
         try:
-            max_steel_combination_count = int(
-                self.max_steel_combination_count_var.get().strip()
-            )
-            target_valid_candidate_count = int(
-                self.target_valid_candidate_count_var.get().strip()
-            )
             short_ratio = float(self.short_ratio_var.get().strip())
             mid_ratio = float(self.mid_ratio_var.get().strip())
             long_ratio = float(self.long_ratio_var.get().strip())
         except ValueError:
             messagebox.showerror(
                 "輸入錯誤",
-                "鋼材組合探索數、合法候選保留數與材料比例必須為有效數字",
+                "材料比例必須為有效數字",
                 parent=self.dialog,
             )
             return
 
-        if not 1 <= max_steel_combination_count <= 5000:
-            messagebox.showerror(
-                "輸入錯誤",
-                "鋼材組合探索數必須介於 1～5000",
-                parent=self.dialog,
-            )
-            return
-        if not 1 <= target_valid_candidate_count <= 1000:
-            messagebox.showerror(
-                "輸入錯誤",
-                "合法候選保留數必須介於 1～1000",
-                parent=self.dialog,
-            )
-            return
         try:
             material_ratio_targets = support.normalize_material_ratio_targets(
                 short_ratio,
@@ -8446,20 +8762,23 @@ class SupportSolverDialog:
         self.result_text.delete("1.0", "end")
         self.result_text.configure(state="disabled")
         self.solution = None
+        self.summary_var.set(
+            "正在建立材料組合與配置候選……系統會自動判斷是否需要加強搜尋。"
+        )
+        policy = solver_search.DEFAULT_SEARCH_POLICY
         self._append_message(
             f"=== 分區 {self.zoning} 支撐配置開始 ===\n"
-            f"每支支撐完整處理 {max_steel_combination_count} 組材料組合；"
-            f"最多保留 {target_valid_candidate_count} 個候選送入全域配置。\n"
-            f"候選保留順序：每 {support.SUPPORT_DEFAULT_JACK_CENTER_BUCKET_SIZE:.0f} mm "
-            f"Jack區間保留 {support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_JACK_BUCKET} 個代表方案，"
+            f"搜尋政策：{policy.policy_id} v{policy.policy_version}\n"
+            f"Phase 1：每支支撐完整處理 {policy.support_phase1_length_combination_count} 組材料組合；"
+            f"最多保留 {policy.support_phase1_retained_candidate_count} 個候選送入全域配置。\n"
+            f"候選保留順序：每 {policy.support_phase1_jack_bucket_size} mm "
+            f"Jack區間保留 {policy.support_phase1_candidates_per_jack_bucket} 個代表方案，"
             f"再保留材料型態，剩餘名額依單體分數補入。\n"
         )
         self.run_button.configure(state="disabled")
         thread = threading.Thread(
             target=self._solver_thread,
             args=(
-                max_steel_combination_count,
-                target_valid_candidate_count,
                 material_ratio_targets,
                 support.SUPPORT_MATERIAL_RATIO_WEIGHT,
             ),
@@ -8471,41 +8790,53 @@ class SupportSolverDialog:
     def _log_candidate_shortage(
         zoning,
         config,
-        max_steel_combination_count,
-        target_valid_candidate_count,
         actual_valid_count,
+        diagnostic_record,
     ):
-        support.log("支撐候選方案不足，已中止計算。")
+        benchmark = dict(
+            (diagnostic_record.get("diagnostics", {}) or {}).get(
+                "candidate_benchmark", {}
+            )
+            or {}
+        )
+        invalid_reasons = Counter(
+            (diagnostic_record.get("diagnostics", {}) or {}).get(
+                "invalid_reason_counts", {}
+            )
+            or {}
+        )
+        region_mismatch_count = int(
+            (diagnostic_record.get("diagnostics", {}) or {}).get(
+                "target_region_mismatch_count", 0
+            )
+            or 0
+        )
+        support.log("支撐候選方案不足。")
         support.log(f"分區：{zoning}")
         support.log(f"支撐：{config.support_id}")
-        support.log(f"鋼材組合探索數：{max_steel_combination_count}")
-        support.log(f"合法候選保留數：{target_valid_candidate_count}")
         support.log(f"實際合法候選數：{actual_valid_count}")
-        support.log(f"需求合法候選數：{target_valid_candidate_count}")
-        support.log("可能原因：")
-        support.log("  - 鋼材組合探索數太小，尚未探索到足夠組合")
-        support.log("  - 禁止區條件過於嚴格")
-        support.log("  - 目標千斤頂區域條件過於嚴格")
-        support.log("  - 可用材料長度組合不足")
-        support.log("  - 接頭位置容易落入禁止區")
-        support.log("建議：")
         support.log(
-            "  請先增加「鋼材組合探索數」，"
-            f"例如由 {max_steel_combination_count} 提高到 "
-            f"{max(100, max_steel_combination_count * 2)}，再重新計算。"
+            "配置流程："
+            f"原始 {int(benchmark.get('raw_layout_count', 0) or 0)}、"
+            f"完整合法 {int(benchmark.get('valid_layout_count', 0) or 0)}、"
+            f"目標 Jack 區域後 {int(benchmark.get('candidate_count_before_topn', 0) or 0)}"
         )
-        support.log(
-            "  若仍不足，請檢查該支支撐的柱位置、"
-            "托梁位置與目標千斤頂區域設定。"
-        )
+        if invalid_reasons:
+            support.log("主要不合法原因：")
+            for reason, count in invalid_reasons.most_common(3):
+                support.log(f"  - {reason}：{count}")
+        if region_mismatch_count:
+            support.log(f"  - Jack Region 不符：{region_mismatch_count}")
+        support.log("請檢查該支撐的幾何、禁止區、Jack Region 與可用材料條件。")
 
     def _solve(
         self,
-        max_steel_combination_count,
-        target_valid_candidate_count,
         material_ratio_targets,
         material_ratio_weight,
     ):
+        policy = solver_search.DEFAULT_SEARCH_POLICY
+        max_steel_combination_count = policy.support_phase1_length_combination_count
+        target_valid_candidate_count = policy.support_phase1_retained_candidate_count
         candidates_by_support = []
         candidate_statuses = []
 
@@ -8524,10 +8855,8 @@ class SupportSolverDialog:
             min_unique_material_styles = (
                 support.SUPPORT_DEFAULT_MIN_UNIQUE_MATERIAL_STYLES
             )
-            jack_center_bucket_size = support.SUPPORT_DEFAULT_JACK_CENTER_BUCKET_SIZE
-            min_candidates_per_jack_bucket = (
-                support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_JACK_BUCKET
-            )
+            jack_center_bucket_size = policy.support_phase1_jack_bucket_size
+            min_candidates_per_jack_bucket = policy.support_phase1_candidates_per_jack_bucket
             min_candidates_per_material_style = (
                 support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_MATERIAL_STYLE
             )
@@ -8550,6 +8879,8 @@ class SupportSolverDialog:
                 min_candidates_per_jack_bucket=min_candidates_per_jack_bucket,
                 min_candidates_per_material_style=min_candidates_per_material_style,
                 min_retained_no_under_4000_candidates=min_retained_no_under_4000_candidates,
+                solver_search_policy_id=policy.policy_id,
+                solver_search_policy_version=policy.policy_version,
             )
             if cache_key not in self.candidate_cache:
                 support.log(f"產生支撐 {config.support_id} 候選解...")
@@ -8641,35 +8972,301 @@ class SupportSolverDialog:
                 self._log_candidate_shortage(
                     zoning=self.zoning,
                     config=status["config"],
-                    max_steel_combination_count=max_steel_combination_count,
-                    target_valid_candidate_count=target_valid_candidate_count,
                     actual_valid_count=status["actual_valid_count"],
+                    diagnostic_record=status["diagnostics"],
                 )
                 support.log("")
+
+        missing_candidates = [
+            status
+            for status in candidate_statuses
+            if status["actual_valid_count"] == 0
+        ]
+        if missing_candidates:
+            diagnostics = self._build_support_diagnostics(
+                candidate_statuses=candidate_statuses,
+                solution=None,
+                stage_records=[],
+                stage_scores=[],
+                final_assessment=None,
+            )
             support.log(
-                f"分區 {self.zoning} 未進入全域最佳化，"
-                "原因是部分支撐合法候選不足。"
+                f"分區 {self.zoning} 未進入全域配置："
+                "至少一支支撐沒有合法單體候選。"
             )
             support.log("=" * 72)
-            return None
+            return None, diagnostics
 
         support.log(
-            f"候選總檢查：{len(candidate_statuses) - len(shortages)}/"
-            f"{len(candidate_statuses)} 支候選充足，開始全域搭配。"
+            "候選合法性檢查完成，正在進行全域配置。"
         )
-        solution = support.build_global_solution(
-            candidates_by_support=candidates_by_support,
-            beam_width=100,
-            material_ratio_targets=material_ratio_targets,
-            material_ratio_weight=material_ratio_weight,
+        self._post_ui(
+            lambda: self.summary_var.set("正在進行全域配置並確認搜尋穩定度……")
+        )
+
+        solutions = []
+        stage_records = []
+        stage_scores = []
+        final_assessment = None
+        for stage_index, stage in enumerate(policy.support_global_search_stages):
+            support.log("")
+            support.log(
+                f"[搜尋階段 {stage.name}／"
+                f"{policy.support_global_search_stages[-1].name}]"
+            )
+            support.log(f"Beam Width：{stage.beam_width}")
+            phase2_diagnostics = {}
+            stage_solution = support.build_global_solution(
+                candidates_by_support=candidates_by_support,
+                beam_width=stage.beam_width,
+                material_ratio_targets=material_ratio_targets,
+                material_ratio_weight=material_ratio_weight,
+                diagnostics_out=phase2_diagnostics,
+            )
+            solutions.append(stage_solution)
+            if stage_solution.valid:
+                stage_scores.append(float(stage_solution.total_score))
+            unique_solution_count = int(
+                phase2_diagnostics.get("final_unique_solution_count", 0) or 0
+            )
+            pruning_was_active = bool(
+                phase2_diagnostics.get("pruning_was_active", False)
+            )
+            final_assessment = solver_search.assess_support_stage(
+                legal_solution_found=bool(stage_solution.valid),
+                unique_solution_count=unique_solution_count,
+                stage_best_scores=stage_scores,
+                pruning_was_active=pruning_was_active,
+                is_last_stage=(
+                    stage_index == len(policy.support_global_search_stages) - 1
+                ),
+                policy=policy,
+            )
+            stage_record = {
+                "stage": stage.name,
+                "beam_width": stage.beam_width,
+                "legal_solution_found": bool(stage_solution.valid),
+                "best_score": float(stage_solution.total_score),
+                "unique_solution_count": unique_solution_count,
+                "pruning_was_active": pruning_was_active,
+                "result_is_stable": final_assessment.result_is_stable,
+                "decision": (
+                    "進入下一搜尋階段"
+                    if final_assessment.should_escalate
+                    else "停止搜尋"
+                ),
+                "reasons": list(final_assessment.reasons),
+            }
+            stage_records.append(stage_record)
+            support.log(f"合法方案：{'是' if stage_solution.valid else '否'}")
+            support.log(f"最佳分數：{stage_solution.total_score:.2f}")
+            support.log(f"合法且唯一方案：{unique_solution_count}")
+            support.log(f"決策：{stage_record['decision']}")
+            support.log(
+                "原因："
+                + (
+                    "、".join(final_assessment.reasons)
+                    if final_assessment.reasons
+                    else final_assessment.stopping_reason
+                )
+            )
+            if not final_assessment.should_escalate:
+                break
+            self._post_ui(
+                lambda: self.summary_var.set(
+                    "初始結果仍可能改善，系統正在進一步搜尋……"
+                )
+            )
+
+        solution = solver_search.select_best_support_solution(
+            solutions,
+            precision=policy.score_comparison_precision,
+        )
+        diagnostics = self._build_support_diagnostics(
+            candidate_statuses=candidate_statuses,
+            solution=solution,
+            stage_records=stage_records,
+            stage_scores=stage_scores,
+            final_assessment=final_assessment,
         )
         solution.candidate_diagnostics = candidate_statuses
-        return solution
+        solution.search_diagnostics = diagnostics.to_dict()
+        self._post_ui(
+            lambda: self.summary_var.set("正在整理結果與診斷……")
+        )
+        return solution, diagnostics
+
+    @staticmethod
+    def _support_phase1_issue_details(candidate_statuses):
+        issue_counts = Counter()
+        insufficient_ids = []
+        missing_ids = []
+        concentrated_ids = []
+        retained_target = (
+            solver_search.DEFAULT_SEARCH_POLICY.support_phase1_retained_candidate_count
+        )
+        for status in candidate_statuses:
+            component_id = status["config"].support_id
+            actual_count = int(status.get("actual_valid_count", 0) or 0)
+            record = dict(status.get("diagnostics", {}) or {})
+            phase1 = dict(record.get("diagnostics", {}) or {})
+            benchmark = dict(phase1.get("candidate_benchmark", {}) or {})
+            after_stats = dict(benchmark.get("after_topn", {}) or {})
+            issue_counts.update(dict(phase1.get("invalid_reason_counts", {}) or {}))
+            region_mismatch = int(phase1.get("target_region_mismatch_count", 0) or 0)
+            if region_mismatch:
+                issue_counts["Jack Region 不符"] += region_mismatch
+            if actual_count < retained_target:
+                insufficient_ids.append(component_id)
+            if actual_count == 0:
+                missing_ids.append(component_id)
+            if actual_count and (
+                int(after_stats.get("jack_bucket_count", 0) or 0) <= 1
+                or int(after_stats.get("unique_steel_pattern_count", 0) or 0) <= 1
+                or int(after_stats.get("material_style_count", 0) or 0) <= 1
+            ):
+                concentrated_ids.append(component_id)
+        return issue_counts, insufficient_ids, missing_ids, concentrated_ids
+
+    def _build_support_diagnostics(
+        self,
+        *,
+        candidate_statuses,
+        solution,
+        stage_records,
+        stage_scores,
+        final_assessment,
+    ):
+        policy = solver_search.DEFAULT_SEARCH_POLICY
+        issue_counts, insufficient_ids, missing_ids, concentrated_ids = (
+            self._support_phase1_issue_details(candidate_statuses)
+        )
+        legal_found = bool(solution is not None and solution.valid)
+        scoring_preference_ids = []
+        if legal_found:
+            solution_plans = list(getattr(solution, "plans", []) or [])
+            pattern_counts = Counter(
+                support.steel_pattern_from_plan(plan)
+                for plan in solution_plans
+            )
+            if len(solution_plans) >= 3 and pattern_counts:
+                dominant_pattern, dominant_count = pattern_counts.most_common(1)[0]
+                if (
+                    dominant_count / len(solution_plans)
+                    > policy.scoring_pattern_dominance_threshold
+                ):
+                    scoring_preference_ids = [
+                        plan.support_id
+                        for plan in solution_plans
+                        if support.steel_pattern_from_plan(plan) == dominant_pattern
+                    ]
+        reached_last_stage = bool(
+            stage_records
+            and stage_records[-1]["stage"]
+            == policy.support_global_search_stages[-1].name
+        )
+        limit_reached = bool(
+            reached_last_stage
+            and final_assessment is not None
+            and final_assessment.reasons
+        )
+        main_issue = solver_search.NO_ISSUE
+        issue_message = ""
+        secondary = []
+        if missing_ids:
+            main_issue = solver_search.ENGINEERING_CONSTRAINT_LIMITED
+            issue_message = "部分支撐在目前工程條件下沒有合法單體候選。"
+            secondary.append(solver_search.CANDIDATE_INSUFFICIENT)
+        elif insufficient_ids:
+            main_issue = solver_search.CANDIDATE_INSUFFICIENT
+            issue_message = "部分支撐的合法候選未填滿正式保留數。"
+            if issue_counts:
+                secondary.append(solver_search.ENGINEERING_CONSTRAINT_LIMITED)
+        elif concentrated_ids:
+            main_issue = solver_search.CANDIDATE_INSUFFICIENT
+            issue_message = "候選數量雖足，但部分支撐的 Jack 位置或材料型態選項集中。"
+        elif not legal_found:
+            main_issue = solver_search.SEARCH_INSUFFICIENT
+            issue_message = "啟發式全域搜尋已達上限，但尚未找到合法方案。"
+        elif scoring_preference_ids:
+            main_issue = solver_search.SCORING_PREFERENCE
+            issue_message = "合法候選充足，但全域結果集中使用同一材料 Pattern，可能來自評分偏好。"
+
+        escalation_reasons = []
+        for record in stage_records[:-1]:
+            if record.get("decision") == "進入下一搜尋階段":
+                escalation_reasons.extend(record.get("reasons", []))
+
+        final_unique = int(
+            stage_records[-1].get("unique_solution_count", 0)
+            if stage_records
+            else 0
+        )
+        return solver_search.SolverDiagnostics(
+            solver_type="support",
+            search_status=(
+                "candidate_insufficient"
+                if insufficient_ids
+                else "completed"
+                if legal_found
+                else "no_legal_solution"
+            ),
+            search_stage=(stage_records[-1]["stage"] if stage_records else "PHASE1"),
+            legal_solution_found=legal_found,
+            infeasibility_proven=False,
+            search_limit_reached=limit_reached,
+            search_was_escalated=len(stage_records) > 1,
+            result_is_stable=bool(
+                final_assessment and final_assessment.result_is_stable
+            ),
+            candidate_count=sum(
+                int(
+                    ((status.get("diagnostics", {}) or {}).get("diagnostics", {}) or {})
+                    .get("candidate_pool_valid_count", 0)
+                    or 0
+                )
+                for status in candidate_statuses
+            ),
+            valid_candidate_count=sum(
+                int(status.get("actual_valid_count", 0) or 0)
+                for status in candidate_statuses
+            ),
+            retained_candidate_count=sum(
+                int(status.get("actual_valid_count", 0) or 0)
+                for status in candidate_statuses
+            ),
+            unique_solution_count=final_unique,
+            best_score_history=list(stage_scores),
+            escalation_reasons=list(dict.fromkeys(escalation_reasons)),
+            stopping_reason=(
+                final_assessment.stopping_reason
+                if final_assessment is not None
+                else "單體候選不足，未進入全域配置"
+            ),
+            main_issue_category=main_issue,
+            main_issue_message=issue_message,
+            secondary_issue_categories=secondary,
+            issue_counts=dict(issue_counts),
+            affected_component_ids=list(dict.fromkeys(
+                missing_ids
+                + insufficient_ids
+                + concentrated_ids
+                + scoring_preference_ids
+            )),
+            component_candidate_counts={
+                status["config"].support_id: int(
+                    status.get("actual_valid_count", 0) or 0
+                )
+                for status in candidate_statuses
+                if status["config"].support_id in insufficient_ids
+            },
+            policy_id=policy.policy_id,
+            policy_version=policy.policy_version,
+            stage_records=stage_records,
+        )
 
     def _solver_thread(
         self,
-        max_steel_combination_count,
-        target_valid_candidate_count,
         material_ratio_targets,
         material_ratio_weight,
     ):
@@ -8681,32 +9278,92 @@ class SupportSolverDialog:
 
         try:
             support.set_logger(gui_logger)
-            support.random.seed(42)
-            solution = self._solve(
-                max_steel_combination_count,
-                target_valid_candidate_count,
+            support.random.seed(
+                solver_search.DEFAULT_SEARCH_POLICY.support_phase1_random_seed
+            )
+            solution, diagnostics = self._solve(
                 material_ratio_targets,
                 material_ratio_weight,
             )
             if solution is not None:
-                self.dialog.after(
-                    0,
-                    lambda: self._display_solution(solution),
+                self._post_ui(
+                    lambda: self._display_solution(solution, diagnostics),
+                )
+            else:
+                self._post_ui(
+                    lambda: self._display_diagnostics_only(diagnostics),
                 )
         except Exception:
             import traceback
 
             message = traceback.format_exc()
             self.text_writer.write(message)
+            self._post_ui(
+                lambda: self.summary_var.set(
+                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
+                )
+            )
         finally:
             support.set_logger(None)
-            self.dialog.after(
-                0,
+            self._post_ui(
                 lambda: self.run_button.configure(state="normal"),
             )
 
-    def _display_solution(self, solution):
+    def _display_diagnostics_only(self, diagnostics):
+        self.summary_var.set(self._format_support_engineer_summary(None, diagnostics))
+
+    @staticmethod
+    def _format_support_engineer_summary(solution, diagnostics):
+        lines = []
+        if diagnostics.legal_solution_found:
+            lines.append("計算完成｜✓ 已找到合法方案")
+            if diagnostics.search_was_escalated:
+                lines.append("ℹ 初始結果仍可能改善，系統已自動增加計算強度。")
+            if diagnostics.result_is_stable:
+                lines.append("✓ 搜尋結果已穩定。")
+            elif diagnostics.search_limit_reached:
+                lines.append("⚠ 已使用最大搜尋強度，結果尚未完全穩定，可比較其他合法方案。")
+            if diagnostics.main_issue_category not in {
+                solver_search.CANDIDATE_INSUFFICIENT,
+                solver_search.ENGINEERING_CONSTRAINT_LIMITED,
+            }:
+                lines.append("✓ 候選方案充足。")
+        else:
+            lines.append("目前搜尋未找到合法方案。")
+            if diagnostics.infeasibility_proven:
+                lines.append("工程條件下無可行解。")
+            elif diagnostics.search_stage == "PHASE1":
+                lines.append("部分支撐沒有合法單體候選，未進入全域配置。")
+            else:
+                lines.append("系統已使用最大搜尋強度，但不能據此證明工程條件一定無解。")
+
+        if diagnostics.main_issue_message:
+            lines.append(f"主要限制：{diagnostics.main_issue_message}")
+        if diagnostics.affected_component_ids:
+            component_labels = []
+            for component_id in diagnostics.affected_component_ids[:8]:
+                if component_id in diagnostics.component_candidate_counts:
+                    component_labels.append(
+                        f"{component_id}（合法候選 "
+                        f"{diagnostics.component_candidate_counts[component_id]}）"
+                    )
+                else:
+                    component_labels.append(component_id)
+            lines.append(
+                "需要檢查：" + "、".join(component_labels)
+                + ("…" if len(diagnostics.affected_component_ids) > 8 else "")
+            )
+        return "\n".join(lines)
+
+    def _display_solution(self, solution, diagnostics=None):
         self.solution = solution
+        diagnostics = diagnostics or solver_search.SolverDiagnostics.from_dict(
+            getattr(solution, "search_diagnostics", None)
+        )
+        if diagnostics is not None:
+            self.summary_var.set(
+                self._format_support_engineer_summary(solution, diagnostics)
+            )
         plans = list(solution.plans)
         plan_scores = [float(plan.score) for plan in plans]
         minimum_score = min(plan_scores, default=0.0)
@@ -8865,6 +9522,7 @@ class SupportSolverDialog:
         ]
 
     def _on_close(self):
+        self._close_ui_bridge()
         self.dialog.destroy()
 
     def open(self):
@@ -8872,7 +9530,7 @@ class SupportSolverDialog:
         return self.solution
 
 
-class WalerSolverDialog:
+class WalerSolverDialog(SolverDialogThreadBridge):
     def __init__(
         self,
         parent,
@@ -8931,11 +9589,6 @@ class WalerSolverDialog:
 
         forbidden_text = ", ".join(format_number(point) for point in forbidden_points) or "無"
         purchasable_text = ", ".join(format_number(item) for item in purchasable_lengths) or "無"
-        score_weight_text = (
-            "購買數 × 100,000；比例偏差 × 100,000；小於 4,000 mm 的段數 × 100,000；"
-            "材料種類數 × 5,000；最大／最小料長差 × 1；接頭數 × 1,000"
-        )
-
         self.dialog = tk.Toplevel(parent)
         self.dialog.title(f"圍令配置 - {waler_id}")
         self.dialog.geometry("900x780")
@@ -9004,72 +9657,45 @@ class WalerSolverDialog:
         self.long_ratio_var = tk.StringVar(value="30")
         ttk.Entry(ratio_frame, textvariable=self.long_ratio_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=4)
 
-        self.waler_advanced_expanded = False
-        self.waler_advanced_button = ttk.Button(
+        ttk.Label(
             info_frame,
-            text="顯示進階設定 ▼",
-            command=self._toggle_waler_advanced_settings,
-        )
-        self.waler_advanced_button.grid(
+            text=(
+                "搜尋策略：系統自動調整。系統會依合法方案、候選完整度與搜尋穩定度，"
+                "自動調整計算強度；不會自行放寬工程條件。"
+            ),
+            foreground="#4b5563",
+            wraplength=800,
+            justify="left",
+        ).grid(
             row=solver_settings_row + 1,
             column=0,
             columnspan=4,
-            sticky="w",
+            sticky="ew",
             padx=8,
             pady=(2, 7),
-        )
-        self.waler_advanced_frame = ttk.Frame(info_frame)
-        self.waler_advanced_row = solver_settings_row + 2
-        self.waler_advanced_frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            self.waler_advanced_frame,
-            text=f"評分權重說明：{score_weight_text}",
-            justify="left",
-            wraplength=800,
-        ).pack(fill="x", pady=(0, 5))
-        solver_settings_frame = ttk.LabelFrame(
-            self.waler_advanced_frame,
-            text="演算法設定",
-        )
-        solver_settings_frame.pack(fill="x")
-
-        ttk.Label(solver_settings_frame, text="演化代數").grid(
-            row=0, column=0, sticky="e", padx=(8, 4), pady=4
-        )
-        self.generations_var = tk.StringVar(value="10")
-        ttk.Spinbox(
-            solver_settings_frame,
-            from_=10,
-            to=5000,
-            textvariable=self.generations_var,
-            width=8,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 6), pady=4)
-        ttk.Label(solver_settings_frame, text="（10～5000）").grid(
-            row=0, column=2, sticky="w", padx=(0, 18), pady=4
-        )
-
-        ttk.Label(solver_settings_frame, text="族群大小").grid(
-            row=0, column=3, sticky="e", padx=(8, 4), pady=4
-        )
-        self.population_size_var = tk.StringVar(value="120")
-        ttk.Spinbox(
-            solver_settings_frame,
-            from_=10,
-            to=1000,
-            textvariable=self.population_size_var,
-            width=8,
-        ).grid(row=0, column=4, sticky="w", padx=(0, 6), pady=4)
-        ttk.Label(solver_settings_frame, text="（10～1000）").grid(
-            row=0, column=5, sticky="w", padx=(0, 8), pady=4
         )
 
         log_frame = ttk.LabelFrame(frame, text="求解執行資訊")
         log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
-        log_frame.rowconfigure(0, weight=1)
+        log_frame.rowconfigure(2, weight=1)
         log_frame.columnconfigure(0, weight=1)
 
+        self.summary_var = tk.StringVar(value="尚未開始計算。")
+        summary_frame = ttk.LabelFrame(log_frame, text="一般摘要")
+        summary_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        summary_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            summary_frame,
+            textvariable=self.summary_var,
+            justify="left",
+            wraplength=830,
+            padding=(8, 6),
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Label(log_frame, text="詳細執行訊息").grid(
+            row=1, column=0, sticky="w", padx=6, pady=(3, 0)
+        )
         self.result_text = scrolledtext.ScrolledText(log_frame, height=14, wrap="none", state="disabled", font=("Consolas", 10))
-        self.result_text.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.result_text.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
         self.text_writer = TextRedirector(self.result_text)
 
         button_frame = ttk.Frame(frame)
@@ -9079,22 +9705,7 @@ class WalerSolverDialog:
         self.run_button.pack(side="left", padx=6)
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    def _toggle_waler_advanced_settings(self):
-        self.waler_advanced_expanded = not self.waler_advanced_expanded
-        if self.waler_advanced_expanded:
-            self.waler_advanced_frame.grid(
-                row=self.waler_advanced_row,
-                column=0,
-                columnspan=4,
-                sticky="ew",
-                padx=8,
-                pady=(0, 8),
-            )
-            self.waler_advanced_button.configure(text="隱藏進階設定 ▲")
-        else:
-            self.waler_advanced_frame.grid_remove()
-            self.waler_advanced_button.configure(text="顯示進階設定 ▼")
+        self._initialize_ui_bridge()
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)
@@ -9118,8 +9729,11 @@ class WalerSolverDialog:
         long_ratio,
         purchasable_lengths,
     ):
+        policy = solver_search.DEFAULT_SEARCH_POLICY
         return (
             "waler_tail_adjustment_v1",
+            policy.policy_id,
+            policy.policy_version,
             total_length,
             tuple(sorted(forbidden_points)),
             short_ratio,
@@ -9131,6 +9745,8 @@ class WalerSolverDialog:
     def _ask_use_memory_result(self, solver_key):
         (
             _solver_schema,
+            _policy_id,
+            _policy_version,
             total_length,
             forbidden_points,
             short_ratio,
@@ -9196,7 +9812,7 @@ class WalerSolverDialog:
             self.dialog.grab_set()
         return choice["use_memory"]
 
-    def _save_solver_memory(self, results):
+    def _save_solver_memory(self, results, diagnostics=None):
         if self.solver_key is None:
             return
 
@@ -9207,26 +9823,24 @@ class WalerSolverDialog:
         self.solver_memory[self.solver_key] = {
             "results": copy.deepcopy(results),
             "best_score": best_score,
+            "search_diagnostics": (
+                diagnostics.to_dict()
+                if isinstance(diagnostics, solver_search.SolverDiagnostics)
+                else copy.deepcopy(diagnostics)
+            ),
+            "solver_search_policy_id": solver_search.DEFAULT_SEARCH_POLICY.policy_id,
+            "solver_search_policy_version": solver_search.DEFAULT_SEARCH_POLICY.policy_version,
         }
 
     def _restore_solver_memory(self, memory_entry):
-        return copy.deepcopy(memory_entry["results"])
+        return (
+            copy.deepcopy(memory_entry["results"]),
+            solver_search.SolverDiagnostics.from_dict(
+                copy.deepcopy(memory_entry.get("search_diagnostics"))
+            ),
+        )
 
     def _run_solver(self, waler_id, length):
-        try:
-            generations = int(self.generations_var.get().strip())
-            population_size = int(self.population_size_var.get().strip())
-        except ValueError:
-            messagebox.showerror("輸入錯誤", "演化代數與族群大小必須為整數")
-            return
-
-        if not 10 <= generations <= 5000:
-            messagebox.showerror("輸入錯誤", "演化代數必須介於 10～5000")
-            return
-        if not 10 <= population_size <= 1000:
-            messagebox.showerror("輸入錯誤", "族群大小必須介於 10～1000")
-            return
-
         try:
             short_ratio = float(self.short_ratio_var.get())
             mid_ratio = float(self.mid_ratio_var.get())
@@ -9264,6 +9878,7 @@ class WalerSolverDialog:
                 self._append_message("錯誤：庫存表中沒有可購買長度。\n")
                 return
 
+            standard_stage = solver_search.DEFAULT_SEARCH_POLICY.waler_search_stages[0]
             cfg = wales.Config(
                 total_length=length,
                 support_points=[int(round(p)) for p in self.forbidden_points],
@@ -9275,8 +9890,8 @@ class WalerSolverDialog:
                 short_segment_ratio_target=normalized[0],
                 mid_segment_ratio_target=normalized[1],
                 long_segment_ratio_target=normalized[2],
-                population_size=population_size,
-                generations=generations,
+                population_size=standard_stage.population_size,
+                generations=standard_stage.generations,
                 crossover_rate=0.85,
                 mutation_rate=0.08,
                 elite_size=8,
@@ -9303,19 +9918,24 @@ class WalerSolverDialog:
             self.result_text.configure(state="normal")
             self.result_text.delete("1.0", "end")
             self.result_text.configure(state="disabled")
-            restored_results = self._restore_solver_memory(memory_entry)
+            restored_results, restored_diagnostics = self._restore_solver_memory(
+                memory_entry
+            )
             self.current_results = None
             self._append_message("已直接載入本次執行期間的相同條件結果。\n")
-            self._display_results(restored_results)
+            self._display_results(restored_results, diagnostics=restored_diagnostics)
             return
 
         self.result_text.configure(state="normal")
         self.result_text.delete("1.0", "end")
         self.result_text.configure(state="disabled")
         self.current_results = None
+        self.summary_var.set(
+            "正在建立配置候選並檢查工程合法性……系統會自動判斷是否需要加強搜尋。"
+        )
+        policy = solver_search.DEFAULT_SEARCH_POLICY
         self._append_message(
-            f"開始計算：演化代數={cfg.generations}，"
-            f"族群大小={cfg.population_size}，請稍候...\n"
+            f"開始計算。搜尋政策：{policy.policy_id} v{policy.policy_version}\n"
         )
         self.run_button.configure(state="disabled")
 
@@ -9336,17 +9956,195 @@ class WalerSolverDialog:
 
         try:
             wales.set_logger(gui_logger)
-            results = wales.evolve(cfg, stock_items, seed=42)
-            self._save_solver_memory(results)
-            self.dialog.after(0, lambda: self._display_results(results))
+            policy = solver_search.DEFAULT_SEARCH_POLICY
+            all_results = []
+            stage_records = []
+            best_score_history = []
+            escalation_reasons = []
+            final_assessment = None
+
+            for stage_index, stage in enumerate(policy.waler_search_stages):
+                stage_cfg = copy.deepcopy(cfg)
+                stage_cfg.generations = stage.generations
+                stage_cfg.population_size = stage.population_size
+                gui_logger("")
+                gui_logger(
+                    f"[搜尋階段 {stage.name}／{policy.waler_search_stages[-1].name}]"
+                )
+                gui_logger(f"Generations：{stage.generations}")
+                gui_logger(f"Population：{stage.population_size}")
+                gui_logger(f"Seed：{stage.random_seed}")
+                stage_diagnostics = {}
+                stage_results = wales.evolve(
+                    stage_cfg,
+                    stock_items,
+                    seed=stage.random_seed,
+                    diagnostics_out=stage_diagnostics,
+                )
+                all_results.extend(stage_results)
+                stage_history = list(
+                    stage_diagnostics.get("best_score_history", []) or []
+                )
+                best_score_history.extend(stage_history)
+                valid_count = int(
+                    stage_diagnostics.get("valid_candidate_count", 0) or 0
+                )
+                unique_count = int(
+                    stage_diagnostics.get("unique_valid_solution_count", 0) or 0
+                )
+                final_assessment = solver_search.assess_waler_stage(
+                    valid_solution_count=valid_count,
+                    unique_solution_count=unique_count,
+                    best_score_history=stage_history,
+                    is_last_stage=(stage_index == len(policy.waler_search_stages) - 1),
+                    policy=policy,
+                )
+                best_score = min(
+                    (float(item.get("score", float("inf"))) for item in stage_results),
+                    default=None,
+                )
+                stage_record = {
+                    "stage": stage.name,
+                    "generations": stage.generations,
+                    "population_size": stage.population_size,
+                    "random_seed": stage.random_seed,
+                    "legal_solution_found": valid_count > 0,
+                    "valid_solution_count": valid_count,
+                    "unique_solution_count": unique_count,
+                    "best_score": best_score,
+                    "tail_score_improvement": (
+                        solver_search.relative_score_improvement(
+                            stage_history[-policy.stability_window],
+                            min(stage_history[-policy.stability_window:]),
+                        )
+                        if len(stage_history) >= policy.stability_window
+                        else None
+                    ),
+                    "result_is_stable": final_assessment.result_is_stable,
+                    "decision": (
+                        "進入下一搜尋階段"
+                        if final_assessment.should_escalate
+                        else "停止搜尋"
+                    ),
+                    "reasons": list(final_assessment.reasons),
+                }
+                stage_records.append(stage_record)
+                gui_logger(f"合法方案：{'是' if valid_count else '否'}")
+                gui_logger(
+                    "最佳分數："
+                    + ("無" if best_score is None else f"{best_score:.2f}")
+                )
+                gui_logger(f"合法方案數：{valid_count}")
+                gui_logger(f"合法且唯一方案：{unique_count}")
+                gui_logger(f"決策：{stage_record['decision']}")
+                gui_logger(
+                    "原因："
+                    + (
+                        "、".join(final_assessment.reasons)
+                        if final_assessment.reasons
+                        else final_assessment.stopping_reason
+                    )
+                )
+                if not final_assessment.should_escalate:
+                    break
+                escalation_reasons.extend(final_assessment.reasons)
+                self._post_ui(
+                    lambda: self.summary_var.set(
+                        "初始結果仍可改善，系統正在進一步搜尋……"
+                    )
+                )
+
+            results = solver_search.merge_waler_results(
+                all_results,
+                limit=cfg.top_n,
+                precision=policy.score_comparison_precision,
+            )
+            legal_found = any(bool(item.get("valid")) for item in results)
+            final_record = stage_records[-1] if stage_records else {}
+            final_unique = int(final_record.get("unique_solution_count", 0) or 0)
+            reached_last_stage = bool(
+                final_record.get("stage") == policy.waler_search_stages[-1].name
+            )
+            limit_reached = bool(
+                reached_last_stage
+                and final_assessment is not None
+                and final_assessment.reasons
+            )
+            path_feasible = wales.is_joint_path_feasible(cfg)
+            main_issue = solver_search.NO_ISSUE
+            issue_message = ""
+            secondary = []
+            affected_ids = []
+            if not legal_found and not path_feasible:
+                main_issue = solver_search.ENGINEERING_CONSTRAINT_LIMITED
+                issue_message = "目前材料長度與禁止區無法形成合法的圍令分段路徑。"
+                affected_ids = [self.waler_id]
+            elif not legal_found:
+                main_issue = solver_search.SEARCH_INSUFFICIENT
+                issue_message = "啟發式搜尋已達上限，但尚未找到合法方案。"
+                affected_ids = [self.waler_id]
+            elif limit_reached:
+                main_issue = solver_search.SEARCH_INSUFFICIENT
+                issue_message = "已找到合法方案，但搜尋達上限時仍未完全穩定。"
+                if final_unique < policy.minimum_unique_solution_count:
+                    secondary.append(solver_search.CANDIDATE_INSUFFICIENT)
+                    affected_ids = [self.waler_id]
+
+            diagnostics = solver_search.SolverDiagnostics(
+                solver_type="waler",
+                search_status="completed" if legal_found else "no_legal_solution",
+                search_stage=str(final_record.get("stage", "")),
+                legal_solution_found=legal_found,
+                infeasibility_proven=False,
+                search_limit_reached=limit_reached,
+                search_was_escalated=len(stage_records) > 1,
+                result_is_stable=bool(
+                    final_assessment and final_assessment.result_is_stable
+                ),
+                candidate_count=sum(
+                    int(record.get("population_size", 0) or 0)
+                    for record in stage_records
+                ),
+                valid_candidate_count=int(
+                    final_record.get("valid_solution_count", 0) or 0
+                ),
+                retained_candidate_count=len(results),
+                unique_solution_count=final_unique,
+                best_score_history=best_score_history,
+                escalation_reasons=list(dict.fromkeys(escalation_reasons)),
+                stopping_reason=(
+                    final_assessment.stopping_reason
+                    if final_assessment is not None
+                    else "搜尋未開始"
+                ),
+                main_issue_category=main_issue,
+                main_issue_message=issue_message,
+                secondary_issue_categories=secondary,
+                affected_component_ids=affected_ids,
+                policy_id=policy.policy_id,
+                policy_version=policy.policy_version,
+                stage_records=stage_records,
+            )
+            self._save_solver_memory(results, diagnostics)
+            self._post_ui(
+                lambda: self.summary_var.set("正在整理結果與診斷……")
+            )
+            self._post_ui(
+                lambda: self._display_results(results, diagnostics=diagnostics)
+            )
         except Exception:
             import traceback
 
             msg = traceback.format_exc()
-            self.dialog.after(0, lambda: self._append_message(msg))
+            self.text_writer.write(msg)
+            self._post_ui(
+                lambda: self.summary_var.set(
+                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
+                )
+            )
         finally:
             wales.set_logger(print)
-            self.dialog.after(0, lambda: self.run_button.configure(state="normal"))
+            self._post_ui(lambda: self.run_button.configure(state="normal"))
 
     def _waler_ratio_targets(self):
         if self.cfg is None:
@@ -9376,7 +10174,37 @@ class WalerSolverDialog:
             enriched["segment_counts"] = segment_counts
         return enriched
 
-    def _display_results(self, results, previous_results=None):
+    @staticmethod
+    def _format_waler_engineer_summary(diagnostics):
+        if diagnostics is None:
+            return "搜尋狀態：舊版結果，無診斷資料。"
+        lines = []
+        if diagnostics.legal_solution_found:
+            lines.append("計算完成｜✓ 已找到合法方案")
+            if diagnostics.search_was_escalated:
+                lines.append("ℹ 初始搜尋尚未穩定，系統已自動增加計算強度。")
+            if diagnostics.result_is_stable:
+                lines.append("✓ 加強後結果已穩定。")
+            elif diagnostics.search_limit_reached:
+                lines.append("⚠ 已使用最大搜尋強度，結果尚未完全穩定，可比較其他合法方案。")
+            if (
+                diagnostics.unique_solution_count
+                >= solver_search.DEFAULT_SEARCH_POLICY.minimum_unique_solution_count
+            ):
+                lines.append("✓ 合法方案數充足。")
+        else:
+            lines.append("目前搜尋未找到合法方案。")
+            if diagnostics.infeasibility_proven:
+                lines.append("工程條件下無可行解。")
+            else:
+                lines.append("系統已使用最大搜尋強度，但不能據此證明工程條件一定無解。")
+        if diagnostics.main_issue_message:
+            lines.append(f"主要限制：{diagnostics.main_issue_message}")
+        return "\n".join(lines)
+
+    def _display_results(self, results, previous_results=None, diagnostics=None):
+        diagnostics = diagnostics or None
+        self.summary_var.set(self._format_waler_engineer_summary(diagnostics))
         if not results:
             self._append_message("找不到可顯示的方案。\n")
             return
@@ -9402,6 +10230,11 @@ class WalerSolverDialog:
             "max_piece_length": self.max_piece_length,
             "adjustment_lengths": list(wales.WALER_ADJUSTMENT_LENGTHS),
             "max_gap": wales.WALER_MAX_GAP,
+            "search_diagnostics": (
+                diagnostics.to_dict()
+                if isinstance(diagnostics, solver_search.SolverDiagnostics)
+                else copy.deepcopy(diagnostics)
+            ),
         })
         self._append_message(
             "\n前 5 名已加入結果。請在結果頁勾選方案查看圖面，"
@@ -9420,6 +10253,7 @@ class WalerSolverDialog:
         )
 
     def _on_close(self):
+        self._close_ui_bridge()
         self.dialog.destroy()
 
     def open(self):

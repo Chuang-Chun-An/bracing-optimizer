@@ -132,6 +132,12 @@ class SupportCandidateCacheKeyTests(unittest.TestCase):
             make_key(candidate_selection_version="phase1_diversified_v2"),
         )
 
+    def test_solver_search_policy_version_change_key(self):
+        self.assertNotEqual(
+            make_key(solver_search_policy_version=1),
+            make_key(solver_search_policy_version=2),
+        )
+
     def test_material_ratio_weight_does_not_change_phase1_key(self):
         original = make_key()
         with patch.object(support, "SUPPORT_MATERIAL_RATIO_WEIGHT", 999999):

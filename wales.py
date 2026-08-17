@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from math import inf
 from typing import Dict, List, Optional, Tuple
 
+from solver_search import DEFAULT_SEARCH_POLICY
+
 evaluate_count = 0
 evaluate_total_time = 0.0
 allocate_call_count = 0
@@ -136,8 +138,8 @@ class Config:
 
 
     # GA 參數
-    population_size: int = 120
-    generations: int = 200
+    population_size: int = DEFAULT_SEARCH_POLICY.waler_search_stages[0].population_size
+    generations: int = DEFAULT_SEARCH_POLICY.waler_search_stages[0].generations
     crossover_rate: float = 0.85
     mutation_rate: float = 0.08
     elite_size: int = 8
@@ -1230,6 +1232,7 @@ def _run_generations(
     stock_items: List[Dict],
     generation_count: int,
     start_generation: int,
+    history_out: Optional[List[Dict]] = None,
 ) -> Tuple[List[List[int]], List[Dict]]:
     evaluated_for_population = [
         evaluate_individual(individual, cfg, stock_items)
@@ -1275,6 +1278,36 @@ def _run_generations(
         best = min(evaluated_for_population, key=lambda item: item["score"])
         current_generation = start_generation + generation_offset + 1
 
+        if history_out is not None:
+            valid_items = [
+                item
+                for item in evaluated_for_population
+                if item.get("valid")
+            ]
+            valid_signatures = {
+                (
+                    tuple(item.get("segments", []) or []),
+                    tuple(item.get("joints", []) or []),
+                )
+                for item in valid_items
+            }
+            best_valid = min(
+                valid_items,
+                key=lambda item: item["score"],
+                default=None,
+            )
+            history_out.append({
+                "generation": current_generation,
+                "best_score": float(best["score"]),
+                "best_valid_score": (
+                    None
+                    if best_valid is None
+                    else float(best_valid["score"])
+                ),
+                "valid_solution_count": len(valid_items),
+                "unique_valid_solution_count": len(valid_signatures),
+            })
+
         logger(
             f"第 {current_generation:>3} 代："
             f"最佳分數={best['score']:.2f}，"
@@ -1301,6 +1334,17 @@ def _log_performance_statistics() -> None:
     )
 
 
+def _waler_result_signature(item: Dict, cfg: Config) -> Tuple[object, ...]:
+    """Canonical uniqueness signature for a formal Waler result."""
+
+    return (
+        tuple(item.get("segments", []) or []),
+        tuple(item.get("joints", []) or []),
+        int(cfg.tail_adjustment),
+        int(cfg.tail_gap),
+    )
+
+
 def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
     candidates = final_evaluated
 
@@ -1309,15 +1353,15 @@ def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
     if valid_evaluated:
         candidates = valid_evaluated
 
-    # 去重：避免同樣的 segments 一直重複
+    # 去重：使用完整正式幾何簽章，不只比較材料長度。
     unique = {}
     for item in candidates:
-        key = tuple(item["segments"])
+        key = _waler_result_signature(item, cfg)
         if key not in unique or item["score"] < unique[key]["score"]:
             unique[key] = item
 
     results = list(unique.values())
-    results.sort(key=lambda x: x["score"])
+    results.sort(key=lambda x: (x["score"], _waler_result_signature(x, cfg)))
     top_results = []
     for item in results[: cfg.top_n]:
         enriched = dict(item)
@@ -1349,7 +1393,8 @@ def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
 def evolve(
     cfg: Config,
     stock_items: List[Dict],
-    seed: int = 42,
+    seed: int = DEFAULT_SEARCH_POLICY.waler_search_stages[0].random_seed,
+    diagnostics_out: Optional[Dict[str, object]] = None,
 ) -> List[Dict]:
     """建立初始族群並執行 cfg.generations 代。"""
     _reset_performance_counters()
@@ -1359,16 +1404,42 @@ def evolve(
     population = initial_population(cfg)
     debug_print("DEBUG: END INITIAL_POPULATION")
 
+    generation_history: List[Dict] = []
     population, final_evaluated = _run_generations(
         population,
         cfg,
         stock_items,
         cfg.generations,
         start_generation=0,
+        history_out=generation_history,
     )
 
     _log_performance_statistics()
-    return _top_results(final_evaluated, cfg)
+    results = _top_results(final_evaluated, cfg)
+    if diagnostics_out is not None:
+        valid_items = [item for item in final_evaluated if item.get("valid")]
+        unique_valid_signatures = {
+            _waler_result_signature(item, cfg)
+            for item in valid_items
+        }
+        diagnostics_out.clear()
+        diagnostics_out.update({
+            "candidate_count": len(final_evaluated),
+            "valid_candidate_count": len(valid_items),
+            "unique_valid_solution_count": len(unique_valid_signatures),
+            "generation_history": generation_history,
+            "best_score_history": [
+                float(record["best_valid_score"])
+                if record.get("best_valid_score") is not None
+                else float(record["best_score"])
+                for record in generation_history
+            ],
+            "result_count": len(results),
+            "seed": int(seed),
+            "generations": int(cfg.generations),
+            "population_size": int(cfg.population_size),
+        })
+    return results
 
 
 # =========================

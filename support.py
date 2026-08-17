@@ -7,6 +7,7 @@ import random
 import math
 
 import wales
+from solver_search import DEFAULT_SEARCH_POLICY
 
 # =========================================================
 # dataclass 定義
@@ -120,6 +121,7 @@ class GlobalSolution:
     material_concentration_threshold: float = 0.0
     material_concentration_weight: float = 0.0
     min_jack_distance: Optional[float] = None
+    search_diagnostics: Dict[str, object] = field(default_factory=dict)
 
 
 # =========================================================
@@ -151,7 +153,7 @@ SUPPORT_MATERIAL_CONCENTRATION_WEIGHT = 0.0
 SUPPORT_DEFAULT_SHORT_MATERIAL_RATIO = 38
 SUPPORT_DEFAULT_MID_MATERIAL_RATIO = 40
 SUPPORT_DEFAULT_LONG_MATERIAL_RATIO = 22
-SUPPORT_CANDIDATE_CACHE_SCHEMA_VERSION = 8
+SUPPORT_CANDIDATE_CACHE_SCHEMA_VERSION = 9
 SUPPORT_CANDIDATE_SELECTION_VERSION = "phase1_material_style_v5"
 SUPPORT_MIN_GAP = 0
 SUPPORT_SHORT_STEEL_THRESHOLD = 4000
@@ -225,6 +227,8 @@ def build_support_candidate_cache_key(
     candidate_selection_version: str = SUPPORT_CANDIDATE_SELECTION_VERSION,
     length_combination_selection_strategy: str = SUPPORT_LENGTH_COMBINATION_SELECTION_STRATEGY,
     jack_center_bucket_size: Optional[float] = SUPPORT_DEFAULT_JACK_CENTER_BUCKET_SIZE,
+    solver_search_policy_id: str = DEFAULT_SEARCH_POLICY.policy_id,
+    solver_search_policy_version: int = DEFAULT_SEARCH_POLICY.policy_version,
 ) -> Tuple[object, ...]:
     """Build a stable key for Phase 1 support candidate generation.
 
@@ -240,6 +244,10 @@ def build_support_candidate_cache_key(
 
     return (
         ("schema", SUPPORT_CANDIDATE_CACHE_SCHEMA_VERSION),
+        ("solver_search_policy", (
+            ("id", str(solver_search_policy_id)),
+            ("version", int(solver_search_policy_version)),
+        )),
         ("selection_version", str(candidate_selection_version)),
         ("config", (
             ("total_length", _stable_cache_number(config.total_length)),
@@ -1805,6 +1813,13 @@ def beam_search_layout(
         plan.valid and not plan.reason
         for plan in candidates
     )
+    invalid_reason_counts = _invalid_reason_statistics(candidates)
+    target_region_mismatch_count = sum(
+        plan.valid
+        and not plan.reason
+        and plan.jack_region_id != config.target_jack_region
+        for plan in candidates
+    )
     discarded_legal_target_count = max(0, len(eligible_layouts) - len(selected_layouts))
     discarded_selected_signatures = {
         layout_signature(plan)
@@ -1828,6 +1843,8 @@ def beam_search_layout(
             "complete_layout_before_validation_count": len(candidates),
             "complete_legal_layout_count": int(complete_legal_layout_count),
             "target_region_legal_layout_count": len(eligible_layouts),
+            "target_region_mismatch_count": int(target_region_mismatch_count),
+            "invalid_reason_counts": dict(invalid_reason_counts),
             "target_region_legal_no_under_4000_count": int(no_under_eligible_count),
             "selected_by_max_layouts_per_combo_count": len(selected_layouts),
             "selected_legal_target_region_count": len(selected_layouts),
@@ -1847,6 +1864,12 @@ def beam_search_layout(
         diagnostics["complete_layout_before_validation_count"] = diagnostics.get("complete_layout_before_validation_count", 0) + len(candidates)
         diagnostics["complete_legal_layout_count"] = diagnostics.get("complete_legal_layout_count", 0) + complete_legal_layout_count
         diagnostics["target_region_legal_layout_count"] = diagnostics.get("target_region_legal_layout_count", 0) + len(eligible_layouts)
+        diagnostics["target_region_mismatch_count"] = diagnostics.get("target_region_mismatch_count", 0) + target_region_mismatch_count
+        accumulated_invalid_reasons = Counter(
+            diagnostics.get("invalid_reason_counts", {}) or {}
+        )
+        accumulated_invalid_reasons.update(invalid_reason_counts)
+        diagnostics["invalid_reason_counts"] = dict(accumulated_invalid_reasons)
         diagnostics["target_region_legal_no_under_4000_count"] = diagnostics.get("target_region_legal_no_under_4000_count", 0) + no_under_eligible_count
         diagnostics["selected_by_max_layouts_per_combo_count"] = diagnostics.get("selected_by_max_layouts_per_combo_count", 0) + len(selected_layouts)
         diagnostics["selected_legal_target_region_count"] = diagnostics.get("selected_legal_target_region_count", 0) + len(selected_layouts)
@@ -2476,8 +2499,13 @@ def _beam_state_snapshot(
     under_4000_distribution: Counter[int] = Counter()
     max_pattern_usage_distribution: Counter[int] = Counter()
     pattern_concentration_distribution: Counter[int] = Counter()
+    plan_signatures = set()
+    scores: List[float] = []
     for state in beam:
         plans = _beam_state_plans(state)
+        plan_signatures.add(tuple(layout_signature(plan) for plan in plans))
+        if len(state) >= 2:
+            scores.append(float(state[1]))
         if plans:
             terminal_jack_counts[
                 _stable_cache_number(plans[-1].jack_center)
@@ -2499,6 +2527,9 @@ def _beam_state_snapshot(
 
     return {
         "state_count": state_count,
+        "unique_plan_signature_count": len(plan_signatures),
+        "best_state_score": min(scores, default=None),
+        "worst_state_score": max(scores, default=None),
         "terminal_jack_center_count": len(terminal_jack_counts),
         "terminal_jack_center_distribution": dict(
             sorted(terminal_jack_counts.items())
@@ -2518,6 +2549,19 @@ def _beam_state_snapshot(
         "dominant_terminal_jack_center": dominant_terminal_jack_center,
         "dominant_terminal_jack_ratio": dominant_terminal_jack_ratio,
     }
+
+
+def _finalize_phase2_diagnostics(diagnostics: Dict[str, object]) -> None:
+    steps = list(diagnostics.get("steps", []) or [])
+    diagnostics["pruning_was_active"] = any(
+        int(step.get("generated_state_count", 0) or 0)
+        > int(step.get("beam_state_count_after_pruning", 0) or 0)
+        for step in steps
+    )
+    final_step = steps[-1] if steps else {}
+    diagnostics["final_unique_solution_count"] = int(
+        final_step.get("unique_plan_signature_count", 0) or 0
+    )
 
 
 def global_solution_result_summary(solution: GlobalSolution) -> Dict[str, object]:
@@ -2623,6 +2667,7 @@ def build_global_solution(
             valid=False,
             reason="沒有候選資料",
         )
+        _finalize_phase2_diagnostics(phase2_diagnostics)
         phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
         if diagnostics_out is not None:
             diagnostics_out.clear()
@@ -2784,6 +2829,7 @@ def build_global_solution(
                 abs(curr.jack_center - prev.jack_center)
                 for prev, curr in zip(solution.plans, solution.plans[1:])
             ]
+            _finalize_phase2_diagnostics(phase2_diagnostics)
             phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
             if diagnostics_out is not None:
                 diagnostics_out.clear()
@@ -2824,6 +2870,7 @@ def build_global_solution(
         abs(curr.jack_center - prev.jack_center)
         for prev, curr in zip(solution.plans, solution.plans[1:])
     ]
+    _finalize_phase2_diagnostics(phase2_diagnostics)
     phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
     if diagnostics_out is not None:
         diagnostics_out.clear()

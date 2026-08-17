@@ -15,6 +15,18 @@ class _GeometryRoot:
 
 
 class MainUILayoutTests(unittest.TestCase):
+    class _Notebook:
+        def __init__(self, selected_text):
+            self.selected_text = selected_text
+
+        def select(self):
+            return "selected"
+
+        def tab(self, _tab_id, option):
+            if option == "text":
+                return self.selected_text
+            raise KeyError(option)
+
     def test_default_geometry_fits_a_1366_by_728_work_area(self):
         app = SupportInputApp.__new__(SupportInputApp)
         app.root = _GeometryRoot()
@@ -59,6 +71,35 @@ class MainUILayoutTests(unittest.TestCase):
         app._restore_main_paned_position()
 
         self.assertEqual(app.main_paned.position, 600)
+
+    def test_nested_workspace_selection_resolves_the_active_table(self):
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.workspace_tab_labels = {
+            "engineering": "工程配置",
+            "materials": "材料設定",
+            "analysis": "分析結果",
+        }
+        app.table_tab_labels = {
+            "struts": "支撐",
+            "walers": "圍令",
+            "braces": "斜撐",
+            "material_specs": "材料規格",
+            "inventory": "機料庫存",
+        }
+        app.notebook = self._Notebook("工程配置")
+        app.engineering_notebook = self._Notebook("支撐")
+        app.materials_notebook = self._Notebook("材料規格")
+
+        self.assertEqual(app._sync_current_table_from_active_tabs(), "struts")
+
+        app.notebook.selected_text = "材料設定"
+        self.assertEqual(
+            app._sync_current_table_from_active_tabs(),
+            "material_specs",
+        )
+
+        app.notebook.selected_text = "分析結果"
+        self.assertIsNone(app._sync_current_table_from_active_tabs())
 
 
 if __name__ == "__main__":
