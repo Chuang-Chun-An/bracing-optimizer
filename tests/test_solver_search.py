@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from solver_search import (
+from bracing_optimizer.algorithms.solver_search import (
     DEFAULT_SEARCH_POLICY,
     SCORING_PREFERENCE,
     SolverDiagnostics,

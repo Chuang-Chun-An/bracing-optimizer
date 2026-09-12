@@ -1,4 +1,4 @@
-# `wales.py` 函式與架構說明
+# `bracing_optimizer.algorithms.wales` 函式與架構說明
 
 本文件以函式為最小單位，說明 `wales.py` 目前的資料結構、接頭位置型遺傳演算法、材料配置、修補流程與診斷工具。
 
@@ -233,77 +233,11 @@ generate_candidate_joint_points()
 
 正式 `main.py` 會明確傳入 Inventory 表內的所有有效 `Length`，因此正式執行通常不依賴這個預設清單。
 
-## 5. 舊版獨立 GUI
+## 5. GUI 邊界
 
-以下兩個函式是直接執行 `wales.py` 時使用的舊版 GUI。正式應用程式由 `main.py` 提供 GUI。
-
-### `get_initial_config_from_gui(default_total_length, default_support_points)`
-
-用途：
-
-- 輸入總長度
-- 輸入支撐／禁止點
-- 輸入短中長目標比例
-
-它會接受百分比：
-
-```text
-20、50、30
-```
-
-也接受小數：
-
-```text
-0.2、0.5、0.3
-```
-
-最後會把三個比例正規化，使總和等於 `1`。
-
-#### 內部 `on_confirm()`
-
-負責：
-
-- 驗證總長度為正整數
-- 解析支撐點
-- 驗證比例
-- 比例正規化
-- 儲存結果並關閉視窗
-
-#### 內部 `on_cancel()`
-
-負責標記取消並關閉視窗。
-
-目前這條舊流程存在一個注意事項：取消時沒有建立三個比例 key，但函式結尾仍可能存取這些 key。正式 `main.py` 不會呼叫此函式，因此不影響目前主 GUI。
-
-### `get_stock_items_from_gui(lengths, default_qty_map=None)`
-
-用途：讓使用者輸入不同材料長度的庫存數量。
-
-輸出格式：
-
-```python
-[
-    {
-        "id": "A4000",
-        "length": 4000,
-        "qty": 2,
-    }
-]
-```
-
-只有 `qty > 0` 的材料會進入 `stock_items`。
-
-#### 內部 `on_confirm()`
-
-驗證庫存數量：
-
-- 必須是整數
-- 不得小於零
-- `qty = 0` 不加入現有庫存
-
-#### 內部 `on_cancel()`
-
-將結果設為 `None` 並關閉視窗。
+正式實作位於 `bracing_optimizer.algorithms.wales`，不包含 Tkinter、輸入視窗或
+獨立執行流程。GUI 輸入由 `bracing_optimizer.presentation` 負責，再透過
+`bracing_optimizer.application.optimize_waler` 呼叫演算法。
 
 ## 6. 接頭、段長與庫存工具
 
@@ -1096,30 +1030,10 @@ _top_results()
 
 正式 GUI 有自己的結果顯示方式，不使用這個函式。
 
-## 16. 直接執行 `wales.py`
+## 16. 模組執行方式
 
-檔案底部的：
-
-```python
-if __name__ == "__main__":
-```
-
-只有直接執行以下指令時才會進入：
-
-```powershell
-python .\wales.py
-```
-
-流程：
-
-1. 開啟舊版設定 GUI。
-2. 開啟舊版庫存 GUI。
-3. 建立 `Config`。
-4. 執行 `diagnose_search_space()`。
-5. 執行 `evolve()`。
-6. 呼叫 `print_results()`。
-
-由 `main.py` 匯入 `wales.py` 時，這一段不會執行。
+`bracing_optimizer.algorithms.wales` 是由 Application Use Case 呼叫的演算法模組，
+不再提供獨立 GUI 或直接執行入口。正式程式由根目錄 `main.py` 啟動。
 
 ## 17. 正式 GUI 呼叫流程
 

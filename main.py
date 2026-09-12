@@ -2,63 +2,95 @@ import copy
 import json
 import math
 import os
-import queue
 import shutil
 import sys
-import threading
 from collections import Counter
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 import ezdxf
-import wales
-import solver_search
+from bracing_optimizer.algorithms import solver_search, support, wales
 
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = ["Microsoft JhengHei"]
 plt.rcParams["axes.unicode_minus"] = False
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-import support
-from cad_builder import (
-    DEFAULT_TEMP_PATH,
+from app_dependencies import AppDependencies
+from bootstrap import build_dependencies, build_project_service
+from bracing_optimizer.infrastructure.cad_builder import (
     POLL_INTERVAL_MS,
-    CadEventMapper,
-    TempEventWatcher,
 )
-from project_data import DEFAULT_MATERIAL_SPECS, REQUIRED_RC_SPEC
-from project_data import TABLE_COLUMNS as PROJECT_TABLE_COLUMNS
-from project_data import ProjectDataModel
-from inventory_repository import JsonInventoryRepository
-from DXFinput import (
+from bracing_optimizer.application.project_data import (
+    DEFAULT_MATERIAL_SPECS,
+    GEOMETRY_TABLES,
+    REQUIRED_RC_SPEC,
+    ProjectDataModel,
+)
+from bracing_optimizer.application.project_data import (
+    TABLE_COLUMNS as PROJECT_TABLE_COLUMNS,
+)
+from bracing_optimizer.application.solver_input_builder import (
+    InventoryLookup,
+    SolverInputBuildError,
+    UNLIMITED_INVENTORY_QTY,
+)
+from dxf_import import (
+    CoordinateSystem,
     DXFImportDialog,
     DXFImportError,
     _active_monitor_work_areas,
     fit_window_geometry_to_work_areas,
 )
-from cad_view_interaction import CADViewInteractionController
-from dxf_result_export import (
+from bracing_optimizer.presentation.cad_view_interaction import (
+    CADViewInteractionController,
+)
+from bracing_optimizer.infrastructure.dxf_result_export import (
     DXFResultExportError,
     ExportPiece,
     MemberExportPlan,
     build_member_bindings,
     export_results_to_dxf,
 )
-from project_persistence import (
-    DxfAssetManager,
-    DxfCompatibilityChecker,
+from bracing_optimizer.infrastructure.excel_result_export import (
+    ExcelResultExportError,
+)
+from bracing_optimizer.infrastructure.project_persistence import (
     DxfStatus,
     PROJECT_SCHEMA_VERSION,
     ProjectPersistenceError,
-    ProjectSerializer,
 )
+from bracing_optimizer.application.project_service import (
+    RelinkDxfRequest,
+    SaveProjectRequest,
+)
+from bracing_optimizer.application.plan_editing import SupportPlanEditing, WalerPlanEditing
+from bracing_optimizer.application.project_results import (
+    MaterialDetailBuildError,
+    ProjectResultModel,
+)
+from bracing_optimizer.application.project_validation import ProjectDataValidator
+from bracing_optimizer.presentation import (
+    PreviewNavigationToolbar,
+    SolverDialogThreadBridge,
+    SupportSolverDialog,
+    TextRedirector,
+    WalerSelectionDialog,
+    WalerSolverDialog,
+    ZoningSelectionDialog,
+    format_result_list,
+    format_result_value,
+    format_waler_score_breakdown,
+)
+from window_layout import configure_responsive_dialog
 
 
 RESOURCE_DIR = Path(__file__).resolve().parent
@@ -67,80 +99,6 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else RESOURCE_DIR
 )
-UNLIMITED_INVENTORY_QTY = 99
-
-
-class PreviewNavigationToolbar(NavigationToolbar2Tk):
-    """現場圖面只保留全圖與匯出；滑鼠互動由共用控制器處理。"""
-
-    toolitems = (
-        ("全圖", "回到完整圖面", "home", "home"),
-        ("儲存", "儲存圖片", "filesave", "save_figure"),
-    )
-
-    def __init__(
-        self,
-        canvas,
-        window=None,
-        *,
-        pack_toolbar=True,
-        export_callback=None,
-        zoom_getter=None,
-    ):
-        self.export_callback = export_callback
-        self.zoom_getter = zoom_getter
-        self._zoom_percent = 100.0
-        self._base_message = ""
-        super().__init__(canvas, window, pack_toolbar=pack_toolbar)
-
-    @staticmethod
-    def _format_zoom_percent(percent):
-        if math.isclose(percent, round(percent), abs_tol=0.05):
-            return f"{int(round(percent))}%"
-        return f"{percent:.1f}%"
-
-    def set_zoom_percent(self, percent):
-        self._zoom_percent = float(percent)
-        self._refresh_message()
-
-    def sync_zoom_display(self):
-        if self.zoom_getter is not None:
-            self.set_zoom_percent(self.zoom_getter())
-
-    def set_message(self, message):
-        self._base_message = message
-        self._refresh_message()
-
-    def _refresh_message(self):
-        percent = self._zoom_percent
-        if self.zoom_getter is not None:
-            percent = float(self.zoom_getter())
-            self._zoom_percent = percent
-        zoom_text = self._format_zoom_percent(percent)
-        prefix = f"{self._base_message}   " if self._base_message else ""
-        if hasattr(self, "message"):
-            self.message.set(f"{prefix}倍率={zoom_text}")
-
-    def home(self, *args):
-        super().home(*args)
-        self.after_idle(self.sync_zoom_display)
-
-    def pan(self, *args):
-        """Left-button pan is intentionally disabled; middle drag owns Pan."""
-
-        return None
-
-    def zoom(self, *args):
-        """Rectangle zoom is disabled so the left button always means Select."""
-
-        return None
-
-    def save_figure(self, *args):
-        if self.export_callback is not None:
-            return self.export_callback()
-        return super().save_figure(*args)
-
-
 def point_on_line_by_station(start_x, start_y, end_x, end_y, station):
     """
     根據起點、終點與沿線 station 距離，回傳該點的 X,Y 座標。
@@ -215,6 +173,7 @@ class SupportInputApp:
     STRUT_SUMMARY_COLUMNS = (
         "No",
         "StrutID",
+        "SharedLayoutGroup",
         "FromWaler",
         "ToWaler",
         "material_spec",
@@ -225,6 +184,35 @@ class SupportInputApp:
         "walers": ("No", "WalerID", "material_spec"),
         "braces": ("No", "BraceID", "FromWaler", "ToWaler"),
     }
+    DXF_BINDING_FIELDS = {
+        "walers": frozenset(
+            ("WalerID", "StartX", "StartY", "EndX", "EndY")
+        ),
+        "struts": frozenset(
+            (
+                "StrutID",
+                "FromWaler",
+                "ToWaler",
+                "StartX",
+                "StartY",
+                "EndX",
+                "EndY",
+            )
+        ),
+        "braces": frozenset(
+            (
+                "BraceID",
+                "FromWaler",
+                "ToWaler",
+                "StartX",
+                "StartY",
+                "EndX",
+                "EndY",
+            )
+        ),
+    }
+    DXF_BINDING_STALE_KEY = "project_binding_stale"
+    DXF_BINDING_STALE_REASON_KEY = "project_binding_stale_reason"
 
     def _project_display_name(self):
         path = getattr(self, "current_project_path", None)
@@ -259,11 +247,39 @@ class SupportInputApp:
         self._update_window_title()
 
     def _ensure_project_services(self):
-        if not hasattr(self, "dxf_asset_manager"):
-            self.dxf_asset_manager = DxfAssetManager()
-        if not hasattr(self, "dxf_compatibility_checker"):
-            self.dxf_compatibility_checker = DxfCompatibilityChecker()
+        service = getattr(self, "project_service", None)
+        if service is not None:
+            if not hasattr(self, "dxf_asset_manager"):
+                self.dxf_asset_manager = service.dxf_asset_manager
+            if not hasattr(self, "dxf_compatibility_checker"):
+                self.dxf_compatibility_checker = (
+                    service.dxf_compatibility_checker
+                )
+            return self.dxf_asset_manager
+
+        manager = getattr(self, "dxf_asset_manager", None)
+        checker = getattr(self, "dxf_compatibility_checker", None)
+        service = build_project_service(manager, checker)
+        self.project_service = service
+        self.dxf_asset_manager = service.dxf_asset_manager
+        self.dxf_compatibility_checker = service.dxf_compatibility_checker
         return self.dxf_asset_manager
+
+    def _ensure_project_service(self):
+        self._ensure_project_services()
+        service = getattr(self, "project_service", None)
+        if (
+            service is None
+            or service.dxf_asset_manager is not self.dxf_asset_manager
+            or service.dxf_compatibility_checker
+            is not self.dxf_compatibility_checker
+        ):
+            service = build_project_service(
+                self.dxf_asset_manager,
+                self.dxf_compatibility_checker,
+            )
+            self.project_service = service
+        return service
 
     def _ensure_project_data(self):
         model = self.__dict__.get("project_data")
@@ -271,6 +287,42 @@ class SupportInputApp:
             model = ProjectDataModel()
             self.project_data = model
         return model
+
+    def _ensure_project_results(self):
+        model = self.__dict__.get("_project_results")
+        if model is None:
+            model = ProjectResultModel()
+            self._project_results = model
+        return model
+
+    def _ensure_solver_input_builders(self):
+        try:
+            return self.support_input_builder, self.waler_input_builder
+        except AttributeError as exc:
+            raise RuntimeError("Solver Input Builder 尚未由 bootstrap 注入。") from exc
+
+    def _apply_dependencies(self, dependencies: AppDependencies) -> None:
+        """Attach one dependency graph without constructing implementations."""
+
+        self.dependencies = dependencies
+        self.inventory_repository = dependencies.inventory_repository
+        self.project_service = dependencies.project_service
+        # Compatibility aliases remain while the last status-only calls move
+        # behind ProjectService.  They always point at the same injected graph.
+        self.dxf_asset_manager = self.project_service.dxf_asset_manager
+        self.dxf_compatibility_checker = (
+            self.project_service.dxf_compatibility_checker
+        )
+        self.support_input_builder = dependencies.support_input_builder
+        self.waler_input_builder = dependencies.waler_input_builder
+        self.cad_event_watcher = dependencies.cad_event_watcher
+        self.cad_event_mapper = dependencies.cad_event_mapper
+        self.excel_result_exporter = dependencies.excel_result_exporter
+        self.make_waler_optimizer = dependencies.make_waler_optimizer
+        self.make_support_optimizer = dependencies.make_support_optimizer
+        self.default_inventory_path = Path(dependencies.default_inventory_path)
+        self.data_dir = self.default_inventory_path.parent
+        self.project_cases_dir = Path(dependencies.project_cases_dir)
 
     @property
     def walers(self):
@@ -312,7 +364,35 @@ class SupportInputApp:
     def material_specs(self, rows):
         self._ensure_project_data().replace_table("material_specs", rows)
 
-    def __init__(self, root):
+    @property
+    def result_items(self):
+        return self._ensure_project_results().result_items
+
+    @result_items.setter
+    def result_items(self, items):
+        self._ensure_project_results().result_items = items
+
+    @property
+    def project_result(self):
+        return self._ensure_project_results().persisted_payload
+
+    @project_result.setter
+    def project_result(self, payload):
+        self._ensure_project_results().persisted_payload = payload
+
+    @property
+    def last_calculated_time(self):
+        return self._ensure_project_results().last_calculated_time
+
+    @last_calculated_time.setter
+    def last_calculated_time(self, value):
+        self._ensure_project_results().last_calculated_time = value
+
+    def __init__(
+        self,
+        root,
+        dependencies: AppDependencies | None = None,
+    ):
         self.root = root
         self.root.title(self.WINDOW_TITLE)
         self.main_ui_state = self._load_main_ui_state()
@@ -325,24 +405,23 @@ class SupportInputApp:
         self.root.resizable(True, True)
         self.root.bind("<Configure>", self._on_main_window_configure)
 
+        dependencies = dependencies or build_dependencies(
+            resource_dir=RESOURCE_DIR,
+            app_dir=APP_DIR,
+        )
         self.project_data = ProjectDataModel()
-        self.result_items = {}
-        self.project_result = None
-        self.last_calculated_time = None
+        self._project_results = ProjectResultModel()
+        self._apply_dependencies(dependencies)
         self.current_project_path = None
         self.project_dirty = False
         self.project_dirty_reason = ""
         self.dxf_asset = None
-        self.dxf_asset_manager = DxfAssetManager()
-        self.dxf_compatibility_checker = DxfCompatibilityChecker()
-        self.dxf_asset_status_report = self.dxf_asset_manager.inspect(
+        self.dxf_asset_status_report = self.project_service.inspect_dxf_state(
             None, None, None
         )
         self.last_dxf_compatibility_report = None
         self.solver_memory = {}
         self.support_candidate_cache = {}
-        self.cad_event_mapper = CadEventMapper()
-        self.cad_event_watcher = TempEventWatcher(DEFAULT_TEMP_PATH)
         self.cad_import_enabled = True
         self.dxf_dialog_active = False
         self.dxf_import_status = "尚未執行 DXF 批次匯入"
@@ -352,12 +431,6 @@ class SupportInputApp:
         self.cad_last_error = None
         self.dxf_last_import_debug = None
         self._cad_poll_after_id = None
-        self.data_dir = RESOURCE_DIR / "data"
-        self.default_inventory_path = self.data_dir / "inventory.json"
-        self.inventory_repository = JsonInventoryRepository(
-            self.default_inventory_path
-        )
-        self.project_cases_dir = APP_DIR / "project_cases"
         self.project_cases_dir.mkdir(exist_ok=True)
         self.inventory = self._load_default_inventory()
 
@@ -394,6 +467,7 @@ class SupportInputApp:
             "struts": {
                 "No": "列號",
                 "StrutID": "支撐編號",
+                "SharedLayoutGroup": "雙路群組",
                 "FromWaler": "起點圍令",
                 "ToWaler": "終點圍令",
                 "StartX": "起點X",
@@ -540,7 +614,16 @@ class SupportInputApp:
         self._create_results_tab(parent=self.analysis_workspace)
 
         self.context_toolbar = ttk.Frame(self.root)
-        self.context_toolbar.pack(fill="x", padx=8, pady=4)
+        # Reserve the action row before the expanding workspace is laid out.
+        # Otherwise the workspace's requested height can push these controls
+        # below the visible client area on 1024x768 projectors.
+        self.context_toolbar.pack(
+            side="bottom",
+            fill="x",
+            padx=8,
+            pady=4,
+            before=self.main_paned,
+        )
 
         self.context_toolbar_context_var = tk.StringVar(value="目前區域：圍令")
         ttk.Label(
@@ -897,6 +980,7 @@ class SupportInputApp:
         widths = {
             "No": (52, False),
             "StrutID": (82, True),
+            "SharedLayoutGroup": (82, True),
             "FromWaler": (82, True),
             "ToWaler": (82, True),
             "material_spec": (110, True),
@@ -1033,6 +1117,7 @@ class SupportInputApp:
             "基本資訊",
             (
                 ("StrutID", "支撐編號", "entry"),
+                ("SharedLayoutGroup", "雙路共用配置群組", "entry"),
                 ("material_spec", "材料規格", "material"),
                 ("TargetJackRegion", "目標千斤頂區域", "jack"),
                 ("Zoning", "分區", "entry"),
@@ -1270,13 +1355,11 @@ class SupportInputApp:
         if index is None or not (0 <= index < len(rows)):
             return
         raw_value = self.geometry_detail_vars[table_name][column].get().strip()
-        value = self._parse_cell_value(table_name, column, raw_value)
-        error = self._validate_geometry_detail_value(
+        changed, value, error = self._commit_project_field_edit(
             table_name,
             index,
             column,
             raw_value,
-            value,
         )
         status_label = self.geometry_detail_status_labels[table_name]
         status_var = self.geometry_detail_status_vars[table_name]
@@ -1284,20 +1367,14 @@ class SupportInputApp:
             status_label.configure(foreground="#b71c1c")
             status_var.set(error + " 已保留原值；按 Esc 可還原欄位。")
             return
-        if value == rows[index].get(column, ""):
+        if not changed:
             status_var.set("")
             return
 
-        rows[index][column] = value
         tree = self.treeviews[table_name]
         row_id = f"{table_name}_{index}"
         if row_id in tree.get_children() and column in tree["columns"]:
             tree.set(row_id, column, self._format_display_value(value))
-        self._handle_input_data_changed(
-            preserve_view=True,
-            table_name=table_name,
-            field_name=column,
-        )
         self._load_geometry_detail(table_name, index)
         status_label.configure(foreground="#2e7d32")
         status_var.set(f"已儲存：{self._field_label(table_name, column)}")
@@ -1413,16 +1490,77 @@ class SupportInputApp:
                 return f"{label}必須是數字。"
             if not math.isfinite(float(value)):
                 return f"{label}必須是有限數字。"
-        if column in dict(self.STRUT_BRACE_LENGTH_FIELDS) and float(value) < 0:
-            return f"{label}不可為負數。"
-        if column == "TargetJackRegion":
-            if not float(value).is_integer() or value <= 0:
-                return "目標千斤頂區域必須是大於 0 的整數。"
+            if column in dict(self.STRUT_BRACE_LENGTH_FIELDS) and float(value) < 0:
+                return f"{label}不可為負數。"
+            if column == "TargetJackRegion":
+                if not float(value).is_integer() or value <= 0:
+                    return "目標千斤頂區域必須是大於 0 的整數。"
         if column in ("FromWaler", "ToWaler") and raw_value:
             other = "ToWaler" if column == "FromWaler" else "FromWaler"
             if raw_value == str(self.struts[index].get(other, "") or "").strip():
                 return "起點圍令與終點圍令不可相同。"
         return ""
+
+    def _validate_project_field_value(
+        self,
+        table_name,
+        index,
+        column,
+        raw_value,
+        value,
+    ):
+        """Apply the same local field checks for both Main editing surfaces."""
+
+        if table_name == "struts":
+            return self._validate_strut_detail_value(
+                index,
+                column,
+                raw_value,
+                value,
+            )
+        if table_name in ("walers", "braces"):
+            return self._validate_geometry_detail_value(
+                table_name,
+                index,
+                column,
+                raw_value,
+                value,
+            )
+        return ""
+
+    def _commit_project_field_edit(
+        self,
+        table_name,
+        index,
+        column,
+        raw_value,
+    ):
+        """Parse, locally validate, commit, and run shared post-processing."""
+
+        rows = getattr(self, table_name, ())
+        if not (0 <= index < len(rows)):
+            return False, None, "找不到要修改的資料列。"
+        raw_value = "" if raw_value is None else str(raw_value).strip()
+        value = self._parse_cell_value(table_name, column, raw_value)
+        error = self._validate_project_field_value(
+            table_name,
+            index,
+            column,
+            raw_value,
+            value,
+        )
+        if error:
+            return False, value, error
+        if value == rows[index].get(column, ""):
+            return False, value, ""
+
+        rows[index][column] = value
+        self._handle_input_data_changed(
+            preserve_view=True,
+            table_name=table_name,
+            field_name=column,
+        )
+        return True, value, ""
 
     def _commit_strut_detail_field(self, column):
         if getattr(self, "_loading_strut_detail", False):
@@ -1431,18 +1569,21 @@ class SupportInputApp:
         if index is None or not (0 <= index < len(self.struts)):
             return
         raw_value = self.strut_detail_vars[column].get().strip()
-        value = self._parse_cell_value("struts", column, raw_value)
-        error = self._validate_strut_detail_value(index, column, raw_value, value)
+        changed, value, error = self._commit_project_field_edit(
+            "struts",
+            index,
+            column,
+            raw_value,
+        )
         if error:
             self.strut_detail_status_label.configure(foreground="#b71c1c")
             self.strut_detail_status_var.set(error + " 已保留原值；按 Esc 可還原欄位。")
             return
 
         row = self.struts[index]
-        if value == row.get(column, ""):
+        if not changed:
             self.strut_detail_status_var.set("")
             return
-        row[column] = value
         tree = self.treeviews["struts"]
         row_id = f"struts_{index}"
         if row_id in tree.get_children() and column in tree["columns"]:
@@ -1450,11 +1591,6 @@ class SupportInputApp:
         self._update_strut_detail_length(row)
         self.strut_detail_status_label.configure(foreground="#2e7d32")
         self.strut_detail_status_var.set(f"已儲存：{self._field_label('struts', column)}")
-        self._handle_input_data_changed(
-            preserve_view=True,
-            table_name="struts",
-            field_name=column,
-        )
         self._sync_preview_to_strut_selection(index)
 
     def _build_project_menu_and_toolbar(self):
@@ -1744,7 +1880,8 @@ class SupportInputApp:
         ttk.Label(
             frame,
             text=(
-                "點選「顯示」欄切換結果顯示；雙擊群組可展開/收合，雙擊方案可查看詳細配置。"
+                "點選「顯示」欄切換結果顯示；雙擊群組可展開/收合；"
+                "雙擊圍令方案可直接編輯，雙擊支撐方案可編輯配置。"
                 "可同時統計多筆圍令與支撐結果。"
             ),
         ).pack(fill="x", padx=6, pady=(0, 4))
@@ -1761,18 +1898,12 @@ class SupportInputApp:
 
         result_action_frame = ttk.Frame(frame)
         result_action_frame.pack(fill="x", padx=4, pady=(0, 6))
-        self.create_custom_plan_button = ttk.Button(
+        self.export_results_excel_button = ttk.Button(
             result_action_frame,
-            text="建立自訂方案",
-            command=self._create_custom_waler_plan_from_selection,
+            text="匯出目前 0 個配置成果 Excel",
+            command=self._export_visible_results_to_excel,
         )
-        self.create_custom_plan_button.pack(side="left", padx=(0, 6))
-        self.delete_result_plan_button = ttk.Button(
-            result_action_frame,
-            text="刪除方案",
-            command=self._delete_selected_result_plan,
-        )
-        self.delete_result_plan_button.pack(side="left", padx=(0, 6))
+        self.export_results_excel_button.pack(side="left", padx=(0, 6))
         material_frame = ttk.LabelFrame(material_tab, text="目前顯示方案的材料用量與庫存比較")
         material_frame.pack(fill="both", expand=True, padx=8, pady=8)
         material_frame.rowconfigure(1, weight=1)
@@ -2079,10 +2210,12 @@ class SupportInputApp:
                 f"狀態說明：{report.summary}",
             ])
             lines.extend(report.messages)
+        if self._dxf_binding_is_stale():
+            lines.append("DXF 綁定：工程資料已修改，重新確認前不可匯出成果")
         compatibility = getattr(self, "last_dxf_compatibility_report", None)
         if compatibility is not None:
             lines.append(
-                "重新連結相容性："
+                "最近 DXF 相容性："
                 + status_labels.get(compatibility.status, compatibility.status.value)
             )
             lines.append(
@@ -2108,6 +2241,8 @@ class SupportInputApp:
                 if report is not None
                 else "尚未檢查"
             )
+            if self._dxf_binding_is_stale():
+                dxf_text += "／工程資料已修改"
             quick_variable.set(
                 f"目前專案：{self._project_display_name()}｜DXF：{dxf_text}"
             )
@@ -2279,7 +2414,7 @@ class SupportInputApp:
             self.project_case_var.set("")
         self.dxf_last_import_debug = None
         self.dxf_asset = None
-        self.dxf_asset_status_report = self._ensure_project_services().inspect(
+        self.dxf_asset_status_report = self._ensure_project_service().inspect_dxf_state(
             None, None, None
         )
         self.last_dxf_compatibility_report = None
@@ -2305,28 +2440,22 @@ class SupportInputApp:
         )
         if not file_path:
             return
-        manager = self._ensure_project_services()
+        service = self._ensure_project_service()
         saved_state = getattr(self, "dxf_last_import_debug", None)
         try:
-            candidate_info = manager.file_info(file_path)
-            expected_hash = str(
-                (getattr(self, "dxf_asset", None) or {}).get("sha256", "") or ""
+            request = RelinkDxfRequest(
+                candidate_path=Path(file_path),
+                saved_state=saved_state,
+                existing_asset=getattr(self, "dxf_asset", None),
+                current_dxf_report=getattr(
+                    self,
+                    "dxf_asset_status_report",
+                    None,
+                ),
+                project_rows=self._project_rows_by_table(),
             )
-            if not expected_hash:
-                current_report = getattr(self, "dxf_asset_status_report", None)
-                if current_report is not None and current_report.active_source is not None:
-                    expected_hash = current_report.active_source.sha256
-
-            if (
-                expected_hash
-                and candidate_info.sha256 == expected_hash
-                and isinstance(saved_state, dict)
-            ):
-                relinked_state = copy.deepcopy(saved_state)
-                relinked_state["source_path"] = str(Path(file_path).resolve())
-                compatibility = None
-                summary = "重新連結 DXF 與專案記錄完全一致"
-            else:
+            result = service.try_exact_relink(request)
+            if result is None:
                 self.dxf_dialog_active = True
                 try:
                     payload = DXFImportDialog(
@@ -2340,83 +2469,46 @@ class SupportInputApp:
                 if payload is None:
                     return
                 candidate_result, _unused_mode = payload
-                candidate_state = candidate_result.to_debug_dict()
-                input_data = self._project_rows_by_table()
-                if isinstance(saved_state, dict):
-                    compatibility = self.dxf_compatibility_checker.compare(
-                        saved_state,
-                        candidate_state,
-                        input_data,
+                result = service.relink_dxf(
+                    RelinkDxfRequest(
+                        candidate_path=Path(file_path),
+                        saved_state=saved_state,
+                        existing_asset=getattr(self, "dxf_asset", None),
+                        current_dxf_report=getattr(
+                            self,
+                            "dxf_asset_status_report",
+                            None,
+                        ),
+                        project_rows=request.project_rows,
+                        candidate_state=candidate_result.to_debug_dict(),
                     )
-                    if compatibility.compatible:
-                        relinked_state = (
-                            self.dxf_compatibility_checker.merge_source_references(
-                                saved_state,
-                                candidate_state,
-                                compatibility,
-                                source_path=file_path,
-                            )
-                        )
-                    else:
-                        relinked_state = None
-                else:
-                    compatibility = (
-                        self.dxf_compatibility_checker.compare_candidate_to_solver(
-                            candidate_state,
-                            input_data,
-                        )
-                    )
-                    if compatibility.compatible:
-                        relinked_state = (
-                            self.dxf_compatibility_checker.adopt_candidate_state_for_solver(
-                                candidate_state,
-                                compatibility,
-                                source_path=file_path,
-                            )
-                        )
-                    else:
-                        relinked_state = None
-                self.last_dxf_compatibility_report = compatibility
-                self._refresh_project_status_display()
-                if relinked_state is None:
-                    details = "\n".join(compatibility.summary_lines())
-                    self.dxf_asset_status_report = manager.rejected_relink_report(
-                        file_path,
-                        status=compatibility.status,
-                        messages=compatibility.summary_lines(),
-                    )
-                    self._refresh_project_status_display()
-                    self._set_dxf_import_status(
-                        "DXF 重新連結尚未通過",
-                        source=file_path,
-                        error=details,
-                    )
-                    self.show_result(
-                        "DXF 重新連結未套用；原專案、Solver 結果與材料配置均未變更。\n"
-                        + details
-                    )
-                    return
-                summary = "DXF 幾何相容性已確認"
+                )
 
-            self.dxf_last_import_debug = relinked_state
-            self.dxf_asset_status_report = manager.accepted_relink_report(
-                file_path,
-                summary=summary,
-            )
-            self.last_dxf_compatibility_report = compatibility
+            self.last_dxf_compatibility_report = result.compatibility_report
+            self.dxf_asset_status_report = result.dxf_status_report
+            self._refresh_project_status_display()
+            if not result.accepted:
+                details = "\n".join(result.detail_lines)
+                self._set_dxf_import_status(
+                    "DXF 重新連結尚未通過",
+                    source=file_path,
+                    error=details,
+                )
+                self.show_result(
+                    "DXF 重新連結未套用；原專案、Solver 結果與材料配置均未變更。\n"
+                    + details
+                )
+                return
+
+            self.dxf_last_import_debug = result.relinked_state
             self._mark_project_dirty("DXF 已重新連結，尚未保存管理副本")
             self._set_dxf_import_status(
                 "DXF 重新連結成功，等待儲存專案",
                 source=file_path,
             )
-            detail_lines = (
-                compatibility.summary_lines()
-                if compatibility is not None
-                else ("SHA-256 完全一致",)
-            )
             self.show_result(
                 "DXF 重新連結已驗證；Solver 結果、材料配置與既有人工修正均已保留。\n"
-                + "\n".join(detail_lines)
+                + "\n".join(result.detail_lines)
                 + "\n請儲存專案以更新 source/source.dxf。"
             )
         except (
@@ -2435,10 +2527,7 @@ class SupportInputApp:
     def _load_default_inventory(self):
         repository = getattr(self, "inventory_repository", None)
         if repository is None:
-            path = getattr(self, "default_inventory_path", None)
-            if path is None:
-                return []
-            repository = JsonInventoryRepository(path)
+            return []
         return repository.list_items()
 
     def save_project_case(self, project_name):
@@ -2446,79 +2535,37 @@ class SupportInputApp:
         if path is None:
             raise ValueError("專案名稱不可空白。")
         payload = self._build_project_payload(path)
-        manager = self._ensure_project_services()
-        active_source = self._active_dxf_source_for_save()
-        current_path = getattr(self, "current_project_path", None)
-        is_save_as = (
-            current_path is not None
-            and Path(current_path).resolve() != Path(path).resolve()
-        )
-        if is_save_as and getattr(self, "dxf_asset", None) is not None and active_source is None:
-            raise ProjectPersistenceError(
-                "另存新專案失敗",
-                "目前 DXF 管理副本不可用，請先重新連結 DXF，避免建立不完整的新專案。",
+        result = self._ensure_project_service().save_project(
+            SaveProjectRequest(
+                project_path=path,
+                payload=payload,
+                current_project_path=getattr(self, "current_project_path", None),
+                existing_asset=getattr(self, "dxf_asset", None),
+                import_state=getattr(self, "dxf_last_import_debug", None),
+                current_dxf_report=getattr(
+                    self,
+                    "dxf_asset_status_report",
+                    None,
+                ),
+                has_solver_result=bool(self.result_items),
             )
-        result = manager.save_project(
-            path,
-            payload,
-            active_source=active_source,
-            existing_asset=getattr(self, "dxf_asset", None),
         )
         self.dxf_asset = copy.deepcopy(result.dxf_asset)
         self.current_project_path = result.project_path
-        self.project_result = copy.deepcopy(payload.get("result"))
-        self.dxf_asset_status_report = manager.inspect(
-            result.project_path,
-            self.dxf_asset,
-            self.dxf_last_import_debug,
-            has_solver_result=bool(self.result_items),
-            repair=False,
-        )
+        self.project_result = copy.deepcopy(result.payload.get("result"))
+        self.dxf_asset_status_report = result.dxf_status_report
         self._clear_project_dirty()
         return result.project_path
-
-    def _active_dxf_source_for_save(self):
-        manager = self._ensure_project_services()
-        report = getattr(self, "dxf_asset_status_report", None)
-        if report is not None and report.active_source is not None:
-            return report.active_source
-
-        state = getattr(self, "dxf_last_import_debug", None)
-        if getattr(self, "dxf_asset", None) is None and isinstance(state, dict):
-            source_text = str(state.get("source_path", "") or "")
-            source_path = Path(source_text) if source_text else None
-            if source_path is not None and source_path.is_file():
-                # Explicit project save is the migration point for an old
-                # unmanaged dxf_import_state.
-                return manager.verified_source(
-                    source_path,
-                    DxfStatus.RUNTIME_READY,
-                    original_path=source_path,
-                )
-        return None
 
     def load_project_case(self, project_name, *, silent=False):
         path = self._project_case_path(project_name)
         if path is None or not path.is_file():
             raise FileNotFoundError(f"找不到專案：{project_name}")
 
-        raw_payload = json.loads(path.read_text(encoding="utf-8"))
-        legacy_no_state = (
-            "dxf_asset" not in raw_payload
-            and not isinstance(raw_payload.get("dxf_import_state"), dict)
-        )
-        payload = ProjectSerializer.migrate(raw_payload)
-        ProjectSerializer.validate(payload)
-        self._apply_project_payload(payload, path)
-        manager = self._ensure_project_services()
-        self.dxf_asset_status_report = manager.inspect(
-            path,
-            self.dxf_asset,
-            self.dxf_last_import_debug,
-            has_solver_result=bool(self.result_items),
-            legacy_no_state=legacy_no_state,
-            repair=True,
-        )
+        result = self._ensure_project_service().load_project(path)
+        payload = result.payload
+        self._apply_project_payload(payload, result.project_path)
+        self.dxf_asset_status_report = result.dxf_status_report
         self.last_dxf_compatibility_report = None
         self._clear_project_dirty()
         display_name = self._project_case_name_from_path(path)
@@ -2546,154 +2593,35 @@ class SupportInputApp:
         return payload
 
     def _build_material_summary_payload(self):
-        usage = self._collect_visible_material_usage()
-        summary = []
-        for usage_name, material_spec, length in sorted(usage):
-            used_quantity = usage[(usage_name, material_spec, length)]
-            inventory_quantity = self._inventory_quantity(
-                material_spec,
-                usage_name,
-                length,
-            )
-            remaining_quantity = (
-                UNLIMITED_INVENTORY_QTY
-                if not material_spec
-                else inventory_quantity - used_quantity
-            )
-            summary.append({
-                "usage": usage_name,
-                "material_spec": material_spec,
-                "length": length,
-                "used_qty": used_quantity,
-                "inventory_qty": inventory_quantity,
-                "remaining_qty": remaining_quantity,
-            })
-        return summary
+        return ProjectResultModel.build_material_summary(
+            self._collect_visible_material_usage(),
+            self._inventory_quantity,
+            unlimited_quantity=UNLIMITED_INVENTORY_QTY,
+        )
 
     @staticmethod
     def _serialize_support_plan(plan):
-        return {
-            "support_id": getattr(plan, "support_id", ""),
-            "pieces": [list(piece) for piece in getattr(plan, "pieces", []) or []],
-            "joints": list(getattr(plan, "joints", []) or []),
-            "gap": getattr(plan, "gap", 0),
-            "jack_center": getattr(plan, "jack_center", 0),
-            "jack_region_id": getattr(plan, "jack_region_id", 0),
-            "score": getattr(plan, "score", 0),
-            "valid": bool(getattr(plan, "valid", False)),
-            "pile_centers": list(getattr(plan, "pile_centers", []) or []),
-            "waler_centers": list(getattr(plan, "waler_centers", []) or []),
-            "reason": getattr(plan, "reason", ""),
-            "breakdown": dict(getattr(plan, "breakdown", {}) or {}),
-            "material_spec": getattr(plan, "material_spec", ""),
-        }
+        return ProjectResultModel.serialize_support_plan(plan)
 
     @staticmethod
     def _deserialize_support_plan(data):
-        return support.SupportPlan(
-            support_id=str(data.get("support_id", "") or ""),
-            pieces=[
-                (str(piece[0]), int(piece[1]))
-                for piece in list(data.get("pieces", []) or [])
-                if isinstance(piece, (list, tuple)) and len(piece) == 2
-            ],
-            joints=list(data.get("joints", []) or []),
-            gap=data.get("gap", 0),
-            jack_center=data.get("jack_center", 0),
-            jack_region_id=data.get("jack_region_id", 0),
-            score=data.get("score", 0),
-            valid=bool(data.get("valid", False)),
-            pile_centers=list(data.get("pile_centers", []) or []),
-            waler_centers=list(data.get("waler_centers", []) or []),
-            reason=str(data.get("reason", "") or ""),
-            breakdown=dict(data.get("breakdown", {}) or {}),
-            material_spec=str(data.get("material_spec", "") or ""),
-        )
+        return ProjectResultModel.deserialize_support_plan(data)
 
-    def _serialize_result_item(self, result_id, item):
-        result_type = item.get("type")
-        result = item.get("result")
-        if result_type == "support":
-            serialized_result = {
-                "total_score": getattr(result, "total_score", 0),
-                "valid": bool(getattr(result, "valid", False)),
-                "reason": getattr(result, "reason", ""),
-                "single_score_total": getattr(result, "single_score_total", 0),
-                "jack_region_penalty": getattr(result, "jack_region_penalty", 0),
-                "material_ratio_penalty": getattr(result, "material_ratio_penalty", 0),
-                "material_ratio_analysis": copy.deepcopy(getattr(result, "material_ratio_analysis", {}) or {}),
-                "material_ratio_targets": copy.deepcopy(getattr(result, "material_ratio_targets", {}) or {}),
-                "material_ratio_weight": getattr(result, "material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
-                "min_jack_distance": getattr(result, "min_jack_distance", None),
-                "search_diagnostics": copy.deepcopy(
-                    getattr(result, "search_diagnostics", {}) or {}
-                ),
-                "plans": [
-                    self._serialize_support_plan(plan)
-                    for plan in list(getattr(result, "plans", []) or [])
-                ],
-            }
-        else:
-            serialized_result = copy.deepcopy(result)
+    @staticmethod
+    def _serialize_result_item(result_id, item):
+        return ProjectResultModel.serialize_result_item(result_id, item)
 
-        payload = {
-            "id": result_id,
-            "type": result_type,
-            "visible": bool(item.get("visible", True)),
-            "result": serialized_result,
-        }
-        if "support_visibility" in item:
-            payload["support_visibility"] = copy.deepcopy(item.get("support_visibility") or {})
-        return payload
-
-    def _deserialize_result_item(self, payload):
-        result_type = payload.get("type")
-        result = payload.get("result")
-        if result_type == "support" and isinstance(result, dict):
-            result = support.GlobalSolution(
-                plans=[
-                    self._deserialize_support_plan(plan_data)
-                    for plan_data in list(result.get("plans", []) or [])
-                    if isinstance(plan_data, dict)
-                ],
-                total_score=result.get("total_score", 0),
-                valid=bool(result.get("valid", False)),
-                reason=str(result.get("reason", "") or ""),
-                single_score_total=result.get("single_score_total", 0),
-                jack_region_penalty=result.get("jack_region_penalty", 0),
-                material_ratio_penalty=result.get("material_ratio_penalty", 0),
-                material_ratio_analysis=dict(result.get("material_ratio_analysis", {}) or {}),
-                material_ratio_targets=dict(result.get("material_ratio_targets", {}) or {}),
-                material_ratio_weight=result.get("material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
-                min_jack_distance=result.get("min_jack_distance", None),
-                search_diagnostics=dict(result.get("search_diagnostics", {}) or {}),
-            )
-        else:
-            result = copy.deepcopy(result)
-
-        item = {
-            "type": result_type,
-            "result": result,
-            "visible": bool(payload.get("visible", True)),
-        }
-        if isinstance(payload.get("support_visibility"), dict):
-            item["support_visibility"] = copy.deepcopy(payload["support_visibility"])
-        return item
+    @staticmethod
+    def _deserialize_result_item(payload):
+        return ProjectResultModel.deserialize_result_item(payload)
 
     def _build_project_result_payload(self):
-        if not self.result_items:
-            return None
-        last_calculated_time = self.last_calculated_time or datetime.now().isoformat(timespec="seconds")
-        return {
-            "last_calculated_time": last_calculated_time,
-            "material_summary": self._build_material_summary_payload(),
-            "best_solution": {
-                "result_items": [
-                    self._serialize_result_item(result_id, item)
-                    for result_id, item in sorted(self.result_items.items())
-                ],
-            },
-        }
+        model = ProjectResultModel(
+            result_items=self.result_items,
+            last_calculated_time=self.last_calculated_time,
+            persisted_payload=self.project_result,
+        )
+        return model.to_payload(self._build_material_summary_payload())
 
     def _mark_results_updated(self):
         self.last_calculated_time = datetime.now().isoformat(timespec="seconds")
@@ -2722,7 +2650,7 @@ class SupportInputApp:
         }
 
     def _apply_project_payload(self, payload, path=None):
-        input_data = payload.get("input_data") or payload.get("data") or payload
+        input_data = payload["input_data"]
         result_payload = payload.get("result", None)
         dxf_import_state = payload.get("dxf_import_state")
         dxf_asset = payload.get("dxf_asset")
@@ -2737,9 +2665,9 @@ class SupportInputApp:
             else None
         )
 
-        self.walers = copy.deepcopy(input_data.get("walers", []))
-        self.struts = copy.deepcopy(input_data.get("struts", []))
-        self.braces = copy.deepcopy(input_data.get("braces", []))
+        self.walers = copy.deepcopy(input_data["walers"])
+        self.struts = copy.deepcopy(input_data["struts"])
+        self.braces = copy.deepcopy(input_data["braces"])
         self.inventory = copy.deepcopy(
             input_data.get("inventory", self._load_default_inventory())
         )
@@ -2825,25 +2753,14 @@ class SupportInputApp:
     def _update_result_action_states(self, _event=None):
         if not hasattr(self, "results_tree"):
             return
-        selected = self.results_tree.selection()
-        selected_id = selected[0] if selected else None
-        selected_item = self.result_items.get(selected_id)
-
-        can_create_custom = bool(
-            selected_item and selected_item.get("type") == "waler"
-        )
-        can_delete = bool(
-            selected_item and self._is_custom_result_item(selected_item)
-        )
-        self.create_custom_plan_button.configure(
-            state="normal" if can_create_custom else "disabled"
-        )
-        self.delete_result_plan_button.configure(
-            state="normal" if can_delete else "disabled"
-        )
 
         counts, conflicts = self._visible_result_scope()
         total = counts["waler"] + counts["support"]
+        can_export_excel = total > 0 and not conflicts
+        self.export_results_excel_button.configure(
+            text=f"匯出目前 {total} 個配置成果 Excel",
+            state="normal" if can_export_excel else "disabled",
+        )
         has_dxf = isinstance(getattr(self, "dxf_last_import_debug", None), dict)
         can_export = total > 0 and not conflicts and has_dxf
         self.export_results_dxf_button.configure(
@@ -2853,7 +2770,7 @@ class SupportInputApp:
 
         scope_text = (
             f"目前顯示：圍令 {counts['waler']} 個、支撐 {counts['support']} 支；"
-            "材料統計與 DXF 匯出皆以這些顯示方案為範圍。"
+            "材料統計、Excel 與 DXF 匯出皆以這些顯示方案為範圍。"
         )
         if conflicts:
             conflict_text = "、".join(
@@ -2863,7 +2780,10 @@ class SupportInputApp:
             scope_text += f"  ⚠ {conflict_text}；匯出前請每個構件只保留一個方案。"
             color = "#b71c1c"
         elif total and not has_dxf:
-            scope_text += "  尚未有已確認的 DXF 工程幾何，因此目前不能匯出 DXF。"
+            scope_text += (
+                "  尚未有已確認的 DXF 工程幾何，因此目前不能匯出 DXF；"
+                "Excel 材料明細仍可匯出。"
+            )
             color = "#8a5a00"
         else:
             color = "#37474f"
@@ -2897,6 +2817,10 @@ class SupportInputApp:
         if self._is_support_plan_iid(result_id):
             zoning, support_id = self._parse_support_plan_iid(result_id)
             self._open_support_plan_editor(zoning, support_id)
+            return "break"
+        item = self.result_items.get(result_id)
+        if item and item.get("type") == "waler":
+            self._open_waler_plan_editor(result_id)
             return "break"
         self._show_result_details(result_id)
         return "break"
@@ -2943,87 +2867,6 @@ class SupportInputApp:
             text="關閉",
             command=detail_window.destroy,
         ).pack(anchor="e", padx=8, pady=(4, 8))
-
-    def _selected_result_id_for_custom_plan(self):
-        if not hasattr(self, "results_tree"):
-            return None
-        selected = self.results_tree.selection()
-        if not selected:
-            return None
-        selected_id = selected[0]
-        if self._is_result_group_iid(selected_id):
-            children = self.results_tree.get_children(selected_id)
-            return children[0] if children else None
-        return selected_id
-
-    def _selected_result_id_for_delete(self):
-        if not hasattr(self, "results_tree"):
-            return None
-        selected = self.results_tree.selection()
-        if not selected:
-            return None
-        selected_id = selected[0]
-        if self._is_result_group_iid(selected_id):
-            return None
-        return selected_id
-
-    @staticmethod
-    def _is_custom_result_item(item):
-        result = item.get("result") if isinstance(item, dict) else None
-        return isinstance(result, dict) and bool(result.get("custom"))
-
-    @staticmethod
-    def _delete_result_display_name(result_id, item):
-        result = item.get("result") if isinstance(item, dict) else None
-        if isinstance(result, dict) and item.get("type") == "waler":
-            waler_id = str(result.get("waler_id", "") or "").strip()
-            custom_label = str(result.get("custom_label", "") or "").strip()
-            if waler_id and custom_label:
-                return f"{waler_id}-{custom_label}"
-        return str(result_id)
-
-    def _remove_result_from_session_caches(self, result_id):
-        self.solver_memory.pop(result_id, None)
-        self.support_candidate_cache.pop(result_id, None)
-
-    def _delete_selected_result_plan(self):
-        result_id = self._selected_result_id_for_delete()
-        if not result_id:
-            messagebox.showwarning("刪除方案", "請先在結果頁中選擇要刪除的自訂方案。")
-            return
-
-        item = self.result_items.get(result_id)
-        if item is None:
-            return
-
-        if not self._is_custom_result_item(item):
-            messagebox.showwarning(
-                "刪除方案",
-                "系統產生方案不可刪除。\n請先建立自訂方案再進行編輯。",
-            )
-            return
-
-        display_name = self._delete_result_display_name(result_id, item)
-        confirmed = messagebox.askyesno(
-            "刪除方案",
-            f"確定要刪除：\n{display_name}\n嗎？",
-        )
-        if not confirmed:
-            return
-
-        group_iid = self._get_result_tree_info(result_id, item)["group_iid"]
-        self.result_items.pop(result_id, None)
-        self._remove_result_from_session_caches(result_id)
-        self._mark_results_updated()
-
-        remaining_entries = self._get_result_group_entries(group_iid)
-        next_selected = remaining_entries[0][0] if remaining_entries else None
-        self._refresh_results_tree(selected_id=next_selected)
-        if next_selected and self.results_tree.exists(next_selected):
-            parent_id = self.results_tree.parent(next_selected)
-            if parent_id:
-                self.results_tree.item(parent_id, open=True)
-        self.update_preview(preserve_view=True)
 
     def _visible_dxf_export_plans(self):
         plans = []
@@ -3084,6 +2927,93 @@ class SupportInputApp:
                     )
         return plans
 
+    def _export_visible_results_to_excel(self):
+        counts, conflicts = self._visible_result_scope()
+        total = counts["waler"] + counts["support"]
+        if not total:
+            messagebox.showwarning(
+                "匯出 Excel",
+                "目前沒有勾選為可見的圍令或支撐配置。",
+                parent=self.root,
+            )
+            return
+        if conflicts:
+            details = "\n".join(
+                f"- {kind} {member_id}：{quantity} 個方案"
+                for kind, member_id, quantity in conflicts
+            )
+            messagebox.showwarning(
+                "匯出範圍衝突",
+                (
+                    "同一構件不能同時匯出多個方案：\n\n"
+                    f"{details}\n\n請先取消多餘方案的顯示。"
+                ),
+                parent=self.root,
+            )
+            return
+
+        try:
+            detail_rows = ProjectResultModel(
+                result_items=self.result_items,
+            ).collect_visible_material_details()
+            summary_rows = self._build_material_summary_payload()
+        except MaterialDetailBuildError as exc:
+            messagebox.showerror(
+                "匯出 Excel 失敗",
+                f"可見方案含有無法匯出的材料資料：\n{exc}",
+                parent=self.root,
+            )
+            return
+        if not detail_rows:
+            messagebox.showwarning(
+                "匯出 Excel",
+                "目前顯示的配置成果沒有可匯出的材料。",
+                parent=self.root,
+            )
+            return
+
+        initial_directory = Path.cwd()
+        project_path = getattr(self, "current_project_path", None)
+        if project_path is not None and Path(project_path).parent.is_dir():
+            initial_directory = Path(project_path).parent
+        project_name = self._project_display_name()
+        output_path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="匯出配置材料明細 Excel",
+            initialdir=str(initial_directory),
+            initialfile=f"{project_name}_配置材料明細.xlsx",
+            defaultextension=".xlsx",
+            filetypes=(("Excel 活頁簿", "*.xlsx"), ("所有檔案", "*.*")),
+        )
+        if not output_path:
+            return
+
+        try:
+            report = self.excel_result_exporter.export(
+                output_path,
+                detail_rows,
+                summary_rows,
+                project_name=project_name,
+            )
+        except (ExcelResultExportError, OSError) as exc:
+            messagebox.showerror(
+                "匯出 Excel 失敗",
+                str(exc),
+                parent=self.root,
+            )
+            return
+
+        messagebox.showinfo(
+            "配置材料明細已匯出",
+            (
+                f"已匯出 {report.detail_row_count} 筆逐根材料明細，"
+                f"共 {self._format_result_value(report.material_quantity)} 件材料。\n"
+                f"材料彙總：{report.summary_row_count} 筆。\n\n"
+                f"成果檔：\n{report.output_path}"
+            ),
+            parent=self.root,
+        )
+
     def _export_visible_results_to_dxf(self):
         dxf_state = getattr(self, "dxf_last_import_debug", None)
         if not isinstance(dxf_state, dict):
@@ -3130,6 +3060,34 @@ class SupportInputApp:
             messagebox.showwarning(
                 "匯出範圍衝突",
                 f"同一構件不能同時匯出多個方案：\n\n{details}\n\n請先取消多餘方案的顯示。",
+                parent=self.root,
+            )
+            return
+
+        try:
+            compatible, compatibility = self._check_dxf_export_compatibility(
+                dxf_state
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            messagebox.showwarning(
+                "DXF 圖面需要重新確認",
+                (
+                    "目前保存的 DXF 構件資訊無法與工程資料完成比對。\n"
+                    "為避免成果輸出至錯誤位置，請先重新確認或重新匯入 DXF 圖面。"
+                ),
+                parent=self.root,
+            )
+            return
+        if not compatible:
+            details = "\n".join(compatibility.incompatible_items)
+            detail_text = f"\n\n檢查結果：\n{details}" if details else ""
+            messagebox.showwarning(
+                "DXF 圖面需要重新確認",
+                (
+                    "目前工程資料已修改，與原 DXF 圖面定位不一致。\n"
+                    "為避免成果輸出至錯誤位置，請先重新確認或重新匯入 DXF 圖面。"
+                    f"{detail_text}"
+                ),
                 parent=self.root,
             )
             return
@@ -3234,11 +3192,8 @@ class SupportInputApp:
         )
 
     def _support_config_by_id(self, support_id):
-        configs = self.build_support_inputs()
-        return {
-            str(config.support_id): config
-            for config in configs
-        }.get(str(support_id))
+        support_builder, _ = self._ensure_solver_input_builders()
+        return support_builder.build_one(self.project_data, support_id)
 
     @staticmethod
     def _support_plan_piece_rows(plan):
@@ -3272,6 +3227,35 @@ class SupportInputApp:
         item = self.result_items.get(zoning)
         solution = item.get("result") if isinstance(item, dict) else None
         plans = list(getattr(solution, "plans", []) or [])
+        original = next(
+            (
+                plan
+                for plan in plans
+                if str(getattr(plan, "support_id", "")) == str(support_id)
+            ),
+            None,
+        )
+        shared_group = str(
+            getattr(original, "shared_layout_group", "") or ""
+        ).strip()
+        if shared_group:
+            pieces = self._support_plan_piece_rows(new_plan)
+            replaced = False
+            for index, plan in enumerate(plans):
+                if str(getattr(plan, "shared_layout_group", "") or "").strip() != shared_group:
+                    continue
+                member_id = str(getattr(plan, "support_id", "") or "")
+                config = self._support_config_by_id(member_id)
+                if config is None:
+                    return False
+                plans[index] = support.evaluate_single_support(config, pieces)
+                replaced = True
+            if replaced:
+                solution.plans = plans
+                self._recalculate_support_global_solution(solution)
+                self._mark_results_updated()
+                return True
+            return False
         for index, plan in enumerate(plans):
             if str(getattr(plan, "support_id", "")) == str(support_id):
                 plans[index] = new_plan
@@ -3281,46 +3265,13 @@ class SupportInputApp:
                 return True
         return False
 
-    def _recalculate_support_global_solution(self, solution):
-        plans = list(getattr(solution, "plans", []) or [])
-        valid = True
-        reasons = []
-        for plan in plans:
-            if not (getattr(plan, "valid", False) and not getattr(plan, "reason", "")):
-                valid = False
-        for prev_plan, curr_plan in zip(plans, plans[1:]):
-            ok, _penalty = support.pair_penalty(prev_plan, curr_plan)
-            if not ok:
-                valid = False
-                reasons.append(
-                    f"{getattr(prev_plan, 'support_id', '')} 與 {getattr(curr_plan, 'support_id', '')} 千斤頂距離不足"
-                )
-        recalculated = support.make_global_solution(
-            plans,
-            material_ratio_targets=getattr(solution, "material_ratio_targets", None) or support.default_material_ratio_targets(),
-            material_ratio_weight=getattr(solution, "material_ratio_weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT),
-            valid=valid,
-            reason="；".join(reasons),
-        )
-        solution.total_score = recalculated.total_score
-        solution.valid = valid
-        solution.reason = recalculated.reason
-        solution.single_score_total = recalculated.single_score_total
-        solution.jack_region_penalty = recalculated.jack_region_penalty
-        solution.material_ratio_penalty = recalculated.material_ratio_penalty
-        solution.material_ratio_analysis = recalculated.material_ratio_analysis
-        solution.material_ratio_targets = recalculated.material_ratio_targets
-        solution.material_ratio_weight = recalculated.material_ratio_weight
-        solution.min_jack_distance = recalculated.min_jack_distance
-        solution.group_penalty = recalculated.jack_region_penalty + recalculated.material_ratio_penalty
-        return solution.group_penalty, reasons
+    @staticmethod
+    def _recalculate_support_global_solution(solution):
+        return SupportPlanEditing.recalculate_global_solution(solution)
 
-    def _find_support_forbidden_zone_hit(self, plan, config):
-        for joint in getattr(plan, "joints", []) or []:
-            for zone_start, zone_end, zone_type in support.forbidden_zones(config):
-                if zone_start <= joint <= zone_end:
-                    return joint, zone_start, zone_end, zone_type
-        return None
+    @staticmethod
+    def _find_support_forbidden_zone_hit(plan, config):
+        return SupportPlanEditing.find_forbidden_zone_hit(plan, config)
 
     def _format_support_status(self, plan, config):
         valid = bool(getattr(plan, "valid", False)) and not getattr(plan, "reason", "")
@@ -3424,49 +3375,12 @@ class SupportInputApp:
         item = self.result_items.get(zoning)
         solution = item.get("result") if isinstance(item, dict) else None
         plans = list(getattr(solution, "plans", []) or [])
-        index = next(
-            (idx for idx, plan in enumerate(plans) if str(getattr(plan, "support_id", "")) == str(support_id)),
-            None,
-        )
-        if index is None:
+        if not any(
+            str(getattr(plan, "support_id", "")) == str(support_id)
+            for plan in plans
+        ):
             return 0.0, []
-        checks = []
-        current = plans[index]
-        if index > 0:
-            neighbor = plans[index - 1]
-            ok, penalty = support.pair_penalty(neighbor, current)
-            checks.append({
-                "relation": "前一支支撐",
-                "support_id": getattr(neighbor, "support_id", ""),
-                "distance": abs(getattr(neighbor, "jack_center", 0) - getattr(current, "jack_center", 0)),
-                "ok": ok,
-                "penalty": float(penalty),
-                "current_region": getattr(current, "jack_region_id", "無資料"),
-                "neighbor_region": getattr(neighbor, "jack_region_id", "無資料"),
-                "region_penalty": (
-                    3000 * abs(getattr(neighbor, "jack_region_id", 0) - getattr(current, "jack_region_id", 0))
-                    if ok and getattr(neighbor, "jack_region_id", None) != getattr(current, "jack_region_id", None)
-                    else 0
-                ),
-            })
-        if index + 1 < len(plans):
-            neighbor = plans[index + 1]
-            ok, penalty = support.pair_penalty(current, neighbor)
-            checks.append({
-                "relation": "下一支支撐",
-                "support_id": getattr(neighbor, "support_id", ""),
-                "distance": abs(getattr(neighbor, "jack_center", 0) - getattr(current, "jack_center", 0)),
-                "ok": ok,
-                "penalty": float(penalty),
-                "current_region": getattr(current, "jack_region_id", "無資料"),
-                "neighbor_region": getattr(neighbor, "jack_region_id", "無資料"),
-                "region_penalty": (
-                    3000 * abs(getattr(current, "jack_region_id", 0) - getattr(neighbor, "jack_region_id", 0))
-                    if ok and getattr(current, "jack_region_id", None) != getattr(neighbor, "jack_region_id", None)
-                    else 0
-                ),
-            })
-        return checks
+        return SupportPlanEditing.neighbor_checks(solution, support_id)
 
     def _open_support_plan_editor(self, zoning, support_id):
         item = self.result_items.get(zoning)
@@ -3487,9 +3401,23 @@ class SupportInputApp:
 
         editor = tk.Toplevel(self.root)
         editor.title(f"支撐配置編輯器 - {zoning} / {support_id}")
-        editor.geometry("780x760")
-        editor.minsize(680, 560)
         editor.transient(self.root)
+        configure_responsive_dialog(
+            editor,
+            self.root,
+            preferred_width=780,
+            preferred_height=760,
+            minimum_width=680,
+            minimum_height=520,
+        )
+        footer_frame = ttk.Frame(editor)
+        footer_frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            footer_frame,
+            text="關閉",
+            command=editor.destroy,
+        ).pack(side="right")
+        editor.protocol("WM_DELETE_WINDOW", editor.destroy)
 
         status_var = tk.StringVar(value="狀態：檢查中...")
         ttk.Label(
@@ -3540,7 +3468,7 @@ class SupportInputApp:
 
         summary_text = scrolledtext.ScrolledText(
             editor,
-            height=18,
+            height=10,
             wrap="word",
             font=("Microsoft JhengHei", 10),
             state="disabled",
@@ -3757,72 +3685,7 @@ class SupportInputApp:
         refresh_rows(self._support_plan_piece_rows(plan))
         evaluate_and_refresh()
 
-        def close_editor():
-            editor.destroy()
-
-        editor.protocol("WM_DELETE_WINDOW", close_editor)
-        ttk.Button(editor, text="關閉", command=close_editor).pack(anchor="e", padx=10, pady=(0, 10))
-
-    def _create_custom_waler_plan_from_selection(self):
-        source_id = self._selected_result_id_for_custom_plan()
-        if not source_id:
-            messagebox.showwarning("建立自訂方案", "請先在結果頁選擇一個圍令方案。")
-            return
-
-        source_item = self.result_items.get(source_id)
-        if not source_item or source_item.get("type") != "waler":
-            messagebox.showwarning("建立自訂方案", "自訂方案目前僅支援圍令方案。")
-            return
-
-        source_result = source_item.get("result") or {}
-        source_plan = copy.deepcopy(source_result.get("selected_plan") or {})
-        segments = list(source_plan.get("segments", []) or [])
-        if not segments:
-            messagebox.showwarning("建立自訂方案", "選取的圍令方案沒有分段資料。")
-            return
-
-        waler_id = str(source_result.get("waler_id", "")).strip()
-        if not waler_id:
-            messagebox.showwarning("建立自訂方案", "選取的方案缺少圍令編號。")
-            return
-
-        result_id, custom_label = self._next_custom_waler_result_id(waler_id)
-        ratio_targets = source_result.get("ratio_targets") or source_plan.get("ratio_targets")
-        custom_plan = self._recalculate_custom_waler_plan(
-            source_plan,
-            segments,
-            ratio_targets=ratio_targets,
-            waler_id=waler_id,
-            result_context=source_result,
-        )
-        custom_plan["custom"] = True
-
-        self.result_items[result_id] = {
-            "type": "waler",
-            "result": {
-                "waler_id": waler_id,
-                "custom": True,
-                "custom_label": custom_label,
-                "source_result_id": source_id,
-                "selected_plan": custom_plan,
-                "ratio_targets": ratio_targets,
-                "required_length": source_result.get("required_length"),
-                "forbidden_points": list(source_result.get("forbidden_points") or []),
-                "joint_clearance": source_result.get("joint_clearance", 300),
-                "min_piece_length": source_result.get("min_piece_length", 1000),
-                "max_piece_length": source_result.get("max_piece_length", 10000),
-            },
-            "visible": True,
-        }
-        self._mark_results_updated()
-        self._refresh_results_tree(selected_id=result_id)
-        parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
-        if parent_id:
-            self.results_tree.item(parent_id, open=True)
-        self.update_preview(preserve_view=True)
-        self._open_custom_waler_plan_editor(result_id)
-
-    def _open_custom_waler_plan_editor(self, result_id):
+    def _open_waler_plan_editor(self, result_id):
         item = self.result_items.get(result_id)
         if not item or item.get("type") != "waler":
             return
@@ -3830,19 +3693,52 @@ class SupportInputApp:
         result = item.get("result") or {}
         plan = result.get("selected_plan") or {}
         waler_id = str(result.get("waler_id", "")).strip()
-        custom_label = result.get("custom_label") or result_id
+        option_index = result.get("option_index")
+        option_label = (
+            f"方案{option_index}"
+            if option_index is not None
+            else str(result_id).replace(f"{waler_id}-", "")
+        )
         ratio_targets = result.get("ratio_targets") or plan.get("ratio_targets")
+        material_spec = str(result.get("material_spec", "") or "").strip()
+        allowed_steel_lengths = InventoryLookup(
+            self._ensure_project_data().inventory
+        ).purchasable_lengths(material_spec, "圍令")
+        if not list(plan.get("segments", []) or []):
+            messagebox.showwarning(
+                "圍令方案編輯",
+                "選取的圍令方案沒有可編輯的鋼材分段資料。",
+                parent=self.root,
+            )
+            return
 
         editor = tk.Toplevel(self.root)
-        editor.title(f"建立自訂方案 - {waler_id}-{custom_label}")
-        editor.geometry("620x620")
-        editor.minsize(520, 480)
+        editor.title(f"圍令方案編輯 - {waler_id} / {option_label}")
         editor.transient(self.root)
+        configure_responsive_dialog(
+            editor,
+            self.root,
+            preferred_width=720,
+            preferred_height=720,
+            minimum_width=620,
+            minimum_height=500,
+        )
+        footer_frame = ttk.Frame(editor)
+        footer_frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
+        ttk.Button(
+            footer_frame,
+            text="關閉",
+            command=editor.destroy,
+        ).pack(side="right")
+        editor.protocol("WM_DELETE_WINDOW", editor.destroy)
 
         ttk.Label(
             editor,
-            text="直接雙擊「料長(mm)」欄即可修改；修改後會立即重新評分，不會重新執行基因演算法。",
-            wraplength=560,
+            text=(
+                "雙擊「料長(mm)」可更換鋼材；也可新增、刪除、上移或下移。"
+                "每次修改都會立即檢查接頭禁止區、完成長度與庫存，並重新計分及更新預覽。"
+            ),
+            wraplength=660,
         ).pack(fill="x", padx=10, pady=(10, 6))
 
         status_var = tk.StringVar(value="方案狀態：檢查中")
@@ -3868,6 +3764,9 @@ class SupportInputApp:
         y_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
         y_scroll.grid(row=0, column=1, sticky="ns")
         tree.configure(yscrollcommand=y_scroll.set)
+
+        button_frame = ttk.Frame(editor)
+        button_frame.pack(fill="x", padx=10, pady=(0, 6))
 
         summary_text = scrolledtext.ScrolledText(
             editor,
@@ -3896,39 +3795,49 @@ class SupportInputApp:
         def refresh_table(segments):
             tree.delete(*tree.get_children(""))
             for index, length in enumerate(segments, start=1):
-                tree.insert("", "end", iid=f"segment_{index}", values=(index, length))
+                tree.insert("", "end", values=(index, length))
+
+        def renumber():
+            for index, child_id in enumerate(tree.get_children(""), start=1):
+                tree.set(child_id, "segment_index", index)
 
         def update_summary():
-            latest_plan = (self.result_items.get(result_id, {}).get("result") or {}).get("selected_plan") or {}
+            latest_result = self.result_items.get(result_id, {}).get("result") or {}
+            latest_plan = latest_result.get("selected_plan") or {}
             legality = latest_plan.get("legality") or {}
-            status_var.set(f"方案狀態：{legality.get('summary', '未檢查')}")
-            status_label.configure(foreground="#2e7d32" if legality.get("valid") else "#c62828")
-            waler_length_text = "無資料"
-            waler_row = next(
-                (row for row in self.walers if str(row.get("WalerID", "")).strip() == waler_id),
-                None,
+            if legality.get("summary"):
+                status_summary = legality["summary"]
+                is_valid = bool(legality.get("valid"))
+            else:
+                is_valid = bool(latest_plan.get("valid", False))
+                status_summary = "✅ 合法" if is_valid else "❌ 不合法"
+            status_var.set(f"方案狀態：{status_summary}")
+            status_label.configure(
+                foreground="#2e7d32" if is_valid else "#c62828"
             )
-            if waler_row:
-                x1 = self._to_number(waler_row.get("StartX"))
-                y1 = self._to_number(waler_row.get("StartY"))
-                x2 = self._to_number(waler_row.get("EndX"))
-                y2 = self._to_number(waler_row.get("EndY"))
-                if None not in (x1, y1, x2, y2):
-                    waler_length_text = self._format_result_value(self._line_length(x1, y1, x2, y2))
             steel_length = sum(latest_plan.get("segments", []) or [])
             assembled_length = (
                 steel_length
                 + int(latest_plan.get("tail_adjustment", 0) or 0)
                 + int(latest_plan.get("gap", 0) or 0)
             )
+            required_length = latest_result.get(
+                "required_length",
+                latest_plan.get("required_length", "無資料"),
+            )
+            modified_text = " [已修改]" if latest_result.get("manual_modified") else ""
             lines = [
-                f"{waler_id}-{custom_label} [自訂]",
-                f"方案狀態：{legality.get('summary', '未檢查')}",
-                f"鋼材總長：{self._format_result_value(steel_length)} mm；完成長度：{self._format_result_value(assembled_length)} mm；圍令長度：{waler_length_text} mm",
+                f"{waler_id}-{option_label}{modified_text}",
+                f"方案狀態：{status_summary}",
+                (
+                    f"鋼材總長：{self._format_result_value(steel_length)} mm；"
+                    f"完成長度：{self._format_result_value(assembled_length)} mm；"
+                    f"圍令需求長度：{self._format_result_value(required_length)} mm"
+                ),
                 "",
                 self._format_waler_score_breakdown(
                     latest_plan,
-                    option_index=custom_label,
+                    option_index=option_index,
                     ratio_targets=ratio_targets,
                     segment_counts=latest_plan.get("segment_counts"),
                 ),
@@ -3948,29 +3857,112 @@ class SupportInputApp:
             summary_text.configure(state="disabled")
 
         def apply_segments(segments):
-            custom_plan = self._recalculate_custom_waler_plan(
-                self.result_items[result_id]["result"].get("selected_plan") or {},
-                segments,
-                ratio_targets=ratio_targets,
-                waler_id=waler_id,
-                result_context=self.result_items[result_id]["result"],
-            )
-            custom_plan["custom"] = True
-            self.result_items[result_id]["result"]["selected_plan"] = custom_plan
-            self.result_items[result_id]["result"]["ratio_targets"] = ratio_targets or custom_plan.get("ratio_targets")
-            self._mark_results_updated()
+            self._apply_waler_plan_segments(result_id, segments)
             self._refresh_results_tree(selected_id=result_id)
-            parent_id = self.results_tree.parent(result_id) if self.results_tree.exists(result_id) else ""
+            parent_id = (
+                self.results_tree.parent(result_id)
+                if self.results_tree.exists(result_id)
+                else ""
+            )
             if parent_id:
                 self.results_tree.item(parent_id, open=True)
             self.update_preview(preserve_view=True)
             update_summary()
 
-        def finish_edit(row_id, entry):
-            if not entry.winfo_exists():
+        def apply_tree_segments():
+            segments = current_segments()
+            if segments is not None:
+                apply_segments(segments)
+
+        def add_segment():
+            try:
+                length = int(selected_length_var.get())
+            except (TypeError, ValueError):
+                messagebox.showwarning(
+                    "新增鋼材",
+                    "目前沒有可新增的圍令庫存料長。",
+                    parent=editor,
+                )
                 return
-            new_value = entry.get().strip()
-            entry.destroy()
+            child_id = tree.insert(
+                "",
+                "end",
+                values=(len(tree.get_children("")) + 1, length),
+            )
+            tree.selection_set(child_id)
+            tree.focus(child_id)
+            apply_tree_segments()
+
+        def delete_segment():
+            selected = tree.selection()
+            if not selected:
+                return
+            children = list(tree.get_children(""))
+            index = children.index(selected[0])
+            tree.delete(selected[0])
+            renumber()
+            remaining = list(tree.get_children(""))
+            if remaining:
+                next_id = remaining[min(index, len(remaining) - 1)]
+                tree.selection_set(next_id)
+                tree.focus(next_id)
+            apply_tree_segments()
+
+        def move_segment(delta):
+            selected = tree.selection()
+            if not selected:
+                return
+            child_id = selected[0]
+            children = list(tree.get_children(""))
+            index = children.index(child_id)
+            new_index = index + delta
+            if not 0 <= new_index < len(children):
+                return
+            tree.move(child_id, "", new_index)
+            renumber()
+            tree.selection_set(child_id)
+            tree.focus(child_id)
+            apply_tree_segments()
+
+        selected_length_var = tk.StringVar(
+            value=str(allowed_steel_lengths[0]) if allowed_steel_lengths else ""
+        )
+        ttk.Label(button_frame, text="新增料長：").pack(side="left")
+        length_selector = ttk.Combobox(
+            button_frame,
+            textvariable=selected_length_var,
+            values=[str(length) for length in allowed_steel_lengths],
+            state="readonly" if allowed_steel_lengths else "disabled",
+            width=10,
+        )
+        length_selector.pack(side="left", padx=(0, 5))
+        ttk.Button(
+            button_frame,
+            text="新增鋼材",
+            command=add_segment,
+            state="normal" if allowed_steel_lengths else "disabled",
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            button_frame,
+            text="刪除鋼材",
+            command=delete_segment,
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            button_frame,
+            text="上移",
+            command=lambda: move_segment(-1),
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            button_frame,
+            text="下移",
+            command=lambda: move_segment(1),
+        ).pack(side="left", padx=5)
+
+        def finish_edit(row_id, widget):
+            if not widget.winfo_exists():
+                return
+            new_value = widget.get().strip()
+            widget.destroy()
             editing_entry["widget"] = None
             try:
                 parsed = int(round(float(new_value)))
@@ -3980,11 +3972,18 @@ class SupportInputApp:
             if parsed <= 0:
                 messagebox.showerror("輸入錯誤", "料長(mm) 必須大於 0", parent=editor)
                 return
-            tree.set(row_id, "length", parsed)
-            segments = current_segments()
-            if segments is None:
+            if parsed not in allowed_steel_lengths:
+                messagebox.showerror(
+                    "輸入錯誤",
+                    f"鋼材料長必須存在於可用庫存料長：{allowed_steel_lengths}",
+                    parent=editor,
+                )
                 return
-            apply_segments(segments)
+            current_value = int(round(float(tree.set(row_id, "length"))))
+            if parsed == current_value:
+                return
+            tree.set(row_id, "length", parsed)
+            apply_tree_segments()
 
         def start_edit(event):
             if tree.identify_region(event.x, event.y) != "cell":
@@ -3999,19 +3998,25 @@ class SupportInputApp:
             if editing_entry["widget"] is not None and editing_entry["widget"].winfo_exists():
                 editing_entry["widget"].destroy()
             x, y, width, height = bbox
-            entry = tk.Entry(tree)
-            entry.place(x=x, y=y, width=width, height=height)
-            entry.insert(0, tree.set(row_id, "length"))
-            entry.focus_set()
-            entry.bind("<Return>", lambda _event: finish_edit(row_id, entry))
-            entry.bind("<FocusOut>", lambda _event: finish_edit(row_id, entry))
-            editing_entry["widget"] = entry
+            widget = ttk.Combobox(
+                tree,
+                values=[str(length) for length in allowed_steel_lengths],
+                state="readonly",
+            )
+            widget.set(tree.set(row_id, "length"))
+            widget.place(x=x, y=y, width=width, height=height)
+            widget.focus_set()
+            widget.bind("<Return>", lambda _event: finish_edit(row_id, widget))
+            widget.bind("<FocusOut>", lambda _event: finish_edit(row_id, widget))
+            widget.bind(
+                "<<ComboboxSelected>>",
+                lambda _event: finish_edit(row_id, widget),
+            )
+            editing_entry["widget"] = widget
 
         tree.bind("<Double-1>", start_edit)
         refresh_table(plan.get("segments", []) or [])
         update_summary()
-
-        ttk.Button(editor, text="關閉", command=editor.destroy).pack(anchor="e", padx=10, pady=(0, 10))
 
     @staticmethod
     def _result_group_iid(result_type, group_id):
@@ -4036,40 +4041,6 @@ class SupportInputApp:
             return "", ""
         return parts[1], parts[2]
 
-    @staticmethod
-    def _custom_suffix_from_index(index):
-        index = max(0, int(index))
-        letters = []
-        while True:
-            index, remainder = divmod(index, 26)
-            letters.append(chr(ord("A") + remainder))
-            if index == 0:
-                break
-            index -= 1
-        return "".join(reversed(letters))
-
-    @staticmethod
-    def _custom_label_sort_value(label):
-        text = str(label or "")
-        if "自訂方案" not in text:
-            return 9999
-        suffix = text.split("自訂方案", 1)[1].split("[", 1)[0].strip()
-        value = 0
-        for char in suffix:
-            if not "A" <= char <= "Z":
-                continue
-            value = value * 26 + (ord(char) - ord("A") + 1)
-        return value or 9999
-
-    def _next_custom_waler_result_id(self, waler_id):
-        index = 0
-        while True:
-            label = f"自訂方案{self._custom_suffix_from_index(index)}"
-            result_id = f"{waler_id}-{label}"
-            if result_id not in self.result_items:
-                return result_id, label
-            index += 1
-
     def _get_result_tree_info(self, result_id, item):
         result_type = item.get("type", "")
         result = item.get("result")
@@ -4082,19 +4053,20 @@ class SupportInputApp:
                 option_index = result.get("option_index")
             if not waler_id:
                 waler_id = str(result_id).split("-方案", 1)[0]
-            if isinstance(result, dict) and result.get("custom"):
-                child_label = result.get("custom_label") or str(result_id).replace(f"{waler_id}-", "")
+            child_label = (
+                f"方案{option_index}"
+                if option_index is not None
+                else str(result_id).replace(f"{waler_id}-", "")
+            )
+            if isinstance(result, dict) and result.get("manual_modified"):
                 plan = result.get("selected_plan") or {}
                 legality = plan.get("legality") or {}
-                status_icon = "✅" if legality.get("valid") else "❌"
-                child_label = f"{child_label} [自訂] {status_icon}"
-                option_sort = 10_000 + self._custom_label_sort_value(child_label)
-            else:
-                child_label = f"方案{option_index}" if option_index is not None else str(result_id).replace(f"{waler_id}-", "")
-                try:
-                    option_sort = int(option_index)
-                except (TypeError, ValueError):
-                    option_sort = 9999
+                is_valid = legality.get("valid", plan.get("valid", False))
+                child_label += f" [已修改] {'✅' if is_valid else '❌'}"
+            try:
+                option_sort = int(option_index)
+            except (TypeError, ValueError):
+                option_sort = 9999
             return {
                 "group_iid": self._result_group_iid("waler", waler_id),
                 "group_id": waler_id,
@@ -4236,183 +4208,13 @@ class SupportInputApp:
             self.results_tree.item(parent_id, open=True)
         self.update_preview(preserve_view=True)
 
-    @staticmethod
-    def _format_result_value(value, decimals=1):
-        if value == "N/A":
-            return "無資料"
-        if isinstance(value, (int, float)):
-            if float(value).is_integer():
-                return str(int(value))
-            return f"{value:.{decimals}f}"
-        return str(value)
+    _format_result_value = staticmethod(format_result_value)
+    _format_result_list = staticmethod(format_result_list)
+    _format_waler_score_breakdown = staticmethod(
+        format_waler_score_breakdown
+    )
 
-    @classmethod
-    def _format_result_list(cls, values):
-        values = list(values or [])
-        if not values:
-            return "無"
-        return ", ".join(cls._format_result_value(value) for value in values)
-
-    @classmethod
-    def _format_waler_score_breakdown(
-        cls,
-        plan,
-        option_index=None,
-        ratio_targets=None,
-        segment_counts=None,
-    ):
-        plan = plan or {}
-        segments = list(plan.get("segments", []) or [])
-        joints = list(plan.get("joints", []) or [])
-        total_segments = len(segments)
-
-        def finite_number(value, default=0.0):
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                return default
-            return number if math.isfinite(number) else default
-
-        def count_value(value, default=0):
-            try:
-                return int(round(float(value)))
-            except (TypeError, ValueError):
-                return default
-
-        def score_text(value):
-            return cls._format_result_value(value, decimals=2)
-
-        targets_source = ratio_targets or plan.get("ratio_targets") or {}
-        target_defaults = {"short": 0.2, "mid": 0.5, "long": 0.3}
-        targets = {
-            key: finite_number(
-                targets_source.get(key, targets_source.get(f"{key}_segment_ratio_target")),
-                target_defaults[key],
-            )
-            for key in ("short", "mid", "long")
-        }
-
-        counts_source = segment_counts or plan.get("segment_counts") or {}
-        ratios_source = plan.get("segment_ratios") or {}
-        counts = {}
-        for key in ("short", "mid", "long"):
-            if key in counts_source and counts_source.get(key) is not None:
-                counts[key] = count_value(counts_source.get(key))
-            else:
-                counts[key] = count_value(
-                    finite_number(ratios_source.get(key), 0.0) * total_segments
-                )
-
-        actual_ratios = {
-            key: (counts[key] / total_segments if total_segments else 0.0)
-            for key in ("short", "mid", "long")
-        }
-        ratio_deviation = sum(
-            abs(actual_ratios[key] - targets[key])
-            for key in ("short", "mid", "long")
-        )
-
-        buy_count = count_value(plan.get("buy_count"), 0)
-        under_4000_count = count_value(
-            plan.get("under_4000_segment_count"),
-            sum(1 for segment in segments if segment < 4000),
-        )
-        distinct_groups = count_value(
-            plan.get("distinct_groups"),
-            len({segment for segment in segments}),
-        )
-        joint_count = count_value(plan.get("joint_count"), len(joints))
-        max_length = max(segments) if segments else 0
-        min_length = min(segments) if segments else 0
-        length_variation = finite_number(
-            plan.get("length_variation"),
-            max_length - min_length if segments else 0,
-        )
-
-        buy_score = buy_count * 100_000
-        ratio_score = finite_number(
-            plan.get("ratio_penalty"),
-            ratio_deviation * 100_000,
-        )
-        ratio_deviation_for_score = ratio_score / 100_000
-        under_4000_score = under_4000_count * 100_000
-        distinct_score = distinct_groups * 5_000
-        joint_score = joint_count * 1_000
-        total_check = (
-            buy_score
-            + ratio_score
-            + under_4000_score
-            + distinct_score
-            + length_variation
-            + joint_score
-        )
-        total_score = finite_number(plan.get("score"), total_check)
-
-        def pct(value):
-            return f"{value * 100:.2f}%"
-
-        def compact_score_line(label, expression, value):
-            return f"{label:<12} {expression:<16} = {score_text(value):>10}"
-
-        def compact_ratio_line(label, key):
-            return (
-                f"{label} {pct(actual_ratios[key])}"
-                f"({counts[key]}/{total_segments}) → {pct(targets[key])}"
-            )
-
-        ratio_formula_lines = [
-            f"|{pct(actual_ratios['short'])}-{pct(targets['short'])}|",
-            f"+|{pct(actual_ratios['mid'])}-{pct(targets['mid'])}|",
-            f"+|{pct(actual_ratios['long'])}-{pct(targets['long'])}|",
-            f"={ratio_deviation_for_score:.4f}",
-        ]
-        total_check_text = " + ".join([
-            score_text(buy_score),
-            score_text(ratio_score),
-            score_text(under_4000_score),
-            score_text(distinct_score),
-            score_text(length_variation),
-            score_text(joint_score),
-        ])
-        steel_length = count_value(plan.get("steel_length"), sum(segments))
-        tail_adjustment = count_value(plan.get("tail_adjustment"), 0)
-        tail_gap = count_value(plan.get("gap"), 0)
-        required_length = count_value(
-            plan.get("required_length"),
-            steel_length + tail_adjustment + tail_gap,
-        )
-        tail_lines = [
-            f"需求長度：{required_length} mm",
-            f"標準鋼材總長：{steel_length} mm",
-            f"尾端調整塊：{tail_adjustment} mm",
-            f"現場處理餘量：{tail_gap} mm（允許 0～{wales.WALER_MAX_GAP} mm）",
-        ]
-
-        if isinstance(option_index, str) and option_index.startswith("自訂方案"):
-            option_title = option_index
-        else:
-            option_title = f"方案 {option_index}" if option_index is not None else "方案"
-        return "\n".join([
-            option_title,
-            *tail_lines,
-            f"總分：{score_text(total_score)}",
-            f"分段長度：{segments}",
-            "評分拆解",
-            compact_score_line("購買數", f"{buy_count} ×100000", buy_score),
-            compact_score_line("比例偏差", f"{ratio_deviation_for_score:.4f}×100000", ratio_score),
-            compact_score_line("小於4000mm", f"{under_4000_count} ×100000", under_4000_score),
-            compact_score_line("材料種類", f"{distinct_groups} ×5000", distinct_score),
-            compact_score_line("料長差", f"{score_text(max_length)}-{score_text(min_length)}", length_variation),
-            compact_score_line("接頭數", f"{joint_count} ×1000", joint_score),
-            "比例偏差詳細",
-            compact_ratio_line("短段", "short"),
-            compact_ratio_line("中段", "mid"),
-            compact_ratio_line("長段", "long"),
-            *ratio_formula_lines,
-            f"總分驗算：{total_check_text} = {score_text(total_check)}",
-        ])
-
-    def _recalculate_custom_waler_plan(
+    def _recalculate_waler_plan(
         self,
         base_plan,
         segments,
@@ -4421,168 +4223,48 @@ class SupportInputApp:
         waler_id=None,
         result_context=None,
     ):
-        base_plan = base_plan or {}
-        material_spec = str(
-            (result_context or {}).get(
-                "material_spec",
-                base_plan.get("material_spec", ""),
-            )
-            or ""
-        ).strip()
-        segments = [int(round(value)) for value in segments]
-        joints = []
-        position = 0
-        for segment in segments[:-1]:
-            position += segment
-            joints.append(position)
-
-        targets_source = ratio_targets or base_plan.get("ratio_targets") or {}
-        def target_value(key, legacy_key, default):
-            try:
-                value = targets_source.get(key, targets_source.get(legacy_key, default))
-                return float(value)
-            except (TypeError, ValueError):
-                return default
-        targets = {
-            "short": target_value("short", "short_segment_ratio_target", 0.2),
-            "mid": target_value("mid", "mid_segment_ratio_target", 0.5),
-            "long": target_value("long", "long_segment_ratio_target", 0.3),
-        }
-        purchasable_lengths = self._get_purchasable_lengths(
-            material_spec,
-            "圍令",
-        )
-        steel_length = sum(segments)
-        required_length = (
-            self._get_waler_required_length(waler_id, result_context or {})
-            if waler_id
-            else None
-        )
-        if required_length is None:
-            required_length = int(round(float(
-                base_plan.get("required_length", steel_length)
-            )))
-        completion_error = ""
-        try:
-            _resolved_steel, tail_adjustment, tail_gap = (
-                wales.resolve_tail_adjustment(
-                    required_length,
-                    steel_length=steel_length,
-                )
-            )
-        except ValueError as exc:
-            tail_adjustment = 0
-            tail_gap = required_length - steel_length
-            completion_error = str(exc)
-        cfg = wales.Config(
-            total_length=steel_length,
-            support_points=[],
-            purchasable_lengths=purchasable_lengths,
-            short_segment_ratio_target=targets["short"],
-            mid_segment_ratio_target=targets["mid"],
-            long_segment_ratio_target=targets["long"],
-        )
-        segment_counts, segment_ratios = wales.segment_ratio_summary(segments, cfg)
-        ratio_penalty, segment_ratios = wales.calculate_ratio_penalty(segments, cfg)
-        allocation = wales.allocate_stock_best_fit(
+        return WalerPlanEditing(self._ensure_project_data()).recalculate(
+            base_plan,
             segments,
-            self._get_inventory_items(material_spec, "圍令"),
-            purchasable_lengths,
+            ratio_targets,
+            waler_id=waler_id,
+            result_context=result_context,
         )
 
-        if allocation is None:
-            assignments = []
-            buy_count = len(segments)
-            distinct_groups = len(set(segments))
-            length_variation = max(segments) - min(segments) if segments else 0
-            under_4000_segment_count = sum(1 for segment in segments if segment < 4000)
-            total_waste = 0
-            errors = ["部分料長不在庫存可購買長度內，材料配置未完成。"]
-        else:
-            assignments = allocation["assignments"]
-            buy_count = allocation["total_bought"]
-            distinct_groups = allocation["distinct_groups"]
-            length_variation = allocation["length_variation"]
-            under_4000_segment_count = allocation["under_4000_segment_count"]
-            total_waste = allocation["total_waste"]
-            errors = []
+    def _apply_waler_plan_segments(self, result_id, segments):
+        item = self.result_items.get(result_id)
+        if not item or item.get("type") != "waler":
+            raise ValueError("找不到要修改的圍令方案")
+        result = item.get("result")
+        if not isinstance(result, dict):
+            raise ValueError("圍令方案資料格式不正確")
 
-        if completion_error:
-            errors.append(completion_error)
-
-        joint_count = len(joints)
-        score = (
-            buy_count * 100_000
-            + ratio_penalty
-            + under_4000_segment_count * 100_000
-            + distinct_groups * 5_000
-            + length_variation
-            + joint_count * 1_000
+        waler_id = str(result.get("waler_id", "") or "").strip()
+        base_plan = result.get("selected_plan") or {}
+        ratio_targets = result.get("ratio_targets") or base_plan.get("ratio_targets")
+        edited_plan = self._recalculate_waler_plan(
+            base_plan,
+            segments,
+            ratio_targets=ratio_targets,
+            waler_id=waler_id,
+            result_context=result,
         )
-
-        plan = copy.deepcopy(base_plan or {})
-        plan.update({
-            "joints": joints,
-            "segments": segments,
-            "assignments": assignments,
-            "total_waste": total_waste,
-            "buy_count": buy_count,
-            "distinct_groups": distinct_groups,
-            "length_variation": length_variation,
-            "under_4000_segment_count": under_4000_segment_count,
-            "segment_counts": segment_counts,
-            "segment_ratios": segment_ratios,
-            "ratio_targets": targets,
-            "ratio_penalty": ratio_penalty,
-            "joint_count": joint_count,
-            "score": score,
-            "valid": not errors,
-            "errors": errors,
-            "custom": True,
-            "required_length": required_length,
-            "steel_length": steel_length,
-            "tail_adjustment": tail_adjustment,
-            "gap": tail_gap,
-            "pieces": [
-                *[("steel", length) for length in segments],
-                *([("shim", tail_adjustment)] if tail_adjustment > 0 else []),
-            ],
-        })
-        if waler_id:
-            legality = self._validate_custom_waler_plan(
-                waler_id=waler_id,
-                segments=segments,
-                joints=joints,
-                result=result_context or {},
-            )
-            plan["legality"] = legality
-            plan["valid"] = bool(legality.get("valid")) and not errors
-        return plan
+        edited_plan.pop("custom", None)
+        result["selected_plan"] = edited_plan
+        result["ratio_targets"] = ratio_targets or edited_plan.get("ratio_targets")
+        result["manual_modified"] = True
+        for legacy_key in ("custom", "custom_label", "source_result_id"):
+            result.pop(legacy_key, None)
+        self._mark_results_updated()
+        return edited_plan
 
     def _get_waler_required_length(self, waler_id, result=None):
-        result = result or {}
-        required_length = result.get("required_length") if isinstance(result, dict) else None
-        if required_length is not None:
-            try:
-                return int(round(float(required_length)))
-            except (TypeError, ValueError):
-                pass
-
-        waler_row = next(
-            (row for row in self.walers if str(row.get("WalerID", "")).strip() == str(waler_id).strip()),
-            None,
+        return WalerPlanEditing(self._ensure_project_data()).required_length(
+            waler_id,
+            result,
         )
-        if not waler_row:
-            return None
-        x1 = self._to_number(waler_row.get("StartX"))
-        y1 = self._to_number(waler_row.get("StartY"))
-        x2 = self._to_number(waler_row.get("EndX"))
-        y2 = self._to_number(waler_row.get("EndY"))
-        if None in (x1, y1, x2, y2):
-            return None
-        return int(round(self._line_length(x1, y1, x2, y2)))
 
-    def _validate_custom_waler_plan(
+    def _validate_waler_plan(
         self,
         *,
         waler_id,
@@ -4590,142 +4272,12 @@ class SupportInputApp:
         joints,
         result=None,
     ):
-        result = result or {}
-        required_length = self._get_waler_required_length(waler_id, result)
-        current_length = sum(segments)
-        forbidden_points = [
-            int(round(point))
-            for point in (result.get("forbidden_points") or [])
-        ]
-        joint_clearance = int(round(float(result.get("joint_clearance", 300) or 300)))
-        min_piece_length = int(round(float(result.get("min_piece_length", 1000) or 1000)))
-        max_piece_length = int(round(float(result.get("max_piece_length", 10000) or 10000)))
-        material_spec = str(result.get("material_spec", "") or "").strip()
-        purchasable_lengths = self._get_purchasable_lengths(
-            material_spec,
-            "圍令",
+        return WalerPlanEditing(self._ensure_project_data()).validate(
+            waler_id=waler_id,
+            segments=segments,
+            joints=joints,
+            result=result,
         )
-
-        tail_adjustment = 0
-        tail_gap = None
-        completion_error = ""
-        if required_length is not None:
-            try:
-                _resolved_steel, tail_adjustment, tail_gap = (
-                    wales.resolve_tail_adjustment(
-                        required_length,
-                        steel_length=current_length,
-                    )
-                )
-            except ValueError as exc:
-                completion_error = str(exc)
-
-        cfg = wales.Config(
-            total_length=current_length,
-            support_points=forbidden_points,
-            min_piece_length=min_piece_length,
-            max_piece_length=max_piece_length,
-            joint_clearance_to_support=joint_clearance,
-            purchasable_lengths=purchasable_lengths,
-        )
-        solver_valid, solver_errors = wales.validate_segments(joints, segments, cfg)
-
-        violations = []
-        details = []
-        if completion_error:
-            violations.append("尾端調整量不合法")
-            details.extend([
-                "❌ 無法以一塊調整塊及 0～199 mm 餘量完成圍令",
-                f"需求長度：{required_length} mm",
-                f"標準鋼材總長：{current_length} mm",
-            ])
-
-        forbidden_joint = None
-        forbidden_center = None
-        for joint in joints:
-            for center in forbidden_points:
-                if abs(joint - center) < joint_clearance:
-                    forbidden_joint = joint
-                    forbidden_center = center
-                    break
-            if forbidden_joint is not None:
-                break
-        if forbidden_joint is not None:
-            violations.append("接頭落入禁止區")
-            details.extend([
-                "❌ 接頭落入禁止區",
-                f"接頭位置：{forbidden_joint} mm",
-                f"禁止區：{forbidden_center - joint_clearance} ~ {forbidden_center + joint_clearance} mm",
-            ])
-
-        allowed_lengths = set(purchasable_lengths)
-        missing_length = next((segment for segment in segments if segment not in allowed_lengths), None)
-        if missing_length is not None:
-            violations.append("無此料長")
-            details.extend([
-                "❌ 無此料長",
-                f"料長：{missing_length} mm",
-            ])
-
-        other_errors = [
-            error
-            for error in solver_errors
-            if (
-                "距支撐過近" not in error
-                and "不在可用材料長度清單" not in error
-            )
-        ]
-        for error in other_errors:
-            violations.append(error)
-            details.append(f"❌ {error}")
-
-        required_quantities = Counter(segments)
-        warnings = []
-        for length, required_quantity in sorted(required_quantities.items()):
-            inventory_quantity = self._inventory_quantity(
-                material_spec,
-                "圍令",
-                length,
-            )
-            if required_quantity > inventory_quantity and length in allowed_lengths:
-                warnings.extend([
-                    "庫存不足（會以購買數計入分數）",
-                    f"{length} mm：需要 {required_quantity} 根，庫存 {self._format_result_value(inventory_quantity)} 根，不足 {self._format_result_value(required_quantity - inventory_quantity)} 根",
-                ])
-
-        valid = (
-            required_length is not None
-            and not completion_error
-            and solver_valid
-            and not violations
-        )
-        if valid:
-            summary = "✅ 合法"
-            details = [
-                "✅ 合法",
-                f"需求長度：{required_length} mm",
-                f"標準鋼材總長：{current_length} mm",
-                f"尾端調整塊：{tail_adjustment} mm",
-                f"現場處理餘量：{tail_gap} mm",
-                "✅ 所有接頭均符合規範",
-            ]
-        elif len(violations) == 1:
-            summary = f"❌ {violations[0]}"
-        else:
-            summary = f"❌ 共 {len(violations)} 項違規"
-            details = [summary] + [f"- {violation}" for violation in violations] + details
-
-        return {
-            "valid": valid,
-            "summary": summary,
-            "violations": violations,
-            "details": details,
-            "warnings": warnings,
-            "required_length": required_length,
-            "current_length": current_length,
-            "tail_adjustment": tail_adjustment,
-            "gap": tail_gap,
-        }
 
     @staticmethod
     def _format_support_global_analysis_lines(solution):
@@ -4828,8 +4380,6 @@ class SupportInputApp:
         if item.get("type") == "waler":
             plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
             option_index = result.get("option_index") if isinstance(result, dict) else None
-            if isinstance(result, dict) and result.get("custom"):
-                option_index = result.get("custom_label") or option_index
             ratio_targets = result.get("ratio_targets") if isinstance(result, dict) else None
             segment_counts = plan.get("segment_counts") if isinstance(plan, dict) else None
             lines = [
@@ -4838,8 +4388,8 @@ class SupportInputApp:
             lines.extend(cls._solver_diagnostic_summary_lines(
                 result.get("search_diagnostics") if isinstance(result, dict) else None
             ))
-            if isinstance(result, dict) and result.get("custom"):
-                lines.append("[自訂]")
+            if isinstance(result, dict) and result.get("manual_modified"):
+                lines.append("[已修改]")
                 legality = plan.get("legality") or {}
                 lines.append(f"方案狀態：{legality.get('summary', '未檢查')}")
                 legality_details = list(legality.get("details", []) or [])
@@ -5012,12 +4562,16 @@ class SupportInputApp:
                     continue
 
                 item_result = item.get("result")
-                is_custom_result = isinstance(item_result, dict) and item_result.get("custom")
-                custom_status = ""
-                if is_custom_result:
+                is_modified_result = (
+                    isinstance(item_result, dict)
+                    and item_result.get("manual_modified")
+                )
+                modified_status = ""
+                if is_modified_result:
                     plan = item_result.get("selected_plan") or {}
                     legality = plan.get("legality") or {}
-                    custom_status = " ✅" if legality.get("valid") else " ❌"
+                    is_valid = legality.get("valid", plan.get("valid", False))
+                    modified_status = " ✅" if is_valid else " ❌"
                 self.results_tree.insert(
                     group_iid,
                     "end",
@@ -5026,7 +4580,11 @@ class SupportInputApp:
                     values=(
                         self._result_item_visible_mark(item),
                         info["type_label"],
-                        f"{result_id} [自訂]{custom_status}" if is_custom_result else result_id,
+                        (
+                            f"{result_id} [已修改]{modified_status}"
+                            if is_modified_result
+                            else result_id
+                        ),
                         self._describe_result_item(item),
                     ),
                 )
@@ -5062,23 +4620,30 @@ class SupportInputApp:
                 joint_count = len(plan.get("joints", []) or [])
             distinct_groups = plan.get("distinct_groups", "無資料")
             buy_count = plan.get("buy_count", "無資料")
-            custom_text = ""
-            if isinstance(result, dict) and result.get("custom"):
+            modified_text = ""
+            is_manually_modified = (
+                isinstance(result, dict) and result.get("manual_modified")
+            )
+            if is_manually_modified:
                 legality = plan.get("legality") or {}
-                status_icon = "✅" if legality.get("valid") else "❌"
-                custom_text = f"[自訂] {status_icon}；"
+                is_valid = legality.get("valid", plan.get("valid", False))
+                modified_text = f"[已修改] {'✅' if is_valid else '❌'}；"
             diagnostics = solver_search.SolverDiagnostics.from_dict(
                 result.get("search_diagnostics") if isinstance(result, dict) else None
             )
             search_text = (
                 "；搜尋已穩定"
-                if diagnostics and diagnostics.result_is_stable
+                if not is_manually_modified
+                and diagnostics
+                and diagnostics.result_is_stable
                 else "；搜尋達上限"
-                if diagnostics and diagnostics.search_limit_reached
+                if not is_manually_modified
+                and diagnostics
+                and diagnostics.search_limit_reached
                 else ""
             )
             return (
-                f"{custom_text}總分：{score}；接頭：{joint_count}；"
+                f"{modified_text}總分：{score}；接頭：{joint_count}；"
                 f"材料種類：{distinct_groups}；購買數：{buy_count}{search_text}"
             )
 
@@ -5100,73 +4665,23 @@ class SupportInputApp:
             f"合法={'是' if valid else '否'}{search_text}"
         )
 
-    @staticmethod
-    def _material_length_key(value):
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            return None
-        if not math.isfinite(number) or number <= 0:
-            return None
-        return int(number) if number.is_integer() else number
+    _material_length_key = staticmethod(
+        ProjectResultModel.material_length_key
+    )
 
     def _collect_visible_material_usage(self):
-        usage = Counter()
-        for item in self.result_items.values():
-            if not item.get("visible", True):
-                continue
-
-            result = item.get("result")
-            if item.get("type") == "waler":
-                plan = (result.get("selected_plan") or {}) if isinstance(result, dict) else {}
-                material_spec = str((result or {}).get("material_spec", "") or "").strip() if isinstance(result, dict) else ""
-                assignments = list(plan.get("assignments", []) or [])
-                material_lengths = [
-                    assignment.get("stock_length")
-                    for assignment in assignments
-                    if isinstance(assignment, dict)
-                ]
-                if not any(self._material_length_key(value) is not None for value in material_lengths):
-                    material_lengths = list(plan.get("segments", []) or [])
-                for value in material_lengths:
-                    length = self._material_length_key(value)
-                    if length is not None:
-                        usage[("圍令", material_spec, length)] += 1
-                continue
-
-            if item.get("type") == "support":
-                for plan in getattr(result, "plans", []) or []:
-                    support_id = str(getattr(plan, "support_id", "") or "").strip()
-                    if not self._support_plan_visible(item, support_id):
-                        continue
-                    material_spec = str(getattr(plan, "material_spec", "") or "").strip()
-                    for piece_type, value in getattr(plan, "pieces", []) or []:
-                        if str(piece_type).lower() != "steel":
-                            continue
-                        length = self._material_length_key(value)
-                        if length is not None:
-                            usage[("支撐", material_spec, length)] += 1
-        return usage
+        return ProjectResultModel(
+            result_items=self.result_items,
+        ).collect_visible_material_usage()
 
     def _collect_inventory_quantities(self):
-        inventory_quantities = Counter()
-        for row in self.inventory:
-            length = self._material_length_key(row.get("Length"))
-            quantity = self._to_number(row.get("Qty"))
-            if length is None or quantity is None or quantity < 0:
-                continue
-            usage = str(row.get("Usage", "") or "").strip()
-            material_spec = str(row.get("Spec", "") or "").strip()
-            inventory_quantities[(usage, material_spec, length)] += quantity
-        return inventory_quantities
+        return ProjectResultModel.collect_inventory_quantities(self.inventory)
 
     def _inventory_quantity(self, material_spec, usage, length):
-        material_spec = str(material_spec or "").strip()
-        if not material_spec:
-            return UNLIMITED_INVENTORY_QTY
-        return self._collect_inventory_quantities().get(
-            (str(usage or "").strip(), material_spec, length),
-            0,
+        return InventoryLookup(self.project_data.inventory).quantity(
+            material_spec,
+            usage,
+            length,
         )
 
     def _update_material_summary(self):
@@ -5856,7 +5371,7 @@ class SupportInputApp:
             # Retain only serializable diagnostics.  No ezdxf Entity crosses
             # into the application data model or Solver input path.
             self.dxf_last_import_debug = result.to_debug_dict()
-            self.dxf_asset_status_report = self._ensure_project_services().runtime_report(
+            self.dxf_asset_status_report = self._ensure_project_service().runtime_dxf_report(
                 file_path
             )
             self.last_dxf_compatibility_report = None
@@ -5868,6 +5383,7 @@ class SupportInputApp:
                 f"支撐 {len(imported['struts'])}、斜撐 {len(imported['braces'])}、"
                 f"中間柱 {len(imported['columns'])}、托梁 {len(imported['beams'])}、"
                 f"角撐 {len(imported['corner_braces'])}、"
+                f"連續壁圖元 {result.source_entity_counts.get('continuous_wall', 0)}、"
                 f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}",
                 source=file_path,
             )
@@ -5887,6 +5403,69 @@ class SupportInputApp:
     def _project_rows_by_table(self):
         return self._ensure_project_data().geometry_rows()
 
+    def _cad_coordinate_system(self):
+        state = getattr(self, "dxf_last_import_debug", None)
+        if not isinstance(state, Mapping):
+            return CoordinateSystem()
+        coordinate = state.get("coordinate_system")
+        if coordinate is None:
+            return CoordinateSystem()
+        if not isinstance(coordinate, Mapping):
+            raise ValueError("DXF coordinate_system 格式錯誤，無法套用 CAD 事件。")
+        mode = str(coordinate.get("mode", "world") or "world").strip().lower()
+        try:
+            origin_x = float(coordinate.get("origin_x", 0.0) or 0.0)
+            origin_y = float(coordinate.get("origin_y", 0.0) or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("DXF local coordinate origin 格式錯誤。") from exc
+        return CoordinateSystem(
+            mode=mode,
+            origin_x=origin_x,
+            origin_y=origin_y,
+            source=str(coordinate.get("source", "cad_world") or "cad_world"),
+        )
+
+    def _stage_stale_dxf_state(self, state, reason):
+        if not isinstance(state, Mapping):
+            return None
+        staged = copy.deepcopy(dict(state))
+        staged[self.DXF_BINDING_STALE_KEY] = True
+        staged[self.DXF_BINDING_STALE_REASON_KEY] = str(reason)
+        return staged
+
+    @classmethod
+    def _project_field_affects_dxf_binding(cls, table_name, field_name):
+        return field_name in cls.DXF_BINDING_FIELDS.get(table_name, ())
+
+    def _dxf_binding_is_stale(self):
+        state = getattr(self, "dxf_last_import_debug", None)
+        return bool(
+            isinstance(state, dict)
+            and state.get(self.DXF_BINDING_STALE_KEY, False)
+        )
+
+    def _mark_dxf_binding_stale(self, reason=""):
+        state = getattr(self, "dxf_last_import_debug", None)
+        if not isinstance(state, dict):
+            return
+        state[self.DXF_BINDING_STALE_KEY] = True
+        if reason:
+            state[self.DXF_BINDING_STALE_REASON_KEY] = str(reason)
+        self.last_dxf_compatibility_report = None
+
+    def _check_dxf_export_compatibility(self, dxf_state):
+        checker = getattr(self, "dxf_compatibility_checker", None)
+        if checker is None:
+            checker = self._ensure_project_service().dxf_compatibility_checker
+        report = checker.compare(
+            dxf_state,
+            dxf_state,
+            self._project_rows_by_table(),
+        )
+        self.last_dxf_compatibility_report = report
+        self._refresh_project_status_display()
+        return report.compatible and not self._dxf_binding_is_stale(), report
+
     def _invalidate_solver_state_after_input_change(self):
         had_result = bool(self.result_items) or self.project_result is not None
         self.result_items.clear()
@@ -5904,7 +5483,17 @@ class SupportInputApp:
         preserve_view=True,
         table_name=None,
         field_name=None,
+        dxf_binding_changed=None,
     ):
+        if dxf_binding_changed is None:
+            dxf_binding_changed = self._project_field_affects_dxf_binding(
+                table_name,
+                field_name,
+            )
+        if dxf_binding_changed:
+            self._mark_dxf_binding_stale(
+                f"{table_name or 'project'}.{field_name or 'member'} 已修改"
+            )
         metadata_only = table_name == "material_specs"
         if not metadata_only and table_name in (
             None,
@@ -5933,28 +5522,130 @@ class SupportInputApp:
             self._load_strut_detail(index)
 
     def _apply_cad_event(self, event):
-        table_name, row = self.cad_event_mapper.map_event(
+        if self.cad_event_mapper.is_cancel_event(event):
+            self.cad_event_mapper.validate_cancel_event(event)
+            self.cad_event_watcher.acknowledge(event)
+            self._set_cad_import_status(
+                "已清除待處理的 CAD 事件；Project 資料未變更。",
+                event=event,
+            )
+            return "control", {}
+
+        project_rows = self._project_rows_by_table()
+        mapped = self.cad_event_mapper.map_command(
             event,
-            self._project_rows_by_table(),
+            project_rows,
+            coordinate_system=self._cad_coordinate_system(),
         )
+        table_name = mapped.table_name
         rows = getattr(self, table_name)
-        rows.append(row)
+        old_state = getattr(self, "dxf_last_import_debug", None)
+        old_row = None
+        binding_synced = False
+        binding_report = None
+
+        if mapped.operation == "add":
+            staged_state = self._stage_stale_dxf_state(
+                old_state,
+                f"CAD add 已新增 {table_name}，尚無對應的 DXF binding",
+            )
+            rows.append(mapped.row)
+            committed_index = len(rows) - 1
+            committed_row = rows[committed_index]
+        else:
+            if mapped.row_index is None:
+                raise ValueError("Strut update 缺少原資料列索引。")
+            committed_index = mapped.row_index
+            old_row = copy.deepcopy(rows[committed_index])
+            try:
+                staged_state, binding_synced, binding_reason = (
+                    self.cad_event_mapper.stage_dxf_strut_binding(
+                        old_state,
+                        mapped,
+                        old_row,
+                        event_id=event.get("event_id", ""),
+                    )
+                )
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                staged_state = None
+                binding_synced = False
+                binding_reason = f"DXF binding 無法建立：{exc}"
+            if binding_synced and isinstance(staged_state, Mapping):
+                staged_rows = copy.deepcopy(project_rows)
+                staged_rows["struts"][committed_index] = copy.deepcopy(mapped.row)
+                try:
+                    checker = getattr(self, "dxf_compatibility_checker", None)
+                    if checker is None:
+                        checker = self._ensure_project_service().dxf_compatibility_checker
+                    binding_report = checker.compare(
+                        staged_state,
+                        staged_state,
+                        staged_rows,
+                    )
+                    if not binding_report.compatible:
+                        binding_synced = False
+                        binding_reason = "DXF compatibility check 未通過"
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    binding_synced = False
+                    binding_reason = f"DXF compatibility check 無法確認：{exc}"
+            if not binding_synced:
+                staged_state = self._stage_stale_dxf_state(
+                    old_state,
+                    binding_reason or "無法可靠同步 Strut DXF binding",
+                )
+            committed_row = self._ensure_project_data().replace_row(
+                "struts",
+                committed_index,
+                mapped.row,
+            )
+
+        self.dxf_last_import_debug = staged_state
         try:
             self.cad_event_watcher.acknowledge(event)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-            rows.pop()
+            if mapped.operation == "add":
+                rows.pop()
+            else:
+                self._ensure_project_data().replace_row(
+                    "struts",
+                    committed_index,
+                    old_row,
+                )
+            self.dxf_last_import_debug = old_state
             raise
 
         self._refresh_tree(table_name)
-        self._select_input_row(table_name, len(rows) - 1)
-        self._handle_input_data_changed(preserve_view=False, table_name=table_name)
-        identifier_field = self.table_columns[table_name][0]
-        identifier = str(row.get(identifier_field, "")).strip()
-        self._set_cad_import_status(
-            f"匯入成功：{identifier}",
-            event=event,
+        self._select_input_row(table_name, committed_index)
+        self.last_dxf_compatibility_report = (
+            binding_report if binding_synced else None
         )
-        return table_name, row
+        self._handle_input_data_changed(
+            preserve_view=False,
+            table_name=table_name,
+            dxf_binding_changed=False,
+        )
+
+        identifier_field = self.table_columns[table_name][0]
+        identifier = str(committed_row.get(identifier_field, "")).strip()
+        if mapped.operation == "add":
+            status = f"匯入成功：{identifier}"
+        else:
+            binding_ready = binding_synced and not self._dxf_binding_is_stale()
+            status = (
+                f"已更新支撐 {identifier}；DXF 工程線已同步"
+                if binding_ready
+                else f"已更新支撐 {identifier}；DXF 圖面定位需重新確認"
+            )
+            notes = []
+            if mapped.associated_ids_cleared:
+                notes.append("柱/托梁關聯 ID 已清除")
+            if mapped.corner_brace_lengths_cleared:
+                notes.append("角撐長度已清除")
+            if notes:
+                status += "；" + "；".join(notes)
+            status += "。"
+        self._set_cad_import_status(status, event=event)
+        return table_name, committed_row
 
     def read_cad_event(self, *, report_errors=False):
         try:
@@ -5964,9 +5655,19 @@ class SupportInputApp:
             self._apply_cad_event(event)
             return True
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-            self._set_cad_import_status("CAD 事件匯入失敗", error=exc)
+            error_message = (
+                f"{exc}\n事件仍保留；若要放棄這次事件，請在 CAD 執行 SUPCLEAR。"
+            )
+            self._set_cad_import_status(
+                "CAD 事件匯入失敗",
+                error=error_message,
+            )
             if report_errors:
-                messagebox.showerror("CAD 匯入失敗", str(exc), parent=self.root)
+                messagebox.showerror(
+                    "CAD 匯入失敗",
+                    error_message,
+                    parent=self.root,
+                )
         return False
 
     @staticmethod
@@ -6535,11 +6236,29 @@ class SupportInputApp:
         if index is None:
             return
 
-        value = self._parse_cell_value(table_name, column, new_value)
         rows = getattr(self, table_name)
-        old_value = rows[index].get(column, "")
-        if value == old_value:
-            return
+        project_field_committed = table_name in GEOMETRY_TABLES
+        if project_field_committed:
+            changed, value, error = self._commit_project_field_edit(
+                table_name,
+                index,
+                column,
+                new_value,
+            )
+            if error:
+                messagebox.showwarning(
+                    "輸入錯誤",
+                    error + " 已保留原值。",
+                    parent=self.root,
+                )
+                return
+            if not changed:
+                return
+        else:
+            value = self._parse_cell_value(table_name, column, new_value)
+            old_value = rows[index].get(column, "")
+            if value == old_value:
+                return
 
         if table_name == "material_specs":
             row = self.material_specs[index]
@@ -6621,7 +6340,8 @@ class SupportInputApp:
                 )
             return
 
-        rows[index][column] = value
+        if not project_field_committed:
+            rows[index][column] = value
         tree_columns = (
             tuple(tree["columns"])
             if hasattr(tree, "__getitem__")
@@ -6648,11 +6368,12 @@ class SupportInputApp:
                     rows[index]["Spec"] = ""
                     tree.set(row_id, "Spec", "")
             self._update_material_summary()
-        self._handle_input_data_changed(
-            preserve_view=True,
-            table_name=table_name,
-            field_name=column,
-        )
+        if not project_field_committed:
+            self._handle_input_data_changed(
+                preserve_view=True,
+                table_name=table_name,
+                field_name=column,
+            )
         if table_name == "struts" and index == getattr(self, "selected_strut_index", None):
             self._load_strut_detail(index)
             self._sync_preview_to_strut_selection(index)
@@ -6762,7 +6483,11 @@ class SupportInputApp:
 
         getattr(self, table_name).pop(index)
         self._refresh_tree(table_name)
-        self._handle_input_data_changed(preserve_view=True, table_name=table_name)
+        self._handle_input_data_changed(
+            preserve_view=True,
+            table_name=table_name,
+            dxf_binding_changed=table_name in GEOMETRY_TABLES,
+        )
 
     def _move_current_table_row(self, direction):
         if self.current_table not in ("walers", "struts", "braces"):
@@ -6807,286 +6532,36 @@ class SupportInputApp:
 
     def validate_data(self):
         self._clear_error_tags()
-        errors = []
-        warnings = []
-        waler_ids = set()
-        for row_index, row in enumerate(self.walers, start=1):
-            row_errors = []
-            row_warnings = []
-            waler_id = str(row.get("WalerID", "")).strip()
-            if not waler_id:
-                row_errors.append(f"{self._field_label('walers', 'WalerID')} 不可空白")
-            elif waler_id in waler_ids:
-                row_errors.append(f"{self._field_label('walers', 'WalerID')} 不可重複")
-            else:
-                waler_ids.add(waler_id)
+        report = ProjectDataValidator(
+            field_label=self._field_label,
+        ).validate(self._ensure_project_data())
 
-            coords = []
-            for coord in ["StartX", "StartY", "EndX", "EndY"]:
-                value = row.get(coord, "")
-                number = self._to_number(value)
-                if number is None:
-                    row_errors.append(f"{self._field_label('walers', coord)} 必須是數字")
-                else:
-                    coords.append(number)
+        tagged_rows = set()
+        for issue in report.errors:
+            key = (issue.table, issue.row_index)
+            if key not in tagged_rows:
+                self._tag_error_row(issue.table, issue.row_index - 1)
+                tagged_rows.add(key)
 
-            if len(coords) == 4:
-                length = self._line_length(coords[0], coords[1], coords[2], coords[3])
-                if length <= 0:
-                    row_errors.append("圍令長度必須大於 0")
+        def report_lines(title, issues):
+            lines = [title]
+            for issue in issues:
+                lines.append(
+                    f"{self._table_label(issue.table)} "
+                    f"第 {issue.row_index} 列：{issue.message}"
+                )
+            return lines
 
-            material_spec = str(row.get("material_spec", "") or "").strip()
-            if material_spec and material_spec not in self._material_spec_options("圍令"):
-                row_errors.append("材料規格必須從設定頁的圍令規格選擇")
-
-            if row_errors:
-                errors.append(("walers", row_index, row_errors))
-                self._tag_error_row("walers", row_index - 1)
-            elif row_warnings:
-                warnings.append(("walers", row_index, row_warnings))
-
-        waler_id_set = {row.get("WalerID") for row in self.walers if row.get("WalerID")}
-        waler_by_id = {
-            str(row.get("WalerID", "")).strip(): row
-            for row in self.walers
-            if str(row.get("WalerID", "") or "").strip()
-        }
-        strut_ids = set()
-        for row_index, row in enumerate(self.struts, start=1):
-            row_errors = []
-            row_warnings = []
-            strut_id = str(row.get("StrutID", "")).strip()
-            if not strut_id:
-                row_errors.append(f"{self._field_label('struts', 'StrutID')} 不可空白")
-            elif strut_id in strut_ids:
-                row_errors.append(f"{self._field_label('struts', 'StrutID')} 不可重複")
-            else:
-                strut_ids.add(strut_id)
-
-            for endpoint in ["FromWaler", "ToWaler"]:
-                value = str(row.get(endpoint, "")).strip()
-                if value and value not in waler_id_set:
-                    row_errors.append(f"{self._field_label('struts', endpoint)} 必須存在於圍令表")
-
-            from_waler = str(row.get("FromWaler", "") or "").strip()
-            to_waler = str(row.get("ToWaler", "") or "").strip()
-            if from_waler and to_waler and from_waler == to_waler:
-                row_errors.append(f"❌ 支撐 {strut_id or row_index} 起點圍令與終點圍令不可相同")
-
-            coords = []
-            for coord in ["StartX", "StartY", "EndX", "EndY"]:
-                value = row.get(coord, "")
-                number = self._to_number(value)
-                if number is None:
-                    row_errors.append(f"{self._field_label('struts', coord)} 必須是數字")
-                else:
-                    coords.append(number)
-
-            if len(coords) == 4:
-                if not self._line_length_positive(coords[0], coords[1], coords[2], coords[3]):
-                    row_errors.append("支撐長度必須大於 0")
-                length = self._line_length(coords[0], coords[1], coords[2], coords[3])
-                sx, sy, ex, ey = coords
-            else:
-                length = None
-                sx = sy = ex = ey = None
-
-            if len(coords) == 4:
-                if from_waler and from_waler in waler_by_id:
-                    if not self._point_on_waler_segment_with_tolerance(
-                        waler_by_id[from_waler],
-                        sx,
-                        sy,
-                        tolerance=50,
-                    ):
-                        row_errors.append(f"❌ 支撐 {strut_id or row_index} 起點未落於圍令 {from_waler} 上")
-                if to_waler and to_waler in waler_by_id:
-                    if not self._point_on_waler_segment_with_tolerance(
-                        waler_by_id[to_waler],
-                        ex,
-                        ey,
-                        tolerance=50,
-                    ):
-                        row_errors.append(f"❌ 支撐 {strut_id or row_index} 終點未落於圍令 {to_waler} 上")
-                if (
-                    from_waler
-                    and to_waler
-                    and from_waler in waler_by_id
-                    and to_waler in waler_by_id
-                    and from_waler != to_waler
-                    and self._walers_are_nearly_parallel(waler_by_id[from_waler], waler_by_id[to_waler])
-                    and not self._line_is_nearly_perpendicular_to_waler(
-                        sx,
-                        sy,
-                        ex,
-                        ey,
-                        waler_by_id[from_waler],
-                    )
-                ):
-                    row_warnings.append(f"⚠ 支撐 {strut_id or row_index} 與所選圍令方向可能不一致")
-
-            self._migrate_strut_position_fields(row)
-            for field in ["BeamPositions", "ColumnPositions"]:
-                raw_value = row.get(field, "")
-                positions, position_error = self._parse_position_list(raw_value)
-                if position_error:
-                    position_label = "托梁位置" if field == "BeamPositions" else "中間柱位置"
-                    row_errors.append(f"❌ {position_label}格式錯誤：{position_error}")
-                    continue
-                if self._has_duplicate_numbers(positions):
-                    position_label = "托梁位置" if field == "BeamPositions" else "中間柱位置"
-                    row_warnings.append(f"⚠ 支撐 {strut_id or row_index} {position_label}重複")
-                for number in positions:
-                    if length is not None and not (0 <= number <= length):
-                        row_errors.append(
-                            f"{self._field_label('struts', field)} {self._format_position_value(number)} "
-                            f"不在 0 ~ {self._format_position_value(length)} mm 範圍內"
-                        )
-
-            for field, field_label in self.STRUT_BRACE_LENGTH_FIELDS:
-                raw_value = row.get(field, "")
-                number = self._to_number(raw_value)
-                if number is None:
-                    row_errors.append(f"{field_label} 必須是數字且不可為負數")
-                elif number < 0:
-                    row_errors.append(f"❌ {strut_id or row_index} {field_label}不可為負數")
-
-            target_jack_region = self._to_number(
-                row.get("TargetJackRegion", "")
-            )
-            if target_jack_region is None:
-                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須是大於 0 的整數")
-            elif not float(target_jack_region).is_integer():
-                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須是整數")
-            elif target_jack_region <= 0:
-                row_errors.append(f"{self._field_label('struts', 'TargetJackRegion')} 必須大於 0")
-
-            material_spec = str(row.get("material_spec", "") or "").strip()
-            if material_spec and material_spec not in self._material_spec_options("支撐"):
-                row_errors.append("材料規格必須從設定頁的支撐規格選擇")
-
-            if row_errors:
-                errors.append(("struts", row_index, row_errors))
-                self._tag_error_row("struts", row_index - 1)
-            if row_warnings:
-                warnings.append(("struts", row_index, row_warnings))
-
-        brace_ids = set()
-        for row_index, row in enumerate(self.braces, start=1):
-            row_errors = []
-            brace_id = str(row.get("BraceID", "")).strip()
-            if not brace_id:
-                row_errors.append(f"{self._field_label('braces', 'BraceID')} 不可空白")
-            elif brace_id in brace_ids:
-                row_errors.append(f"{self._field_label('braces', 'BraceID')} 不可重複")
-            else:
-                brace_ids.add(brace_id)
-
-            for endpoint in ["FromWaler", "ToWaler"]:
-                value = str(row.get(endpoint, "")).strip()
-                if value and value not in waler_id_set:
-                    row_errors.append(f"{self._field_label('braces', endpoint)} 若有填值，應存在於圍令表")
-
-            from_waler = str(row.get("FromWaler", "") or "").strip()
-            to_waler = str(row.get("ToWaler", "") or "").strip()
-            if from_waler and to_waler and from_waler == to_waler:
-                row_errors.append(f"❌ 斜撐 {brace_id or row_index} 起點圍令與終點圍令不可相同")
-
-            coords = []
-            for coord in ["StartX", "StartY", "EndX", "EndY"]:
-                value = row.get(coord, "")
-                number = self._to_number(value)
-                if number is None:
-                    row_errors.append(f"{self._field_label('braces', coord)} 必須是數字")
-                else:
-                    coords.append(number)
-
-            if len(coords) == 4 and not self._line_length_positive(coords[0], coords[1], coords[2], coords[3]):
-                row_errors.append("斜撐長度必須大於 0")
-
-            if len(coords) == 4:
-                sx, sy, ex, ey = coords
-                if from_waler and from_waler in waler_by_id:
-                    if not self._point_on_waler_segment_with_tolerance(
-                        waler_by_id[from_waler],
-                        sx,
-                        sy,
-                        tolerance=50,
-                    ):
-                        row_errors.append(f"❌ 斜撐 {brace_id or row_index} 起點未落於圍令 {from_waler} 上")
-                if to_waler and to_waler in waler_by_id:
-                    if not self._point_on_waler_segment_with_tolerance(
-                        waler_by_id[to_waler],
-                        ex,
-                        ey,
-                        tolerance=50,
-                    ):
-                        row_errors.append(f"❌ 斜撐 {brace_id or row_index} 終點未落於圍令 {to_waler} 上")
-
-            if row_errors:
-                errors.append(("braces", row_index, row_errors))
-                self._tag_error_row("braces", row_index - 1)
-
-        for row_index, row in enumerate(self.inventory, start=1):
-            row_errors = []
-            usage = str(row.get("Usage", "") or "").strip()
-            spec = str(row.get("Spec", "") or "").strip()
-            if usage and usage not in ("支撐", "圍令"):
-                row_errors.append("用途必須是支撐或圍令")
-            if spec and usage and spec not in self._material_spec_options(usage):
-                row_errors.append("規格必須存在於材料規格表")
-            for field in ["Length", "Qty"]:
-                value = row.get(field, "")
-                number = self._to_number(value)
-                if number is None:
-                    row_errors.append(f"{self._field_label('inventory', field)} 必須是數字")
-                    continue
-                if field == "Length" and number <= 0:
-                    row_errors.append(f"{self._field_label('inventory', field)} 必須大於 0")
-                if field == "Qty" and number < 0:
-                    row_errors.append(f"{self._field_label('inventory', field)} 不可為負數")
-            if row_errors:
-                errors.append(("inventory", row_index, row_errors))
-                self._tag_error_row("inventory", row_index - 1)
-
-        material_spec_keys = set()
-        for row_index, row in enumerate(self.material_specs, start=1):
-            row_errors = []
-            usage = str(row.get("Usage", "") or "").strip()
-            spec = str(row.get("Spec", "") or "").strip()
-            if usage not in ("支撐", "圍令"):
-                row_errors.append("用途必須是支撐或圍令")
-            if not spec:
-                row_errors.append("材料規格不可空白")
-            key = (usage, spec.casefold())
-            if spec and key in material_spec_keys:
-                row_errors.append("用途與材料規格不可重複")
-            material_spec_keys.add(key)
-            if row_errors:
-                errors.append(("material_specs", row_index, row_errors))
-                self._tag_error_row("material_specs", row_index - 1)
-
-        if errors:
-            error_messages = ["【錯誤】"]
-            for table_name, row_index, row_errors in errors:
-                for message in row_errors:
-                    error_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
-            if warnings:
-                error_messages.extend(["", "【警告】"])
-                for table_name, row_index, row_warnings in warnings:
-                    for message in row_warnings:
-                        error_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
-            messagebox.showerror("驗證失敗", "\n".join(error_messages))
+        if report.errors:
+            messages = report_lines("【錯誤】", report.errors)
+            if report.warnings:
+                messages.extend(["", *report_lines("【警告】", report.warnings)])
+            messagebox.showerror("驗證失敗", "\n".join(messages))
             return False
-
-        if warnings:
-            warning_messages = ["【警告】"]
-            for table_name, row_index, row_warnings in warnings:
-                for message in row_warnings:
-                    warning_messages.append(f"{self._table_label(table_name)} 第 {row_index} 列：{message}")
-            messagebox.showwarning("驗證完成", "\n".join(warning_messages))
+        if report.warnings:
+            messages = report_lines("【警告】", report.warnings)
+            messagebox.showwarning("驗證完成", "\n".join(messages))
             return True
-
         messagebox.showinfo("驗證成功", "所有資料皆通過驗證。")
         return True
 
@@ -7101,16 +6576,6 @@ class SupportInputApp:
         if item_id in tree.get_children():
             tree.item(item_id, tags=("error",))
 
-    @staticmethod
-    def _has_duplicate_numbers(values):
-        normalized = []
-        for value in values:
-            try:
-                normalized.append(round(float(value), 6))
-            except (TypeError, ValueError):
-                continue
-        return len(normalized) != len(set(normalized))
-
     def _waler_coords(self, waler_row):
         x1 = self._to_number(waler_row.get("StartX"))
         y1 = self._to_number(waler_row.get("StartY"))
@@ -7121,65 +6586,6 @@ class SupportInputApp:
         if not self._line_length_positive(x1, y1, x2, y2):
             return None
         return x1, y1, x2, y2
-
-    def _point_on_waler_segment_with_tolerance(self, waler_row, px, py, tolerance=50):
-        coords = self._waler_coords(waler_row)
-        if coords is None or px is None or py is None:
-            return True
-
-        x1, y1, x2, y2 = coords
-        dx = x2 - x1
-        dy = y2 - y1
-        length_squared = dx * dx + dy * dy
-        if length_squared <= 0:
-            return True
-
-        projection_ratio = ((px - x1) * dx + (py - y1) * dy) / length_squared
-        clamped_ratio = min(max(projection_ratio, 0.0), 1.0)
-        closest_x = x1 + clamped_ratio * dx
-        closest_y = y1 + clamped_ratio * dy
-        distance = math.hypot(px - closest_x, py - closest_y)
-        return distance <= tolerance
-
-    def _walers_are_nearly_parallel(self, first_waler_row, second_waler_row, tolerance_degrees=15):
-        first = self._waler_coords(first_waler_row)
-        second = self._waler_coords(second_waler_row)
-        if first is None or second is None:
-            return False
-
-        x1, y1, x2, y2 = first
-        x3, y3, x4, y4 = second
-        first_angle = math.degrees(math.atan2(y2 - y1, x2 - x1))
-        second_angle = math.degrees(math.atan2(y4 - y3, x4 - x3))
-        diff = abs((first_angle - second_angle + 180) % 360 - 180)
-        diff = min(diff, 180 - diff)
-        return diff <= tolerance_degrees
-
-    def _line_is_nearly_perpendicular_to_waler(
-        self,
-        start_x,
-        start_y,
-        end_x,
-        end_y,
-        waler_row,
-        tolerance_degrees=30,
-    ):
-        coords = self._waler_coords(waler_row)
-        if coords is None or None in (start_x, start_y, end_x, end_y):
-            return True
-
-        wx1, wy1, wx2, wy2 = coords
-        line_dx = end_x - start_x
-        line_dy = end_y - start_y
-        waler_dx = wx2 - wx1
-        waler_dy = wy2 - wy1
-        line_length = math.hypot(line_dx, line_dy)
-        waler_length = math.hypot(waler_dx, waler_dy)
-        if line_length <= 0 or waler_length <= 0:
-            return True
-
-        dot_ratio = abs((line_dx * waler_dx + line_dy * waler_dy) / (line_length * waler_length))
-        return dot_ratio <= math.sin(math.radians(tolerance_degrees))
 
     def _to_number(self, value):
         if isinstance(value, (int, float)):
@@ -7879,86 +7285,26 @@ class SupportInputApp:
                 zorder=15,
             )
 
-    def _inventory_rows_for(self, material_spec: str, usage: str):
-        spec_key = str(material_spec or "").strip().casefold()
-        usage_key = str(usage or "").strip().casefold()
-        if not spec_key:
-            return []
-        return [
-            row
-            for row in self.inventory
-            if str(row.get("Spec", "") or "").strip().casefold() == spec_key
-            and str(row.get("Usage", "") or "").strip().casefold() == usage_key
-        ]
-
-    def _get_inventory_items(
-        self,
-        material_spec: str = "",
-        usage: str = "",
-    ) -> List[Dict[str, object]]:
-        material_spec = str(material_spec or "").strip()
-        if not material_spec:
-            return [
-                {
-                    "id": f"UNLIMITED-{length}",
-                    "length": length,
-                    "qty": UNLIMITED_INVENTORY_QTY,
-                }
-                for length in self._get_purchasable_lengths("", usage)
-            ]
-
-        stock_items = []
-        for index, row in enumerate(
-            self._inventory_rows_for(material_spec, usage),
-            start=1,
-        ):
-            length = self._to_number(row.get("Length"))
-            qty = self._to_number(row.get("Qty"))
-            if length is None or qty is None:
-                continue
-            if qty <= 0:
-                continue
-            stock_items.append({
-                "id": str(row.get("ItemCode", "") or "").strip()
-                or f"{material_spec}-{length}-{index}",
-                "length": length,
-                "qty": qty,
-            })
-        return stock_items
-
-    def _get_purchasable_lengths(
-        self,
-        material_spec: str = "",
-        usage: str = "",
-    ) -> List[int]:
-        material_spec = str(material_spec or "").strip()
-        usage_key = str(usage or "").strip().casefold()
-        rows = (
-            self._inventory_rows_for(material_spec, usage)
-            if material_spec
-            else [
-                row
-                for row in self.inventory
-                if not usage_key
-                or str(row.get("Usage", "") or "").strip().casefold()
-                in ("", usage_key)
-            ]
+    def _has_modified_waler_results(self, waler_id):
+        return any(
+            item.get("type") == "waler"
+            and isinstance(item.get("result"), dict)
+            and str(item["result"].get("waler_id", "") or "").strip()
+            == str(waler_id or "").strip()
+            and bool(item["result"].get("manual_modified"))
+            for item in self.result_items.values()
         )
-        lengths = set()
-        for row in rows:
-            length = self._to_number(row.get("Length"))
-            if length is None or length <= 0:
-                continue
-            lengths.add(int(round(length)))
-        if not lengths and not material_spec:
-            return list(support.STEEL_LENGTHS)
-        return sorted(lengths)
 
     def _open_waler_solver(self):
         if not self.validate_data():
             return
 
-        waler_inputs = self.build_waler_inputs()
+        _, waler_builder = self._ensure_solver_input_builders()
+        try:
+            waler_inputs = waler_builder.build_all(self.project_data)
+        except SolverInputBuildError as exc:
+            self.show_result(f"無法建立圍令 Solver 輸入：\n{exc}")
+            return
         if not waler_inputs:
             self.show_result("錯誤：找不到圍令輸入資料")
             return
@@ -7968,30 +7314,31 @@ class SupportInputApp:
         selected_waler = dialog.open()
         if selected_waler is None:
             return
+        if self._has_modified_waler_results(selected_waler):
+            confirmed = messagebox.askyesno(
+                "重新計算圍令",
+                (
+                    f"圍令 {selected_waler} 有已修改的方案。\n"
+                    "重新計算會以新的五個方案取代目前結果，是否繼續？"
+                ),
+                parent=self.root,
+            )
+            if not confirmed:
+                return
 
-        waler_data = waler_inputs[selected_waler]
-        material_spec = str(waler_data.get("material_spec", "") or "").strip()
-        purchasable_lengths = self._get_purchasable_lengths(
-            material_spec,
-            "圍令",
-        )
-        if material_spec and not purchasable_lengths:
+        waler_input = waler_inputs[selected_waler]
+        if waler_input.material_spec and not waler_input.purchasable_lengths:
             self.show_result(
-                f"錯誤：圍令 {selected_waler} 所選規格 {material_spec} 沒有可用庫存料長"
+                f"錯誤：圍令 {selected_waler} 所選規格 "
+                f"{waler_input.material_spec} 沒有可用庫存料長"
             )
             return
         solver_dialog = WalerSolverDialog(
             self.root,
-            selected_waler,
-            waler_data.get("start_point"),
-            waler_data.get("end_point"),
-            waler_data["length"],
-            len(waler_data.get("forbidden_points", [])),
-            waler_data.get("forbidden_points", []),
-            self._get_inventory_items(material_spec, "圍令"),
-            purchasable_lengths,
+            waler_input,
             self.solver_memory,
             self._store_waler_result,
+            optimize_waler=self.make_waler_optimizer(),
         )
         solver_dialog.open()
 
@@ -8013,13 +7360,21 @@ class SupportInputApp:
         if selected_zoning is None:
             return
 
-        configs = self.build_support_inputs(zoning=selected_zoning)
-        if not configs:
+        support_builder, _ = self._ensure_solver_input_builders()
+        try:
+            support_input = support_builder.build_zone(
+                self.project_data,
+                selected_zoning,
+            )
+        except SolverInputBuildError as exc:
+            self.show_result(f"無法建立支撐 Solver 輸入：\n{exc}")
+            return
+        if not support_input.configs:
             self.show_result(f"錯誤：分區 {selected_zoning} 沒有可供計算的支撐")
             return
         missing_inventory = [
             config.support_id
-            for config in configs
+            for config in support_input.configs
             if config.material_spec and not config.steel_lengths
         ]
         if missing_inventory:
@@ -8031,10 +7386,11 @@ class SupportInputApp:
 
         solver_dialog = SupportSolverDialog(
             self.root,
-            selected_zoning,
-            configs,
-            self.support_candidate_cache,
+            support_input,
             self._store_support_solution,
+            optimize_support_zone=self.make_support_optimizer(
+                self.support_candidate_cache
+            ),
         )
         solver_dialog.open()
 
@@ -8130,176 +7486,8 @@ class SupportInputApp:
                 if stored_diagnostics and stored_diagnostics.result_is_stable
                 else ""
             )
-            + "請在結果頁勾選方案查看圖面，雙擊方案可查看詳細資訊。"
+            + "請在結果頁勾選方案查看圖面，雙擊方案可直接修改鋼材配置。"
         )
-
-    def build_support_inputs(self, zoning: Optional[str] = None) -> List[support.SupportConfig]:
-        supports: List[support.SupportConfig] = []
-        waler_type_by_id = {
-            str(row.get("WalerID", "") or "").strip(): support.normalize_waler_type(
-                row.get("material_spec", "")
-            )
-            for row in self.walers
-            if str(row.get("WalerID", "") or "").strip()
-        }
-        for row in self.struts:
-            row_zoning = str(row.get("Zoning", "") or "").strip()
-            if zoning is not None and row_zoning != zoning:
-                continue
-
-            x1 = self._to_number(row.get("StartX"))
-            y1 = self._to_number(row.get("StartY"))
-            x2 = self._to_number(row.get("EndX"))
-            y2 = self._to_number(row.get("EndY"))
-            explicit_length = self._to_number(row.get("Length"))
-            if explicit_length is not None:
-                total_length = explicit_length
-            else:
-                total_length = self._line_length(x1, y1, x2, y2) if None not in (x1, y1, x2, y2) else 0
-            self._migrate_strut_position_fields(row)
-            column_positions, _ = self._parse_position_list(
-                row.get("ColumnPositions", "")
-            )
-            beam_positions, _ = self._parse_position_list(
-                row.get("BeamPositions", "")
-            )
-            # DXF 匯入時這兩個欄位已由 Component Association 逐支撐建立；
-            # Solver 只消費所屬支撐的附屬位置，不再搜尋全域 Column/Beam。
-            pile_centers = [
-                int(round(value))
-                for value in column_positions
-            ]
-            waler_centers = [
-                int(round(value))
-                for value in beam_positions
-            ]
-            support_id = str(
-                row.get("SupportID") or row.get("StrutID") or ""
-            ).strip()
-            target_jack_region_value = self._to_number(
-                row.get("TargetJackRegion")
-            )
-            target_jack_region = (
-                int(target_jack_region_value)
-                if target_jack_region_value is not None
-                else 2
-            )
-            from_waler_id = str(row.get("FromWaler", "") or "").strip()
-            to_waler_id = str(row.get("ToWaler", "") or "").strip()
-            material_spec = str(row.get("material_spec", "") or "").strip()
-            supports.append(
-                support.SupportConfig(
-                    support_id=support_id,
-                    total_length=int(round(total_length)),
-                    pile_centers=pile_centers,
-                    waler_centers=waler_centers,
-                    target_jack_region=target_jack_region,
-                    material_spec=material_spec,
-                    from_waler_type=waler_type_by_id.get(from_waler_id, "Steel"),
-                    to_waler_type=waler_type_by_id.get(to_waler_id, "Steel"),
-                    steel_lengths=self._get_purchasable_lengths(
-                        material_spec,
-                        "支撐",
-                    ),
-                )
-            )
-        return supports
-
-    def build_waler_inputs(self) -> Dict[str, Dict[str, object]]:
-        def project_point_onto_waler(waler_row, px, py):
-            wx1 = self._to_number(waler_row.get("StartX"))
-            wy1 = self._to_number(waler_row.get("StartY"))
-            wx2 = self._to_number(waler_row.get("EndX"))
-            wy2 = self._to_number(waler_row.get("EndY"))
-            if None in (wx1, wy1, wx2, wy2):
-                return None
-            waler_length = self._line_length(wx1, wy1, wx2, wy2)
-            if waler_length <= 0:
-                return None
-            dx = wx2 - wx1
-            dy = wy2 - wy1
-            projection = ((px - wx1) * dx + (py - wy1) * dy) / waler_length
-            # 確認點是否落在 Waler 線上
-            distance_to_line = abs(dx * (wy1 - py) - dy * (wx1 - px)) / waler_length
-            if distance_to_line > 1e-6:
-                return None
-            if projection < -1e-6 or projection - waler_length > 1e-6:
-                return None
-            return int(round(projection))
-
-        waler_inputs: Dict[str, Dict[str, object]] = {}
-        waler_by_id = {
-            str(row.get("WalerID", "")): row
-            for row in self.walers
-            if str(row.get("WalerID", "") or "").strip()
-        }
-
-        for waler_id, waler_row in waler_by_id.items():
-            x1 = self._to_number(waler_row.get("StartX"))
-            y1 = self._to_number(waler_row.get("StartY"))
-            x2 = self._to_number(waler_row.get("EndX"))
-            y2 = self._to_number(waler_row.get("EndY"))
-            length = self._line_length(x1, y1, x2, y2) if None not in (x1, y1, x2, y2) else 0
-            waler_inputs[waler_id] = {
-                "start_point": (x1, y1),
-                "end_point": (x2, y2),
-                "length": int(round(length)),
-                "forbidden_points": [],
-                "material_spec": str(waler_row.get("material_spec", "") or "").strip(),
-            }
-
-        for row in self.struts:
-            self._migrate_strut_position_fields(row)
-            from_waler = str(row.get("FromWaler", "") or "").strip()
-            to_waler = str(row.get("ToWaler", "") or "").strip()
-            sx = self._to_number(row.get("StartX"))
-            sy = self._to_number(row.get("StartY"))
-            ex = self._to_number(row.get("EndX"))
-            ey = self._to_number(row.get("EndY"))
-
-            if from_waler and from_waler in waler_by_id and None not in (sx, sy):
-                position = project_point_onto_waler(waler_by_id[from_waler], sx, sy)
-                if position is not None:
-                    waler_inputs[from_waler]["forbidden_points"].append(position)
-                    start_len = self._to_number(row.get("FromBraceToWalerStartLen"))
-                    end_len = self._to_number(row.get("FromBraceToWalerEndLen"))
-                    if start_len is not None:
-                        waler_inputs[from_waler]["forbidden_points"].append(position - start_len)
-                    if end_len is not None:
-                        waler_inputs[from_waler]["forbidden_points"].append(position + end_len)
-
-            if to_waler and to_waler in waler_by_id and None not in (ex, ey):
-                position = project_point_onto_waler(waler_by_id[to_waler], ex, ey)
-                if position is not None:
-                    waler_inputs[to_waler]["forbidden_points"].append(position)
-                    start_len = self._to_number(row.get("ToBraceToWalerStartLen"))
-                    end_len = self._to_number(row.get("ToBraceToWalerEndLen"))
-                    if start_len is not None:
-                        waler_inputs[to_waler]["forbidden_points"].append(position - start_len)
-                    if end_len is not None:
-                        waler_inputs[to_waler]["forbidden_points"].append(position + end_len)
-
-        for row in self.braces:
-            from_waler = str(row.get("FromWaler", "") or "").strip()
-            to_waler = str(row.get("ToWaler", "") or "").strip()
-            sx = self._to_number(row.get("StartX"))
-            sy = self._to_number(row.get("StartY"))
-            ex = self._to_number(row.get("EndX"))
-            ey = self._to_number(row.get("EndY"))
-            if from_waler and from_waler in waler_by_id and None not in (sx, sy):
-                position = project_point_onto_waler(waler_by_id[from_waler], sx, sy)
-                if position is not None:
-                    waler_inputs[from_waler]["forbidden_points"].append(position)
-            if to_waler and to_waler in waler_by_id and None not in (ex, ey):
-                position = project_point_onto_waler(waler_by_id[to_waler], ex, ey)
-                if position is not None:
-                    waler_inputs[to_waler]["forbidden_points"].append(position)
-
-        for data in waler_inputs.values():
-            unique = sorted(set(data["forbidden_points"]))
-            data["forbidden_points"] = unique
-
-        return waler_inputs
 
     def show_result(self, text):
         message = str(text or "").rstrip()
@@ -8321,1949 +7509,13 @@ class SupportInputApp:
         self.result_text.see("end")
         self.result_text.configure(state="disabled")
 
-class WalerSelectionDialog:
-    def __init__(self, parent, waler_ids: List[str]):
-        self.selected = None
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("選擇圍令")
-        self.dialog.grab_set()
-        self.dialog.geometry("320x140")
-        self.dialog.resizable(False, False)
-
-        label = ttk.Label(self.dialog, text="請選擇要配置的圍令：", font=(None, 12))
-        label.pack(padx=12, pady=(12, 6), anchor="w")
-
-        self.selection = tk.StringVar()
-        self.combobox = ttk.Combobox(self.dialog, values=waler_ids, textvariable=self.selection, state="readonly")
-        if waler_ids:
-            self.combobox.set(waler_ids[0])
-        self.combobox.pack(fill="x", padx=12, pady=6)
-
-        button_frame = ttk.Frame(self.dialog)
-        button_frame.pack(padx=12, pady=12, fill="x")
-
-        ok_btn = ttk.Button(button_frame, text="確定", command=self._on_ok)
-        cancel_btn = ttk.Button(button_frame, text="取消", command=self._on_cancel)
-        ok_btn.pack(side="left", expand=True, padx=6)
-        cancel_btn.pack(side="left", expand=True, padx=6)
-
-        self.dialog.bind("<Return>", lambda event: self._on_ok())
-        self.dialog.bind("<Escape>", lambda event: self._on_cancel())
-
-    def _on_ok(self):
-        selection = self.selection.get().strip()
-        if selection:
-            self.selected = selection
-        self.dialog.destroy()
-
-    def _on_cancel(self):
-        self.selected = None
-        self.dialog.destroy()
-
-    def open(self):
-        self.dialog.wait_window()
-        return self.selected
-
-
-class ZoningSelectionDialog:
-    def __init__(self, parent, zonings: List[str]):
-        self.selected = None
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title("選擇分區")
-        self.dialog.grab_set()
-        self.dialog.geometry("320x140")
-        self.dialog.resizable(False, False)
-
-        label = ttk.Label(
-            self.dialog,
-            text="請選擇要執行支撐配置的分區：",
-            font=(None, 12),
-        )
-        label.pack(padx=12, pady=(12, 6), anchor="w")
-
-        self.selection = tk.StringVar()
-        self.combobox = ttk.Combobox(
-            self.dialog,
-            values=zonings,
-            textvariable=self.selection,
-            state="readonly",
-        )
-        if zonings:
-            self.combobox.set(zonings[0])
-        self.combobox.pack(fill="x", padx=12, pady=6)
-
-        button_frame = ttk.Frame(self.dialog)
-        button_frame.pack(padx=12, pady=12, fill="x")
-        ttk.Button(
-            button_frame,
-            text="確定",
-            command=self._on_ok,
-        ).pack(side="left", expand=True, padx=6)
-        ttk.Button(
-            button_frame,
-            text="取消",
-            command=self._on_cancel,
-        ).pack(side="left", expand=True, padx=6)
-
-        self.dialog.bind("<Return>", lambda event: self._on_ok())
-        self.dialog.bind("<Escape>", lambda event: self._on_cancel())
-
-    def _on_ok(self):
-        selection = self.selection.get().strip()
-        if selection:
-            self.selected = selection
-        self.dialog.destroy()
-
-    def _on_cancel(self):
-        self.selected = None
-        self.dialog.destroy()
-
-    def open(self):
-        self.dialog.wait_window()
-        return self.selected
-
-
-def _text_is_at_bottom(text_widget, tolerance: float = 0.001) -> bool:
-    try:
-        return text_widget.yview()[1] >= 1.0 - tolerance
-    except (tk.TclError, IndexError):
-        return True
-
-
-class TextRedirector:
-    def __init__(self, text_widget, poll_interval: int = 50):
-        self.text_widget = text_widget
-        self._queue = queue.Queue()
-        self._poll_interval = poll_interval
-        try:
-            self.text_widget.after(self._poll_interval, self._flush_queue)
-        except tk.TclError:
-            pass
-
-    def write(self, message):
-        if not message:
-            return
-        self._queue.put(message)
-
-    def _flush_queue(self):
-        try:
-            messages = []
-            while True:
-                try:
-                    messages.append(self._queue.get_nowait())
-                except queue.Empty:
-                    break
-
-            if messages:
-                follow_new_output = _text_is_at_bottom(self.text_widget)
-                self.text_widget.configure(state="normal")
-                self.text_widget.insert("end", "".join(messages))
-                if follow_new_output:
-                    self.text_widget.see("end")
-                self.text_widget.configure(state="disabled")
-            self.text_widget.after(self._poll_interval, self._flush_queue)
-        except tk.TclError:
-            pass
-
-    def flush(self):
-        pass
-
-
-class SolverDialogThreadBridge:
-    """Queue worker results so only the Tk main thread touches widgets."""
-
-    def _initialize_ui_bridge(self):
-        self._closed = False
-        self._ui_queue = queue.Queue()
-        self.dialog.after(50, self._poll_ui_queue)
-
-    def _post_ui(self, callback):
-        if not self._closed:
-            self._ui_queue.put(callback)
-
-    def _poll_ui_queue(self):
-        if self._closed:
-            return
-        try:
-            while True:
-                try:
-                    callback = self._ui_queue.get_nowait()
-                except queue.Empty:
-                    break
-                if not self._closed:
-                    callback()
-            if not self._closed and self.dialog.winfo_exists():
-                self.dialog.after(50, self._poll_ui_queue)
-        except tk.TclError:
-            self._closed = True
-
-    def _close_ui_bridge(self):
-        self._closed = True
-        try:
-            while True:
-                self._ui_queue.get_nowait()
-        except queue.Empty:
-            pass
-
-
-class SupportSolverDialog(SolverDialogThreadBridge):
-    def __init__(
-        self,
-        parent,
-        zoning: str,
-        configs: List[support.SupportConfig],
-        candidate_cache,
-        callback,
-    ):
-        self.zoning = zoning
-        self.configs = configs
-        self.candidate_cache = candidate_cache
-        self.callback = callback
-        self.solution = None
-
-        config_keys = [
-            support.get_support_config_key(config)
-            for config in configs
-        ]
-        duplicate_config_count = len(config_keys) - len(set(config_keys))
-        support_ids = ", ".join(config.support_id for config in configs)
-        region_counts = Counter(
-            config.target_jack_region
-            for config in configs
-        )
-        region_statistics = ", ".join(
-            f"區域 {region}: {count}"
-            for region, count in sorted(region_counts.items())
-        ) or "無"
-
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title(f"支撐配置 - 分區 {zoning}")
-        self.dialog.geometry("900x720")
-        self.dialog.grab_set()
-
-        frame = ttk.Frame(self.dialog)
-        frame.pack(fill="both", expand=True, padx=12, pady=12)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(2, weight=1)
-
-        info_frame = ttk.LabelFrame(frame, text="固定資訊")
-        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        info_frame.columnconfigure(1, weight=1)
-        info_frame.columnconfigure(3, weight=1)
-
-        info_items = [
-            ("分區", zoning, "支撐數量", str(len(configs))),
-        ]
-        if duplicate_config_count:
-            info_items.append(
-                (
-                    "重複設定提醒",
-                    f"有 {duplicate_config_count} 組設定重複",
-                    "目標千斤頂區域統計",
-                    region_statistics,
-                )
-            )
-        else:
-            info_items.append(
-                ("目標千斤頂區域統計", region_statistics, "", "")
-            )
-        for row_index, (left_label, left_value, right_label, right_value) in enumerate(info_items):
-            ttk.Label(info_frame, text=f"{left_label}：").grid(
-                row=row_index,
-                column=0,
-                sticky="ne",
-                padx=(8, 4),
-                pady=3,
-            )
-            ttk.Label(info_frame, text=left_value).grid(
-                row=row_index,
-                column=1,
-                sticky="nw",
-                padx=(0, 12),
-                pady=3,
-            )
-            if right_label:
-                ttk.Label(info_frame, text=f"{right_label}：").grid(
-                    row=row_index,
-                    column=2,
-                    sticky="ne",
-                    padx=(8, 4),
-                    pady=3,
-                )
-                ttk.Label(info_frame, text=right_value).grid(
-                    row=row_index,
-                    column=3,
-                    sticky="nw",
-                    padx=(0, 8),
-                    pady=3,
-                )
-
-        ttk.Label(info_frame, text="支撐編號清單：").grid(
-            row=len(info_items),
-            column=0,
-            sticky="ne",
-            padx=(8, 4),
-            pady=3,
-        )
-        ttk.Label(
-            info_frame,
-            text=support_ids,
-            justify="left",
-            wraplength=700,
-        ).grid(
-            row=len(info_items),
-            column=1,
-            columnspan=3,
-            sticky="nw",
-            padx=(0, 8),
-            pady=3,
-        )
-
-        settings_frame = ttk.LabelFrame(frame, text="材料比例設定")
-        settings_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-
-        ttk.Label(settings_frame, text="短料目標比例（%）").grid(
-            row=0, column=0, sticky="e", padx=(8, 4), pady=5
-        )
-        self.short_ratio_var = tk.StringVar(
-            value=str(support.SUPPORT_DEFAULT_SHORT_MATERIAL_RATIO)
-        )
-        ttk.Entry(
-            settings_frame,
-            textvariable=self.short_ratio_var,
-            width=8,
-        ).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=5)
-
-        ttk.Label(settings_frame, text="中料目標比例（%）").grid(
-            row=0, column=2, sticky="e", padx=(8, 4), pady=5
-        )
-        self.mid_ratio_var = tk.StringVar(
-            value=str(support.SUPPORT_DEFAULT_MID_MATERIAL_RATIO)
-        )
-        ttk.Entry(
-            settings_frame,
-            textvariable=self.mid_ratio_var,
-            width=8,
-        ).grid(row=0, column=3, sticky="w", padx=(0, 18), pady=5)
-
-        ttk.Label(settings_frame, text="長料目標比例（%）").grid(
-            row=0, column=4, sticky="e", padx=(8, 4), pady=5
-        )
-        self.long_ratio_var = tk.StringVar(
-            value=str(support.SUPPORT_DEFAULT_LONG_MATERIAL_RATIO)
-        )
-        ttk.Entry(
-            settings_frame,
-            textvariable=self.long_ratio_var,
-            width=8,
-        ).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=5)
-
-        ttk.Label(
-            settings_frame,
-            text=(
-                "搜尋策略：系統自動調整。系統會依合法方案、候選完整度與搜尋穩定度，"
-                "自動調整計算強度；不會自行放寬工程條件。"
-            ),
-            foreground="#4b5563",
-            wraplength=790,
-            justify="left",
-        ).grid(
-            row=1,
-            column=0,
-            columnspan=6,
-            sticky="ew",
-            padx=8,
-            pady=(3, 6),
-        )
-
-        log_frame = ttk.LabelFrame(frame, text="支撐求解執行訊息")
-        log_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 10))
-        log_frame.rowconfigure(2, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-
-        self.summary_var = tk.StringVar(value="尚未開始計算。")
-        summary_frame = ttk.LabelFrame(log_frame, text="一般摘要")
-        summary_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
-        summary_frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            summary_frame,
-            textvariable=self.summary_var,
-            justify="left",
-            wraplength=830,
-            padding=(8, 6),
-        ).grid(row=0, column=0, sticky="ew")
-        ttk.Label(log_frame, text="詳細執行訊息").grid(
-            row=1, column=0, sticky="w", padx=6, pady=(3, 0)
-        )
-
-        self.result_text = scrolledtext.ScrolledText(
-            log_frame,
-            height=20,
-            wrap="none",
-            state="disabled",
-            font=("Consolas", 10),
-        )
-        self.result_text.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
-        self.text_writer = TextRedirector(self.result_text)
-
-        button_frame = ttk.Frame(frame)
-        button_frame.grid(row=3, column=0, sticky="ew")
-        self.run_button = ttk.Button(
-            button_frame,
-            text="開始計算",
-            command=self._run_solver,
-        )
-        self.run_button.pack(side="left", padx=6)
-        ttk.Button(
-            button_frame,
-            text="關閉",
-            command=self._on_close,
-        ).pack(side="right", padx=6)
-
-        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._initialize_ui_bridge()
-
-    def _append_message(self, text):
-        follow_new_output = _text_is_at_bottom(self.result_text)
-        self.result_text.configure(state="normal")
-        self.result_text.insert("end", text)
-        if follow_new_output:
-            self.result_text.see("end")
-        self.result_text.configure(state="disabled")
-
-    def _run_solver(self):
-        try:
-            short_ratio = float(self.short_ratio_var.get().strip())
-            mid_ratio = float(self.mid_ratio_var.get().strip())
-            long_ratio = float(self.long_ratio_var.get().strip())
-        except ValueError:
-            messagebox.showerror(
-                "輸入錯誤",
-                "材料比例必須為有效數字",
-                parent=self.dialog,
-            )
-            return
-
-        try:
-            material_ratio_targets = support.normalize_material_ratio_targets(
-                short_ratio,
-                mid_ratio,
-                long_ratio,
-            )
-        except ValueError as exc:
-            messagebox.showerror(
-                "輸入錯誤",
-                str(exc),
-                parent=self.dialog,
-            )
-            return
-
-        self.result_text.configure(state="normal")
-        self.result_text.delete("1.0", "end")
-        self.result_text.configure(state="disabled")
-        self.solution = None
-        self.summary_var.set(
-            "正在建立材料組合與配置候選……系統會自動判斷是否需要加強搜尋。"
-        )
-        policy = solver_search.DEFAULT_SEARCH_POLICY
-        self._append_message(
-            f"=== 分區 {self.zoning} 支撐配置開始 ===\n"
-            f"搜尋政策：{policy.policy_id} v{policy.policy_version}\n"
-            f"Phase 1：每支支撐完整處理 {policy.support_phase1_length_combination_count} 組材料組合；"
-            f"最多保留 {policy.support_phase1_retained_candidate_count} 個候選送入全域配置。\n"
-            f"候選保留順序：每 {policy.support_phase1_jack_bucket_size} mm "
-            f"Jack區間保留 {policy.support_phase1_candidates_per_jack_bucket} 個代表方案，"
-            f"再保留材料型態，剩餘名額依單體分數補入。\n"
-        )
-        self.run_button.configure(state="disabled")
-        thread = threading.Thread(
-            target=self._solver_thread,
-            args=(
-                material_ratio_targets,
-                support.SUPPORT_MATERIAL_RATIO_WEIGHT,
-            ),
-            daemon=True,
-        )
-        thread.start()
-
-    @staticmethod
-    def _log_candidate_shortage(
-        zoning,
-        config,
-        actual_valid_count,
-        diagnostic_record,
-    ):
-        benchmark = dict(
-            (diagnostic_record.get("diagnostics", {}) or {}).get(
-                "candidate_benchmark", {}
-            )
-            or {}
-        )
-        invalid_reasons = Counter(
-            (diagnostic_record.get("diagnostics", {}) or {}).get(
-                "invalid_reason_counts", {}
-            )
-            or {}
-        )
-        region_mismatch_count = int(
-            (diagnostic_record.get("diagnostics", {}) or {}).get(
-                "target_region_mismatch_count", 0
-            )
-            or 0
-        )
-        support.log("支撐候選方案不足。")
-        support.log(f"分區：{zoning}")
-        support.log(f"支撐：{config.support_id}")
-        support.log(f"實際合法候選數：{actual_valid_count}")
-        support.log(
-            "配置流程："
-            f"原始 {int(benchmark.get('raw_layout_count', 0) or 0)}、"
-            f"完整合法 {int(benchmark.get('valid_layout_count', 0) or 0)}、"
-            f"目標 Jack 區域後 {int(benchmark.get('candidate_count_before_topn', 0) or 0)}"
-        )
-        if invalid_reasons:
-            support.log("主要不合法原因：")
-            for reason, count in invalid_reasons.most_common(3):
-                support.log(f"  - {reason}：{count}")
-        if region_mismatch_count:
-            support.log(f"  - Jack Region 不符：{region_mismatch_count}")
-        support.log("請檢查該支撐的幾何、禁止區、Jack Region 與可用材料條件。")
-
-    def _solve(
-        self,
-        material_ratio_targets,
-        material_ratio_weight,
-    ):
-        policy = solver_search.DEFAULT_SEARCH_POLICY
-        max_steel_combination_count = policy.support_phase1_length_combination_count
-        target_valid_candidate_count = policy.support_phase1_retained_candidate_count
-        candidates_by_support = []
-        candidate_statuses = []
-
-        for config in self.configs:
-            diagnostic_record = {}
-            phase1_beam_width = support.SUPPORT_PHASE1_LAYOUT_BEAM_WIDTH
-            max_layouts_per_combo = support.SUPPORT_PHASE1_MAX_LAYOUTS_PER_COMBO
-            min_processed_steel_combinations = (
-                support.SUPPORT_DEFAULT_MIN_PROCESSED_STEEL_COMBINATIONS
-            )
-            min_candidate_pool_size = support.SUPPORT_DEFAULT_MIN_CANDIDATE_POOL_SIZE
-            min_unique_jack_centers = support.SUPPORT_DEFAULT_MIN_UNIQUE_JACK_CENTERS
-            min_no_under_4000_candidates = (
-                support.SUPPORT_DEFAULT_MIN_NO_UNDER_4000_CANDIDATES
-            )
-            min_unique_material_styles = (
-                support.SUPPORT_DEFAULT_MIN_UNIQUE_MATERIAL_STYLES
-            )
-            jack_center_bucket_size = policy.support_phase1_jack_bucket_size
-            min_candidates_per_jack_bucket = policy.support_phase1_candidates_per_jack_bucket
-            min_candidates_per_material_style = (
-                support.SUPPORT_DEFAULT_MIN_CANDIDATES_PER_MATERIAL_STYLE
-            )
-            min_retained_no_under_4000_candidates = (
-                support.SUPPORT_DEFAULT_MIN_RETAINED_NO_UNDER_4000_CANDIDATES
-            )
-            final_candidate_count = target_valid_candidate_count
-            cache_key = support.build_support_candidate_cache_key(
-                config,
-                max_length_combinations=max_steel_combination_count,
-                final_candidate_count=final_candidate_count,
-                beam_width=phase1_beam_width,
-                max_layouts_per_combo=max_layouts_per_combo,
-                min_processed_steel_combinations=min_processed_steel_combinations,
-                min_candidate_pool_size=min_candidate_pool_size,
-                min_unique_jack_centers=min_unique_jack_centers,
-                min_no_under_4000_candidates=min_no_under_4000_candidates,
-                min_unique_material_styles=min_unique_material_styles,
-                jack_center_bucket_size=jack_center_bucket_size,
-                min_candidates_per_jack_bucket=min_candidates_per_jack_bucket,
-                min_candidates_per_material_style=min_candidates_per_material_style,
-                min_retained_no_under_4000_candidates=min_retained_no_under_4000_candidates,
-                solver_search_policy_id=policy.policy_id,
-                solver_search_policy_version=policy.policy_version,
-            )
-            if cache_key not in self.candidate_cache:
-                support.log(f"產生支撐 {config.support_id} 候選解...")
-                generated_candidates = support.generate_single_support_candidates(
-                    config=config,
-                    min_candidates=final_candidate_count,
-                    final_candidate_count=final_candidate_count,
-                    max_length_combinations=max_steel_combination_count,
-                    beam_width=phase1_beam_width,
-                    max_layouts_per_combo=max_layouts_per_combo,
-                    min_processed_steel_combinations=min_processed_steel_combinations,
-                    min_candidate_pool_size=min_candidate_pool_size,
-                    min_unique_jack_centers=min_unique_jack_centers,
-                    min_no_under_4000_candidates=min_no_under_4000_candidates,
-                    min_unique_material_styles=min_unique_material_styles,
-                    jack_center_bucket_size=jack_center_bucket_size,
-                    min_candidates_per_jack_bucket=min_candidates_per_jack_bucket,
-                    min_candidates_per_material_style=min_candidates_per_material_style,
-                    min_retained_no_under_4000_candidates=min_retained_no_under_4000_candidates,
-                    diagnostics_out=diagnostic_record,
-                )
-                self.candidate_cache[cache_key] = {
-                    "candidates": generated_candidates,
-                    "diagnostics": diagnostic_record,
-                }
-                candidates = generated_candidates
-            else:
-                support.log(f"支撐 {config.support_id} 使用本次候選快取。")
-                cache_entry = self.candidate_cache[cache_key]
-                if isinstance(cache_entry, dict):
-                    candidates = cache_entry.get("candidates", [])
-                    diagnostic_record = cache_entry.get("diagnostics")
-                    if diagnostic_record:
-                        diagnostic_record.setdefault(
-                            "max_steel_combination_count",
-                            max_steel_combination_count,
-                        )
-                        diagnostic_record.setdefault(
-                            "target_valid_candidate_count",
-                            target_valid_candidate_count,
-                        )
-                        diagnostic_record.setdefault(
-                            "final_candidate_count",
-                            final_candidate_count,
-                        )
-                        diagnostic_record.setdefault(
-                            "min_candidate_pool_size",
-                            min_candidate_pool_size,
-                        )
-                        support.log_support_candidate_diagnostics(
-                            config,
-                            diagnostic_record,
-                        )
-                else:
-                    candidates = cache_entry
-                    diagnostic_record = {}
-
-            valid_candidates = [
-                plan
-                for plan in candidates
-                if plan.valid and not plan.reason
-            ]
-            actual_valid_count = len(valid_candidates)
-            candidate_statuses.append({
-                "config": config,
-                "actual_valid_count": actual_valid_count,
-                "diagnostics": diagnostic_record,
-                "sufficient": (
-                    actual_valid_count >= target_valid_candidate_count
-                ),
-            })
-            candidates_by_support.append([
-                support.clone_plan_with_support_id(
-                    plan,
-                    config.support_id,
-                    material_spec=config.material_spec,
-                )
-                for plan in valid_candidates
-            ])
-
-        shortages = [
-            status
-            for status in candidate_statuses
-            if not status["sufficient"]
-        ]
-        if shortages:
-            support.log("")
-            for status in shortages:
-                self._log_candidate_shortage(
-                    zoning=self.zoning,
-                    config=status["config"],
-                    actual_valid_count=status["actual_valid_count"],
-                    diagnostic_record=status["diagnostics"],
-                )
-                support.log("")
-
-        missing_candidates = [
-            status
-            for status in candidate_statuses
-            if status["actual_valid_count"] == 0
-        ]
-        if missing_candidates:
-            diagnostics = self._build_support_diagnostics(
-                candidate_statuses=candidate_statuses,
-                solution=None,
-                stage_records=[],
-                stage_scores=[],
-                final_assessment=None,
-            )
-            support.log(
-                f"分區 {self.zoning} 未進入全域配置："
-                "至少一支支撐沒有合法單體候選。"
-            )
-            support.log("=" * 72)
-            return None, diagnostics
-
-        support.log(
-            "候選合法性檢查完成，正在進行全域配置。"
-        )
-        self._post_ui(
-            lambda: self.summary_var.set("正在進行全域配置並確認搜尋穩定度……")
-        )
-
-        solutions = []
-        stage_records = []
-        stage_scores = []
-        final_assessment = None
-        for stage_index, stage in enumerate(policy.support_global_search_stages):
-            support.log("")
-            support.log(
-                f"[搜尋階段 {stage.name}／"
-                f"{policy.support_global_search_stages[-1].name}]"
-            )
-            support.log(f"Beam Width：{stage.beam_width}")
-            phase2_diagnostics = {}
-            stage_solution = support.build_global_solution(
-                candidates_by_support=candidates_by_support,
-                beam_width=stage.beam_width,
-                material_ratio_targets=material_ratio_targets,
-                material_ratio_weight=material_ratio_weight,
-                diagnostics_out=phase2_diagnostics,
-            )
-            solutions.append(stage_solution)
-            if stage_solution.valid:
-                stage_scores.append(float(stage_solution.total_score))
-            unique_solution_count = int(
-                phase2_diagnostics.get("final_unique_solution_count", 0) or 0
-            )
-            pruning_was_active = bool(
-                phase2_diagnostics.get("pruning_was_active", False)
-            )
-            final_assessment = solver_search.assess_support_stage(
-                legal_solution_found=bool(stage_solution.valid),
-                unique_solution_count=unique_solution_count,
-                stage_best_scores=stage_scores,
-                pruning_was_active=pruning_was_active,
-                is_last_stage=(
-                    stage_index == len(policy.support_global_search_stages) - 1
-                ),
-                policy=policy,
-            )
-            stage_record = {
-                "stage": stage.name,
-                "beam_width": stage.beam_width,
-                "legal_solution_found": bool(stage_solution.valid),
-                "best_score": float(stage_solution.total_score),
-                "unique_solution_count": unique_solution_count,
-                "pruning_was_active": pruning_was_active,
-                "result_is_stable": final_assessment.result_is_stable,
-                "decision": (
-                    "進入下一搜尋階段"
-                    if final_assessment.should_escalate
-                    else "停止搜尋"
-                ),
-                "reasons": list(final_assessment.reasons),
-            }
-            stage_records.append(stage_record)
-            support.log(f"合法方案：{'是' if stage_solution.valid else '否'}")
-            support.log(f"最佳分數：{stage_solution.total_score:.2f}")
-            support.log(f"合法且唯一方案：{unique_solution_count}")
-            support.log(f"決策：{stage_record['decision']}")
-            support.log(
-                "原因："
-                + (
-                    "、".join(final_assessment.reasons)
-                    if final_assessment.reasons
-                    else final_assessment.stopping_reason
-                )
-            )
-            if not final_assessment.should_escalate:
-                break
-            self._post_ui(
-                lambda: self.summary_var.set(
-                    "初始結果仍可能改善，系統正在進一步搜尋……"
-                )
-            )
-
-        solution = solver_search.select_best_support_solution(
-            solutions,
-            precision=policy.score_comparison_precision,
-        )
-        diagnostics = self._build_support_diagnostics(
-            candidate_statuses=candidate_statuses,
-            solution=solution,
-            stage_records=stage_records,
-            stage_scores=stage_scores,
-            final_assessment=final_assessment,
-        )
-        solution.candidate_diagnostics = candidate_statuses
-        solution.search_diagnostics = diagnostics.to_dict()
-        self._post_ui(
-            lambda: self.summary_var.set("正在整理結果與診斷……")
-        )
-        return solution, diagnostics
-
-    @staticmethod
-    def _support_phase1_issue_details(candidate_statuses):
-        issue_counts = Counter()
-        insufficient_ids = []
-        missing_ids = []
-        concentrated_ids = []
-        retained_target = (
-            solver_search.DEFAULT_SEARCH_POLICY.support_phase1_retained_candidate_count
-        )
-        for status in candidate_statuses:
-            component_id = status["config"].support_id
-            actual_count = int(status.get("actual_valid_count", 0) or 0)
-            record = dict(status.get("diagnostics", {}) or {})
-            phase1 = dict(record.get("diagnostics", {}) or {})
-            benchmark = dict(phase1.get("candidate_benchmark", {}) or {})
-            after_stats = dict(benchmark.get("after_topn", {}) or {})
-            issue_counts.update(dict(phase1.get("invalid_reason_counts", {}) or {}))
-            region_mismatch = int(phase1.get("target_region_mismatch_count", 0) or 0)
-            if region_mismatch:
-                issue_counts["Jack Region 不符"] += region_mismatch
-            if actual_count < retained_target:
-                insufficient_ids.append(component_id)
-            if actual_count == 0:
-                missing_ids.append(component_id)
-            if actual_count and (
-                int(after_stats.get("jack_bucket_count", 0) or 0) <= 1
-                or int(after_stats.get("unique_steel_pattern_count", 0) or 0) <= 1
-                or int(after_stats.get("material_style_count", 0) or 0) <= 1
-            ):
-                concentrated_ids.append(component_id)
-        return issue_counts, insufficient_ids, missing_ids, concentrated_ids
-
-    def _build_support_diagnostics(
-        self,
-        *,
-        candidate_statuses,
-        solution,
-        stage_records,
-        stage_scores,
-        final_assessment,
-    ):
-        policy = solver_search.DEFAULT_SEARCH_POLICY
-        issue_counts, insufficient_ids, missing_ids, concentrated_ids = (
-            self._support_phase1_issue_details(candidate_statuses)
-        )
-        legal_found = bool(solution is not None and solution.valid)
-        scoring_preference_ids = []
-        if legal_found:
-            solution_plans = list(getattr(solution, "plans", []) or [])
-            pattern_counts = Counter(
-                support.steel_pattern_from_plan(plan)
-                for plan in solution_plans
-            )
-            if len(solution_plans) >= 3 and pattern_counts:
-                dominant_pattern, dominant_count = pattern_counts.most_common(1)[0]
-                if (
-                    dominant_count / len(solution_plans)
-                    > policy.scoring_pattern_dominance_threshold
-                ):
-                    scoring_preference_ids = [
-                        plan.support_id
-                        for plan in solution_plans
-                        if support.steel_pattern_from_plan(plan) == dominant_pattern
-                    ]
-        reached_last_stage = bool(
-            stage_records
-            and stage_records[-1]["stage"]
-            == policy.support_global_search_stages[-1].name
-        )
-        limit_reached = bool(
-            reached_last_stage
-            and final_assessment is not None
-            and final_assessment.reasons
-        )
-        main_issue = solver_search.NO_ISSUE
-        issue_message = ""
-        secondary = []
-        if missing_ids:
-            main_issue = solver_search.ENGINEERING_CONSTRAINT_LIMITED
-            issue_message = "部分支撐在目前工程條件下沒有合法單體候選。"
-            secondary.append(solver_search.CANDIDATE_INSUFFICIENT)
-        elif insufficient_ids:
-            main_issue = solver_search.CANDIDATE_INSUFFICIENT
-            issue_message = "部分支撐的合法候選未填滿正式保留數。"
-            if issue_counts:
-                secondary.append(solver_search.ENGINEERING_CONSTRAINT_LIMITED)
-        elif concentrated_ids:
-            main_issue = solver_search.CANDIDATE_INSUFFICIENT
-            issue_message = "候選數量雖足，但部分支撐的 Jack 位置或材料型態選項集中。"
-        elif not legal_found:
-            main_issue = solver_search.SEARCH_INSUFFICIENT
-            issue_message = "啟發式全域搜尋已達上限，但尚未找到合法方案。"
-        elif scoring_preference_ids:
-            main_issue = solver_search.SCORING_PREFERENCE
-            issue_message = "合法候選充足，但全域結果集中使用同一材料 Pattern，可能來自評分偏好。"
-
-        escalation_reasons = []
-        for record in stage_records[:-1]:
-            if record.get("decision") == "進入下一搜尋階段":
-                escalation_reasons.extend(record.get("reasons", []))
-
-        final_unique = int(
-            stage_records[-1].get("unique_solution_count", 0)
-            if stage_records
-            else 0
-        )
-        return solver_search.SolverDiagnostics(
-            solver_type="support",
-            search_status=(
-                "candidate_insufficient"
-                if insufficient_ids
-                else "completed"
-                if legal_found
-                else "no_legal_solution"
-            ),
-            search_stage=(stage_records[-1]["stage"] if stage_records else "PHASE1"),
-            legal_solution_found=legal_found,
-            infeasibility_proven=False,
-            search_limit_reached=limit_reached,
-            search_was_escalated=len(stage_records) > 1,
-            result_is_stable=bool(
-                final_assessment and final_assessment.result_is_stable
-            ),
-            candidate_count=sum(
-                int(
-                    ((status.get("diagnostics", {}) or {}).get("diagnostics", {}) or {})
-                    .get("candidate_pool_valid_count", 0)
-                    or 0
-                )
-                for status in candidate_statuses
-            ),
-            valid_candidate_count=sum(
-                int(status.get("actual_valid_count", 0) or 0)
-                for status in candidate_statuses
-            ),
-            retained_candidate_count=sum(
-                int(status.get("actual_valid_count", 0) or 0)
-                for status in candidate_statuses
-            ),
-            unique_solution_count=final_unique,
-            best_score_history=list(stage_scores),
-            escalation_reasons=list(dict.fromkeys(escalation_reasons)),
-            stopping_reason=(
-                final_assessment.stopping_reason
-                if final_assessment is not None
-                else "單體候選不足，未進入全域配置"
-            ),
-            main_issue_category=main_issue,
-            main_issue_message=issue_message,
-            secondary_issue_categories=secondary,
-            issue_counts=dict(issue_counts),
-            affected_component_ids=list(dict.fromkeys(
-                missing_ids
-                + insufficient_ids
-                + concentrated_ids
-                + scoring_preference_ids
-            )),
-            component_candidate_counts={
-                status["config"].support_id: int(
-                    status.get("actual_valid_count", 0) or 0
-                )
-                for status in candidate_statuses
-                if status["config"].support_id in insufficient_ids
-            },
-            policy_id=policy.policy_id,
-            policy_version=policy.policy_version,
-            stage_records=stage_records,
-        )
-
-    def _solver_thread(
-        self,
-        material_ratio_targets,
-        material_ratio_weight,
-    ):
-        def gui_logger(*args):
-            message = " ".join(str(arg) for arg in args)
-            if not message.endswith("\n"):
-                message += "\n"
-            self.text_writer.write(message)
-
-        try:
-            support.set_logger(gui_logger)
-            support.random.seed(
-                solver_search.DEFAULT_SEARCH_POLICY.support_phase1_random_seed
-            )
-            solution, diagnostics = self._solve(
-                material_ratio_targets,
-                material_ratio_weight,
-            )
-            if solution is not None:
-                self._post_ui(
-                    lambda: self._display_solution(solution, diagnostics),
-                )
-            else:
-                self._post_ui(
-                    lambda: self._display_diagnostics_only(diagnostics),
-                )
-        except Exception:
-            import traceback
-
-            message = traceback.format_exc()
-            self.text_writer.write(message)
-            self._post_ui(
-                lambda: self.summary_var.set(
-                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
-                )
-            )
-        finally:
-            support.set_logger(None)
-            self._post_ui(
-                lambda: self.run_button.configure(state="normal"),
-            )
-
-    def _display_diagnostics_only(self, diagnostics):
-        self.summary_var.set(self._format_support_engineer_summary(None, diagnostics))
-
-    @staticmethod
-    def _format_support_engineer_summary(solution, diagnostics):
-        lines = []
-        if diagnostics.legal_solution_found:
-            lines.append("計算完成｜✓ 已找到合法方案")
-            if diagnostics.search_was_escalated:
-                lines.append("ℹ 初始結果仍可能改善，系統已自動增加計算強度。")
-            if diagnostics.result_is_stable:
-                lines.append("✓ 搜尋結果已穩定。")
-            elif diagnostics.search_limit_reached:
-                lines.append("⚠ 已使用最大搜尋強度，結果尚未完全穩定，可比較其他合法方案。")
-            if diagnostics.main_issue_category not in {
-                solver_search.CANDIDATE_INSUFFICIENT,
-                solver_search.ENGINEERING_CONSTRAINT_LIMITED,
-            }:
-                lines.append("✓ 候選方案充足。")
-        else:
-            lines.append("目前搜尋未找到合法方案。")
-            if diagnostics.infeasibility_proven:
-                lines.append("工程條件下無可行解。")
-            elif diagnostics.search_stage == "PHASE1":
-                lines.append("部分支撐沒有合法單體候選，未進入全域配置。")
-            else:
-                lines.append("系統已使用最大搜尋強度，但不能據此證明工程條件一定無解。")
-
-        if diagnostics.main_issue_message:
-            lines.append(f"主要限制：{diagnostics.main_issue_message}")
-        if diagnostics.affected_component_ids:
-            component_labels = []
-            for component_id in diagnostics.affected_component_ids[:8]:
-                if component_id in diagnostics.component_candidate_counts:
-                    component_labels.append(
-                        f"{component_id}（合法候選 "
-                        f"{diagnostics.component_candidate_counts[component_id]}）"
-                    )
-                else:
-                    component_labels.append(component_id)
-            lines.append(
-                "需要檢查：" + "、".join(component_labels)
-                + ("…" if len(diagnostics.affected_component_ids) > 8 else "")
-            )
-        return "\n".join(lines)
-
-    def _display_solution(self, solution, diagnostics=None):
-        self.solution = solution
-        diagnostics = diagnostics or solver_search.SolverDiagnostics.from_dict(
-            getattr(solution, "search_diagnostics", None)
-        )
-        if diagnostics is not None:
-            self.summary_var.set(
-                self._format_support_engineer_summary(solution, diagnostics)
-            )
-        plans = list(solution.plans)
-        plan_scores = [float(plan.score) for plan in plans]
-        minimum_score = min(plan_scores, default=0.0)
-        maximum_score = max(plan_scores, default=0.0)
-        baseline_plan = next(
-            (plan for plan in plans if abs(float(plan.score) - minimum_score) < 1e-9),
-            None,
-        )
-        baseline_breakdown = dict(getattr(baseline_plan, "breakdown", {}) or {})
-        score_distribution = Counter(round(score, 6) for score in plan_scores)
-        pattern_summary = support.pattern_diversity_summary(plans)
-        min_distance = getattr(solution, "min_jack_distance", None)
-        distance_at_limit = (
-            min_distance is not None
-            and abs(float(min_distance) - support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS) < 1e-9
-        )
-        lines = [
-            "",
-            f"=== 分區 {self.zoning} 支撐配置完成 ===",
-            f"結果：{'合法' if solution.valid else '不合法'}；"
-            f"成功配置 {sum(plan.valid and not plan.reason for plan in plans)}/{len(plans)} 支",
-            f"單體分數合計：{getattr(solution, 'single_score_total', sum(plan_scores)):.1f}；"
-            f"最低 {minimum_score:.0f}，最高 {maximum_score:.0f}",
-            "分數分布：" + "、".join(
-                f"{score:.0f}分×{count}支"
-                for score, count in sorted(score_distribution.items())
-            ),
-            f"相鄰Jack最小距離："
-            f"{SupportInputApp._format_result_value(min_distance if min_distance is not None else '無資料')} mm"
-            f"（下限 {support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm）",
-            f"材料配置多樣性：{pattern_summary['pattern_kind_count']} 種Pattern；"
-            f"同一Pattern最多使用 {pattern_summary['max_pattern_usage']} 次",
-        ]
-        if solution.reason:
-            lines.append(f"說明：{solution.reason}")
-        if distance_at_limit:
-            lines.append("[注意] 最小Jack距離剛好等於規定下限，結果合法但沒有額外距離餘裕。")
-
-        lines.extend(self._format_global_material_ratio_lines(solution))
-
-        candidate_statuses = list(getattr(solution, "candidate_diagnostics", []) or [])
-        if candidate_statuses:
-            source_totals = Counter()
-            processed_counts = []
-            selected_counts = []
-            pool_counts = []
-            retained_counts = []
-            for status in candidate_statuses:
-                record = dict(status.get("diagnostics", {}) or {})
-                diagnostics = dict(record.get("diagnostics", {}) or {})
-                benchmark = dict(diagnostics.get("candidate_benchmark", {}) or {})
-                source_totals.update(dict(diagnostics.get("selection_counts", {}) or {}))
-                processed_counts.append(int(diagnostics.get("combinations_processed", 0) or 0))
-                selected_counts.append(int(record.get("combination_count", 0) or 0))
-                pool_counts.append(int(benchmark.get("candidate_count_before_topn", 0) or 0))
-                retained_counts.append(int(status.get("actual_valid_count", 0) or 0))
-            fully_processed = all(
-                processed == selected
-                for processed, selected in zip(processed_counts, selected_counts)
-                if selected
-            )
-            retained_text = (
-                f"{retained_counts[0]} 個"
-                if retained_counts and min(retained_counts) == max(retained_counts)
-                else f"{min(retained_counts, default=0)}～{max(retained_counts, default=0)} 個"
-            )
-            lines.extend([
-                "",
-                "候選生成摘要",
-                f"材料組合：{'全部完整處理' if fully_processed else '有支撐未完整處理'}；"
-                f"每支候選池 {min(pool_counts, default=0)}～{max(pool_counts, default=0)} 個，"
-                f"最終每支保留 {retained_text}",
-                f"候選來源（{len(candidate_statuses)}支合計）："
-                f"Jack位置 {source_totals.get('selected_by_jack_bucket_guarantee', 0)}、"
-                f"材料型態 {source_totals.get('selected_by_material_style_guarantee', 0)}、"
-                f"分數補入 {source_totals.get('selected_by_score_fill', 0)}",
-            ])
-
-        lines.extend(["", "各支撐結果"])
-        for plan in plans:
-            steel_lengths = [
-                int(length)
-                for kind, length in plan.pieces
-                if str(kind).lower() == "steel"
-            ]
-            steel_text = "+".join(str(length) for length in sorted(steel_lengths))
-            plan_status = "正常"
-            if not plan.valid or plan.reason:
-                plan_status = "不合法"
-            elif float(plan.score) > minimum_score:
-                plan_status = "注意"
-            lines.append(
-                f"{plan.support_id}｜{steel_text}｜Jack {plan.jack_center:.0f}（區{plan.jack_region_id}）｜"
-                f"Gap {plan.gap}｜分數 {plan.score:.0f}｜{plan_status}"
-            )
-            if float(plan.score) > minimum_score:
-                extra_breakdown = []
-                labels = (
-                    ("short_penalty", "短料"),
-                    ("joint_penalty", "接頭"),
-                    ("gap_penalty", "Gap"),
-                    ("jack_edge_penalty", "Jack靠邊"),
-                    ("invalid_penalty", "不合法"),
-                )
-                for key, label in labels:
-                    value = float(plan.breakdown.get(key, 0.0) or 0.0)
-                    baseline_value = float(baseline_breakdown.get(key, 0.0) or 0.0)
-                    difference = value - baseline_value
-                    if difference <= 1e-9:
-                        continue
-                    if key == "joint_penalty" and support.SUPPORT_JOINT_PENALTY_WEIGHT:
-                        extra_joint_count = int(round(
-                            difference / support.SUPPORT_JOINT_PENALTY_WEIGHT
-                        ))
-                        extra_breakdown.append(
-                            f"多 {extra_joint_count} 個接頭（+{difference:.0f}）"
-                        )
-                    else:
-                        extra_breakdown.append(f"{label} +{difference:.0f}")
-                difference_text = "、".join(extra_breakdown) or "評分項目組合不同"
-                lines.append(
-                    f"  [注意] 比最低單體分多 {plan.score - minimum_score:.0f}；"
-                    + difference_text
-                )
-            if plan.reason:
-                lines.append(f"  說明：{plan.reason}")
-
-        self.text_writer.write("\n".join(lines) + "\n")
-        self.callback(self.zoning, solution)
-
-    @staticmethod
-    def _format_global_material_ratio_lines(solution):
-        analysis = dict(getattr(solution, "material_ratio_analysis", {}) or {})
-        counts = dict(analysis.get("counts", {}) or {})
-        ratios = dict(analysis.get("ratios", {}) or {})
-        targets = dict(analysis.get("targets", {}) or {})
-        total = int(analysis.get("classified_total", 0) or 0)
-        deviation = float(analysis.get("ratio_deviation", 0.0) or 0.0)
-        weight = float(analysis.get("weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT) or 0.0)
-        penalty = float(analysis.get("penalty", 0.0) or 0.0)
-        min_distance = getattr(solution, "min_jack_distance", None)
-        jack_distance_ok = (
-            min_distance is None
-            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
-        )
-
-        def percent(value):
-            return f"{float(value):.2%}"
-
-        return [
-            f"材料分類：短 {int(counts.get('short', 0) or 0)}支（{percent(ratios.get('short', 0.0))}）、"
-            f"中 {int(counts.get('mid', 0) or 0)}支（{percent(ratios.get('mid', 0.0))}）、"
-            f"長 {int(counts.get('long', 0) or 0)}支（{percent(ratios.get('long', 0.0))}）",
-            f"群組附加分數：Jack區域 {getattr(solution, 'jack_region_penalty', 0.0):.0f}、"
-            f"材料比例 {penalty:.0f}",
-        ]
-
-    def _on_close(self):
-        self._close_ui_bridge()
-        self.dialog.destroy()
-
-    def open(self):
-        self.dialog.wait_window()
-        return self.solution
-
-
-class WalerSolverDialog(SolverDialogThreadBridge):
-    def __init__(
-        self,
-        parent,
-        waler_id,
-        start_point,
-        end_point,
-        length,
-        forbidden_count,
-        forbidden_points,
-        stock_items,
-        purchasable_lengths,
-        solver_memory,
-        callback,
-    ):
-        self.callback = callback
-        self.waler_id = waler_id
-        self.start_point = start_point
-        self.end_point = end_point
-        self.length = int(round(length))
-        self.forbidden_points = forbidden_points
-        self.stock_items = stock_items
-        self.purchasable_lengths = purchasable_lengths
-        self.solver_memory = solver_memory
-        self.min_piece_length = 1000
-        self.max_piece_length = 10000
-        self.joint_clearance = 300
-        self.candidate_joint_step = 500
-        self.cfg = None
-        self.current_results = None
-        self.solver_key = None
-
-        rounded_length = self.length
-        (
-            preview_steel_length,
-            preview_tail_adjustment,
-            preview_tail_gap,
-        ) = wales.resolve_tail_adjustment(rounded_length)
-        candidate_joint_count = len(wales.generate_candidate_joint_points(
-            preview_steel_length,
-            self.min_piece_length,
-            self.candidate_joint_step,
-        ))
-
-        def format_number(value):
-            if value is None:
-                return "無資料"
-            number = float(value)
-            if number.is_integer():
-                return f"{int(number):,}"
-            return f"{number:,.2f}"
-
-        def format_point(point):
-            if not point or len(point) != 2:
-                return "無資料"
-            return f"({format_number(point[0])}, {format_number(point[1])})"
-
-        forbidden_text = ", ".join(format_number(point) for point in forbidden_points) or "無"
-        purchasable_text = ", ".join(format_number(item) for item in purchasable_lengths) or "無"
-        self.dialog = tk.Toplevel(parent)
-        self.dialog.title(f"圍令配置 - {waler_id}")
-        self.dialog.geometry("900x780")
-        self.dialog.grab_set()
-
-        frame = ttk.Frame(self.dialog)
-        frame.pack(fill="both", expand=True, padx=12, pady=12)
-        frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
-
-        info_frame = ttk.LabelFrame(frame, text="固定資訊與設定")
-        info_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        info_frame.columnconfigure(1, weight=1)
-        info_frame.columnconfigure(3, weight=1)
-
-        info_items = [
-            ("圍令編號", waler_id, "總長度", f"{format_number(rounded_length)} mm"),
-            ("標準鋼材總長", f"{format_number(preview_steel_length)} mm", "調整塊／餘量", f"{format_number(preview_tail_adjustment)} / {format_number(preview_tail_gap)} mm"),
-            ("起點座標", format_point(start_point), "終點座標", format_point(end_point)),
-            ("禁止點數量", str(forbidden_count), "候選接頭點數", str(candidate_joint_count)),
-            ("接頭安全距離", f"{format_number(self.joint_clearance)} mm", "最小段長", f"{format_number(self.min_piece_length)} mm"),
-            ("最大段長", f"{format_number(self.max_piece_length)} mm", "", ""),
-        ]
-        for row_index, (left_label, left_value, right_label, right_value) in enumerate(info_items):
-            ttk.Label(info_frame, text=f"{left_label}：").grid(row=row_index, column=0, sticky="ne", padx=(8, 4), pady=2)
-            ttk.Label(info_frame, text=left_value).grid(row=row_index, column=1, sticky="nw", padx=(0, 12), pady=2)
-            if right_label:
-                ttk.Label(info_frame, text=f"{right_label}：").grid(row=row_index, column=2, sticky="ne", padx=(8, 4), pady=2)
-                ttk.Label(info_frame, text=right_value).grid(row=row_index, column=3, sticky="nw", padx=(0, 8), pady=2)
-
-        detail_items = [
-            ("禁止點列表", forbidden_text),
-            ("可購買材料長度", purchasable_text),
-        ]
-        detail_start_row = len(info_items)
-        for offset, (label, value) in enumerate(detail_items):
-            row_index = detail_start_row + offset
-            ttk.Label(info_frame, text=f"{label}：").grid(row=row_index, column=0, sticky="ne", padx=(8, 4), pady=2)
-            ttk.Label(
-                info_frame,
-                text=value,
-                justify="left",
-                wraplength=720,
-            ).grid(row=row_index, column=1, columnspan=3, sticky="nw", padx=(0, 8), pady=2)
-
-        solver_settings_row = detail_start_row + len(detail_items)
-        ratio_frame = ttk.LabelFrame(info_frame, text="短／中／長段比例設定")
-        ratio_frame.grid(
-            row=solver_settings_row,
-            column=0,
-            columnspan=4,
-            sticky="ew",
-            padx=8,
-            pady=(6, 4),
-        )
-
-        ttk.Label(ratio_frame, text="短段").grid(row=0, column=0, sticky="e", padx=(8, 4), pady=4)
-        self.short_ratio_var = tk.StringVar(value="20")
-        ttk.Entry(ratio_frame, textvariable=self.short_ratio_var, width=8).grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
-
-        ttk.Label(ratio_frame, text="中段").grid(row=0, column=2, sticky="e", padx=(8, 4), pady=4)
-        self.mid_ratio_var = tk.StringVar(value="50")
-        ttk.Entry(ratio_frame, textvariable=self.mid_ratio_var, width=8).grid(row=0, column=3, sticky="w", padx=(0, 12), pady=4)
-
-        ttk.Label(ratio_frame, text="長段").grid(row=0, column=4, sticky="e", padx=(8, 4), pady=4)
-        self.long_ratio_var = tk.StringVar(value="30")
-        ttk.Entry(ratio_frame, textvariable=self.long_ratio_var, width=8).grid(row=0, column=5, sticky="w", padx=(0, 8), pady=4)
-
-        ttk.Label(
-            info_frame,
-            text=(
-                "搜尋策略：系統自動調整。系統會依合法方案、候選完整度與搜尋穩定度，"
-                "自動調整計算強度；不會自行放寬工程條件。"
-            ),
-            foreground="#4b5563",
-            wraplength=800,
-            justify="left",
-        ).grid(
-            row=solver_settings_row + 1,
-            column=0,
-            columnspan=4,
-            sticky="ew",
-            padx=8,
-            pady=(2, 7),
-        )
-
-        log_frame = ttk.LabelFrame(frame, text="求解執行資訊")
-        log_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
-        log_frame.rowconfigure(2, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-
-        self.summary_var = tk.StringVar(value="尚未開始計算。")
-        summary_frame = ttk.LabelFrame(log_frame, text="一般摘要")
-        summary_frame.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
-        summary_frame.columnconfigure(0, weight=1)
-        ttk.Label(
-            summary_frame,
-            textvariable=self.summary_var,
-            justify="left",
-            wraplength=830,
-            padding=(8, 6),
-        ).grid(row=0, column=0, sticky="ew")
-        ttk.Label(log_frame, text="詳細執行訊息").grid(
-            row=1, column=0, sticky="w", padx=6, pady=(3, 0)
-        )
-        self.result_text = scrolledtext.ScrolledText(log_frame, height=14, wrap="none", state="disabled", font=("Consolas", 10))
-        self.result_text.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
-        self.text_writer = TextRedirector(self.result_text)
-
-        button_frame = ttk.Frame(frame)
-        button_frame.grid(row=2, column=0, sticky="ew")
-
-        self.run_button = ttk.Button(button_frame, text="開始計算", command=lambda: self._run_solver(waler_id, length))
-        self.run_button.pack(side="left", padx=6)
-
-        self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._initialize_ui_bridge()
-
-    def _append_message(self, text):
-        follow_new_output = _text_is_at_bottom(self.result_text)
-        self.result_text.configure(state="normal")
-        self.result_text.insert("end", text)
-        if follow_new_output:
-            self.result_text.see("end")
-        self.result_text.configure(state="disabled")
-
-    @staticmethod
-    def _format_solver_number(value):
-        number = float(value)
-        return str(int(number)) if number.is_integer() else f"{number:g}"
-
-    @staticmethod
-    def _build_solver_key(
-        total_length,
-        forbidden_points,
-        short_ratio,
-        mid_ratio,
-        long_ratio,
-        purchasable_lengths,
-    ):
-        policy = solver_search.DEFAULT_SEARCH_POLICY
-        return (
-            "waler_tail_adjustment_v1",
-            policy.policy_id,
-            policy.policy_version,
-            total_length,
-            tuple(sorted(forbidden_points)),
-            short_ratio,
-            mid_ratio,
-            long_ratio,
-            tuple(sorted(purchasable_lengths)),
-        )
-
-    def _ask_use_memory_result(self, solver_key):
-        (
-            _solver_schema,
-            _policy_id,
-            _policy_version,
-            total_length,
-            forbidden_points,
-            short_ratio,
-            mid_ratio,
-            long_ratio,
-            purchasable_lengths,
-        ) = solver_key
-        forbidden_text = ", ".join(str(point) for point in forbidden_points) or "無"
-        ratio_text = " / ".join(
-            self._format_solver_number(ratio)
-            for ratio in (short_ratio, mid_ratio, long_ratio)
-        )
-        purchasable_text = ", ".join(str(length) for length in purchasable_lengths)
-
-        choice = {"use_memory": False}
-        prompt = tk.Toplevel(self.dialog)
-        prompt.title("圍令配置本次記憶")
-        prompt.transient(self.dialog)
-        prompt.resizable(False, False)
-
-        content = ttk.Frame(prompt, padding=16)
-        content.pack(fill="both", expand=True)
-        ttk.Label(
-            content,
-            text="本次執行期間已計算過相同條件，是否直接使用？",
-            justify="left",
-        ).pack(anchor="w", pady=(0, 12))
-        ttk.Separator(content).pack(fill="x", pady=(0, 10))
-        ttk.Label(
-            content,
-            text=(
-                f"總長：{total_length}\n"
-                f"禁止點：{forbidden_text}\n"
-                f"比例：{ratio_text}\n"
-                f"材料長度：{purchasable_text}"
-            ),
-            justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-        ttk.Separator(content).pack(fill="x", pady=(0, 12))
-
-        button_frame = ttk.Frame(content)
-        button_frame.pack(fill="x")
-
-        def close_prompt(use_memory):
-            choice["use_memory"] = use_memory
-            prompt.destroy()
-
-        ttk.Button(
-            button_frame,
-            text="直接使用",
-            command=lambda: close_prompt(True),
-        ).pack(side="left", padx=(0, 8))
-        ttk.Button(
-            button_frame,
-            text="重新計算",
-            command=lambda: close_prompt(False),
-        ).pack(side="left")
-
-        prompt.protocol("WM_DELETE_WINDOW", lambda: close_prompt(False))
-        prompt.grab_set()
-        self.dialog.wait_window(prompt)
-        if self.dialog.winfo_exists():
-            self.dialog.grab_set()
-        return choice["use_memory"]
-
-    def _save_solver_memory(self, results, diagnostics=None):
-        if self.solver_key is None:
-            return
-
-        best_score = min(
-            (item["score"] for item in results),
-            default=None,
-        )
-        self.solver_memory[self.solver_key] = {
-            "results": copy.deepcopy(results),
-            "best_score": best_score,
-            "search_diagnostics": (
-                diagnostics.to_dict()
-                if isinstance(diagnostics, solver_search.SolverDiagnostics)
-                else copy.deepcopy(diagnostics)
-            ),
-            "solver_search_policy_id": solver_search.DEFAULT_SEARCH_POLICY.policy_id,
-            "solver_search_policy_version": solver_search.DEFAULT_SEARCH_POLICY.policy_version,
-        }
-
-    def _restore_solver_memory(self, memory_entry):
-        return (
-            copy.deepcopy(memory_entry["results"]),
-            solver_search.SolverDiagnostics.from_dict(
-                copy.deepcopy(memory_entry.get("search_diagnostics"))
-            ),
-        )
-
-    def _run_solver(self, waler_id, length):
-        try:
-            short_ratio = float(self.short_ratio_var.get())
-            mid_ratio = float(self.mid_ratio_var.get())
-            long_ratio = float(self.long_ratio_var.get())
-        except ValueError:
-            messagebox.showerror("輸入錯誤", "段長比例必須為數字")
-            return
-
-        if not all(math.isfinite(ratio) for ratio in (short_ratio, mid_ratio, long_ratio)):
-            messagebox.showerror("輸入錯誤", "段長比例必須為有限數值")
-            return
-
-        if short_ratio < 0 or mid_ratio < 0 or long_ratio < 0:
-            messagebox.showerror("輸入錯誤", "段長比例不能為負數")
-            return
-
-        ratios = [short_ratio, mid_ratio, long_ratio]
-        if sum(ratios) <= 0:
-            messagebox.showerror("輸入錯誤", "段長比例總和必須大於 0")
-            return
-        normalized = [r / sum(ratios) for r in ratios]
-
-        try:
-            length = int(round(length))
-            if length <= 0:
-                self._append_message("錯誤：這個圍令長度無效，請檢查圍令座標。\n")
-                return
-
-            purchasable_lengths = sorted({
-                int(round(item))
-                for item in self.purchasable_lengths
-                if item is not None
-            })
-            if not purchasable_lengths:
-                self._append_message("錯誤：庫存表中沒有可購買長度。\n")
-                return
-
-            standard_stage = solver_search.DEFAULT_SEARCH_POLICY.waler_search_stages[0]
-            cfg = wales.Config(
-                total_length=length,
-                support_points=[int(round(p)) for p in self.forbidden_points],
-                min_piece_length=self.min_piece_length,
-                max_piece_length=self.max_piece_length,
-                joint_clearance_to_support=self.joint_clearance,
-                candidate_joint_step=self.candidate_joint_step,
-                purchasable_lengths=purchasable_lengths,
-                short_segment_ratio_target=normalized[0],
-                mid_segment_ratio_target=normalized[1],
-                long_segment_ratio_target=normalized[2],
-                population_size=standard_stage.population_size,
-                generations=standard_stage.generations,
-                crossover_rate=0.85,
-                mutation_rate=0.08,
-                elite_size=8,
-                tournament_k=4,
-                top_n=5,
-            )
-            self.cfg = cfg
-        except Exception as exc:
-            self._append_message(f"錯誤：無法建立求解器設定：{exc}\n")
-            return
-
-        solver_key = self._build_solver_key(
-            length,
-            cfg.support_points,
-            short_ratio,
-            mid_ratio,
-            long_ratio,
-            purchasable_lengths,
-        )
-        self.solver_key = solver_key
-        memory_entry = self.solver_memory.get(solver_key)
-
-        if memory_entry is not None and self._ask_use_memory_result(solver_key):
-            self.result_text.configure(state="normal")
-            self.result_text.delete("1.0", "end")
-            self.result_text.configure(state="disabled")
-            restored_results, restored_diagnostics = self._restore_solver_memory(
-                memory_entry
-            )
-            self.current_results = None
-            self._append_message("已直接載入本次執行期間的相同條件結果。\n")
-            self._display_results(restored_results, diagnostics=restored_diagnostics)
-            return
-
-        self.result_text.configure(state="normal")
-        self.result_text.delete("1.0", "end")
-        self.result_text.configure(state="disabled")
-        self.current_results = None
-        self.summary_var.set(
-            "正在建立配置候選並檢查工程合法性……系統會自動判斷是否需要加強搜尋。"
-        )
-        policy = solver_search.DEFAULT_SEARCH_POLICY
-        self._append_message(
-            f"開始計算。搜尋政策：{policy.policy_id} v{policy.policy_version}\n"
-        )
-        self.run_button.configure(state="disabled")
-
-        thread = threading.Thread(
-            target=self._solver_thread,
-            args=(cfg, self.stock_items),
-            daemon=True,
-        )
-        thread.start()
-
-
-    def _solver_thread(self, cfg, stock_items):
-        def gui_logger(*args):
-            message = " ".join(str(arg) for arg in args)
-            if not message.endswith("\n"):
-                message += "\n"
-            self.text_writer.write(message)
-
-        try:
-            wales.set_logger(gui_logger)
-            policy = solver_search.DEFAULT_SEARCH_POLICY
-            all_results = []
-            stage_records = []
-            best_score_history = []
-            escalation_reasons = []
-            final_assessment = None
-
-            for stage_index, stage in enumerate(policy.waler_search_stages):
-                stage_cfg = copy.deepcopy(cfg)
-                stage_cfg.generations = stage.generations
-                stage_cfg.population_size = stage.population_size
-                gui_logger("")
-                gui_logger(
-                    f"[搜尋階段 {stage.name}／{policy.waler_search_stages[-1].name}]"
-                )
-                gui_logger(f"Generations：{stage.generations}")
-                gui_logger(f"Population：{stage.population_size}")
-                gui_logger(f"Seed：{stage.random_seed}")
-                stage_diagnostics = {}
-                stage_results = wales.evolve(
-                    stage_cfg,
-                    stock_items,
-                    seed=stage.random_seed,
-                    diagnostics_out=stage_diagnostics,
-                )
-                all_results.extend(stage_results)
-                stage_history = list(
-                    stage_diagnostics.get("best_score_history", []) or []
-                )
-                best_score_history.extend(stage_history)
-                valid_count = int(
-                    stage_diagnostics.get("valid_candidate_count", 0) or 0
-                )
-                unique_count = int(
-                    stage_diagnostics.get("unique_valid_solution_count", 0) or 0
-                )
-                final_assessment = solver_search.assess_waler_stage(
-                    valid_solution_count=valid_count,
-                    unique_solution_count=unique_count,
-                    best_score_history=stage_history,
-                    is_last_stage=(stage_index == len(policy.waler_search_stages) - 1),
-                    policy=policy,
-                )
-                best_score = min(
-                    (float(item.get("score", float("inf"))) for item in stage_results),
-                    default=None,
-                )
-                stage_record = {
-                    "stage": stage.name,
-                    "generations": stage.generations,
-                    "population_size": stage.population_size,
-                    "random_seed": stage.random_seed,
-                    "legal_solution_found": valid_count > 0,
-                    "valid_solution_count": valid_count,
-                    "unique_solution_count": unique_count,
-                    "best_score": best_score,
-                    "tail_score_improvement": (
-                        solver_search.relative_score_improvement(
-                            stage_history[-policy.stability_window],
-                            min(stage_history[-policy.stability_window:]),
-                        )
-                        if len(stage_history) >= policy.stability_window
-                        else None
-                    ),
-                    "result_is_stable": final_assessment.result_is_stable,
-                    "decision": (
-                        "進入下一搜尋階段"
-                        if final_assessment.should_escalate
-                        else "停止搜尋"
-                    ),
-                    "reasons": list(final_assessment.reasons),
-                }
-                stage_records.append(stage_record)
-                gui_logger(f"合法方案：{'是' if valid_count else '否'}")
-                gui_logger(
-                    "最佳分數："
-                    + ("無" if best_score is None else f"{best_score:.2f}")
-                )
-                gui_logger(f"合法方案數：{valid_count}")
-                gui_logger(f"合法且唯一方案：{unique_count}")
-                gui_logger(f"決策：{stage_record['decision']}")
-                gui_logger(
-                    "原因："
-                    + (
-                        "、".join(final_assessment.reasons)
-                        if final_assessment.reasons
-                        else final_assessment.stopping_reason
-                    )
-                )
-                if not final_assessment.should_escalate:
-                    break
-                escalation_reasons.extend(final_assessment.reasons)
-                self._post_ui(
-                    lambda: self.summary_var.set(
-                        "初始結果仍可改善，系統正在進一步搜尋……"
-                    )
-                )
-
-            results = solver_search.merge_waler_results(
-                all_results,
-                limit=cfg.top_n,
-                precision=policy.score_comparison_precision,
-            )
-            legal_found = any(bool(item.get("valid")) for item in results)
-            final_record = stage_records[-1] if stage_records else {}
-            final_unique = int(final_record.get("unique_solution_count", 0) or 0)
-            reached_last_stage = bool(
-                final_record.get("stage") == policy.waler_search_stages[-1].name
-            )
-            limit_reached = bool(
-                reached_last_stage
-                and final_assessment is not None
-                and final_assessment.reasons
-            )
-            path_feasible = wales.is_joint_path_feasible(cfg)
-            main_issue = solver_search.NO_ISSUE
-            issue_message = ""
-            secondary = []
-            affected_ids = []
-            if not legal_found and not path_feasible:
-                main_issue = solver_search.ENGINEERING_CONSTRAINT_LIMITED
-                issue_message = "目前材料長度與禁止區無法形成合法的圍令分段路徑。"
-                affected_ids = [self.waler_id]
-            elif not legal_found:
-                main_issue = solver_search.SEARCH_INSUFFICIENT
-                issue_message = "啟發式搜尋已達上限，但尚未找到合法方案。"
-                affected_ids = [self.waler_id]
-            elif limit_reached:
-                main_issue = solver_search.SEARCH_INSUFFICIENT
-                issue_message = "已找到合法方案，但搜尋達上限時仍未完全穩定。"
-                if final_unique < policy.minimum_unique_solution_count:
-                    secondary.append(solver_search.CANDIDATE_INSUFFICIENT)
-                    affected_ids = [self.waler_id]
-
-            diagnostics = solver_search.SolverDiagnostics(
-                solver_type="waler",
-                search_status="completed" if legal_found else "no_legal_solution",
-                search_stage=str(final_record.get("stage", "")),
-                legal_solution_found=legal_found,
-                infeasibility_proven=False,
-                search_limit_reached=limit_reached,
-                search_was_escalated=len(stage_records) > 1,
-                result_is_stable=bool(
-                    final_assessment and final_assessment.result_is_stable
-                ),
-                candidate_count=sum(
-                    int(record.get("population_size", 0) or 0)
-                    for record in stage_records
-                ),
-                valid_candidate_count=int(
-                    final_record.get("valid_solution_count", 0) or 0
-                ),
-                retained_candidate_count=len(results),
-                unique_solution_count=final_unique,
-                best_score_history=best_score_history,
-                escalation_reasons=list(dict.fromkeys(escalation_reasons)),
-                stopping_reason=(
-                    final_assessment.stopping_reason
-                    if final_assessment is not None
-                    else "搜尋未開始"
-                ),
-                main_issue_category=main_issue,
-                main_issue_message=issue_message,
-                secondary_issue_categories=secondary,
-                affected_component_ids=affected_ids,
-                policy_id=policy.policy_id,
-                policy_version=policy.policy_version,
-                stage_records=stage_records,
-            )
-            self._save_solver_memory(results, diagnostics)
-            self._post_ui(
-                lambda: self.summary_var.set("正在整理結果與診斷……")
-            )
-            self._post_ui(
-                lambda: self._display_results(results, diagnostics=diagnostics)
-            )
-        except Exception:
-            import traceback
-
-            msg = traceback.format_exc()
-            self.text_writer.write(msg)
-            self._post_ui(
-                lambda: self.summary_var.set(
-                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
-                )
-            )
-        finally:
-            wales.set_logger(print)
-            self._post_ui(lambda: self.run_button.configure(state="normal"))
-
-    def _waler_ratio_targets(self):
-        if self.cfg is None:
-            return {"short": 0.2, "mid": 0.5, "long": 0.3}
-        return {
-            "short": self.cfg.short_segment_ratio_target,
-            "mid": self.cfg.mid_segment_ratio_target,
-            "long": self.cfg.long_segment_ratio_target,
-        }
-
-    def _waler_segment_counts(self, item):
-        segment_counts = {"short": 0, "mid": 0, "long": 0}
-        if self.cfg is None:
-            return None
-
-        for segment in item.get("segments", []) or []:
-            category = wales.classify_length(segment, self.cfg)
-            if category in segment_counts:
-                segment_counts[category] += 1
-        return segment_counts
-
-    def _with_waler_display_metadata(self, item):
-        enriched = dict(item)
-        enriched["ratio_targets"] = self._waler_ratio_targets()
-        segment_counts = self._waler_segment_counts(item)
-        if segment_counts is not None:
-            enriched["segment_counts"] = segment_counts
-        return enriched
-
-    @staticmethod
-    def _format_waler_engineer_summary(diagnostics):
-        if diagnostics is None:
-            return "搜尋狀態：舊版結果，無診斷資料。"
-        lines = []
-        if diagnostics.legal_solution_found:
-            lines.append("計算完成｜✓ 已找到合法方案")
-            if diagnostics.search_was_escalated:
-                lines.append("ℹ 初始搜尋尚未穩定，系統已自動增加計算強度。")
-            if diagnostics.result_is_stable:
-                lines.append("✓ 加強後結果已穩定。")
-            elif diagnostics.search_limit_reached:
-                lines.append("⚠ 已使用最大搜尋強度，結果尚未完全穩定，可比較其他合法方案。")
-            if (
-                diagnostics.unique_solution_count
-                >= solver_search.DEFAULT_SEARCH_POLICY.minimum_unique_solution_count
-            ):
-                lines.append("✓ 合法方案數充足。")
-        else:
-            lines.append("目前搜尋未找到合法方案。")
-            if diagnostics.infeasibility_proven:
-                lines.append("工程條件下無可行解。")
-            else:
-                lines.append("系統已使用最大搜尋強度，但不能據此證明工程條件一定無解。")
-        if diagnostics.main_issue_message:
-            lines.append(f"主要限制：{diagnostics.main_issue_message}")
-        return "\n".join(lines)
-
-    def _display_results(self, results, previous_results=None, diagnostics=None):
-        diagnostics = diagnostics or None
-        self.summary_var.set(self._format_waler_engineer_summary(diagnostics))
-        if not results:
-            self._append_message("找不到可顯示的方案。\n")
-            return
-
-        display_results = [
-            self._with_waler_display_metadata(item)
-            for item in list(results or [])[:5]
-        ]
-
-        self._append_message("\n=== 前 5 名方案 ===\n")
-        for idx, item in enumerate(display_results, start=1):
-            self._append_message(self._format_plan_summary(idx, item))
-
-        self.current_results = display_results
-        self.callback({
-            "waler_id": self.waler_id,
-            "top_results": display_results,
-            "ratio_targets": self._waler_ratio_targets(),
-            "required_length": int(round(self.length)),
-            "forbidden_points": [int(round(point)) for point in self.forbidden_points],
-            "joint_clearance": self.joint_clearance,
-            "min_piece_length": self.min_piece_length,
-            "max_piece_length": self.max_piece_length,
-            "adjustment_lengths": list(wales.WALER_ADJUSTMENT_LENGTHS),
-            "max_gap": wales.WALER_MAX_GAP,
-            "search_diagnostics": (
-                diagnostics.to_dict()
-                if isinstance(diagnostics, solver_search.SolverDiagnostics)
-                else copy.deepcopy(diagnostics)
-            ),
-        })
-        self._append_message(
-            "\n前 5 名已加入結果。請在結果頁勾選方案查看圖面，"
-            "雙擊方案可查看詳細資訊。\n"
-        )
-
-    def _format_plan_summary(self, index, item):
-        return (
-            SupportInputApp._format_waler_score_breakdown(
-                item,
-                option_index=index,
-                ratio_targets=item.get("ratio_targets"),
-                segment_counts=item.get("segment_counts"),
-            )
-            + "\n\n"
-        )
-
-    def _on_close(self):
-        self._close_ui_bridge()
-        self.dialog.destroy()
-
-    def open(self):
-        self.dialog.wait_window()
-        return self.current_results
-
-
 def main():
     root = tk.Tk()
-    app = SupportInputApp(root)
+    dependencies = build_dependencies(
+        resource_dir=RESOURCE_DIR,
+        app_dir=APP_DIR,
+    )
+    app = SupportInputApp(root, dependencies=dependencies)
     root.mainloop()
 
 

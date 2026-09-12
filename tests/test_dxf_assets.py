@@ -7,6 +7,8 @@ from ezdxf import bbox
 
 
 class DXFAssetTests(unittest.TestCase):
+    MAIN_APPLICATION_SPEC = "SupportSolver.spec"
+
     def test_jack_symbol_is_a_physical_size_reusable_block(self):
         asset_path = (
             Path(__file__).resolve().parents[1]
@@ -31,14 +33,35 @@ class DXFAssetTests(unittest.TestCase):
 
     def test_main_application_bundles_include_the_jack_asset(self):
         project_root = Path(__file__).resolve().parents[1]
-        for filename in (
-            "main.spec",
-            "SupportSolver.spec",
-            "SupportOptimizer.spec",
-        ):
-            content = (project_root / filename).read_text(encoding="utf-8")
-            with self.subTest(spec=filename):
-                self.assertIn("assets/dxf", content)
+        content = (project_root / self.MAIN_APPLICATION_SPEC).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("assets/dxf", content)
+
+    def test_main_application_bundles_include_runtime_resources(self):
+        project_root = Path(__file__).resolve().parents[1]
+        content = (project_root / self.MAIN_APPLICATION_SPEC).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("('picture', 'picture')", content)
+        self.assertIn('Path(SPECPATH) / "cad_builder.lsp"', content)
+        self.assertIn('Path(SPECPATH) / "project_cases"', content)
+
+    def test_main_application_output_is_named_support_optimizer(self):
+        project_root = Path(__file__).resolve().parents[1]
+        content = (project_root / self.MAIN_APPLICATION_SPEC).read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(content.count("name='SupportOptimizer'"), 2)
+        self.assertIn(
+            'Path(DISTPATH) / "SupportOptimizer"',
+            content,
+        )
+
+    def test_only_one_pyinstaller_spec_is_kept(self):
+        project_root = Path(__file__).resolve().parents[1]
+        specs = sorted(path.name for path in project_root.glob("*.spec"))
+        self.assertEqual(specs, [self.MAIN_APPLICATION_SPEC])
 
 
 if __name__ == "__main__":

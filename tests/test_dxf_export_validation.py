@@ -10,8 +10,8 @@ from unittest import mock
 
 import ezdxf
 
-import dxf_result_export as exporter
-from dxf_result_export import (
+from bracing_optimizer.infrastructure import dxf_result_export as exporter
+from bracing_optimizer.infrastructure.dxf_result_export import (
     APP_ID,
     JACK_BLOCK_NAME,
     RESULT_SUPPORT_LAYER,

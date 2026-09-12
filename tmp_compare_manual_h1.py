@@ -3,7 +3,7 @@ import math
 from pathlib import Path
 from collections import Counter
 
-import support
+from bracing_optimizer.algorithms import support
 
 support.set_logger(lambda msg: None)
 targets = support.normalize_material_ratio_targets(38, 40, 22)

@@ -1,6 +1,9 @@
 import unittest
 
-from cad_view_interaction import CADViewInteractionController, CADViewport
+from bracing_optimizer.presentation.cad_view_interaction import (
+    CADViewInteractionController,
+    CADViewport,
+)
 from main import PreviewNavigationToolbar, SupportInputApp
 
 

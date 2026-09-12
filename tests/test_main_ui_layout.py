@@ -1,7 +1,9 @@
+import inspect
 import unittest
 from unittest.mock import patch
 
-from main import SupportInputApp
+from main import SupportInputApp, SupportSolverDialog
+from window_layout import responsive_dialog_geometry
 
 
 class _GeometryRoot:
@@ -38,6 +40,44 @@ class MainUILayoutTests(unittest.TestCase):
             geometry = app._default_main_window_geometry()
 
         self.assertEqual(geometry, "1229x655+68+36")
+
+    def test_support_dialog_reserves_room_for_window_chrome_on_768p(self):
+        geometry = responsive_dialog_geometry(
+            900,
+            720,
+            ((0, 0, 1366, 728),),
+        )
+
+        self.assertEqual(geometry, "900x656+233+36")
+
+    def test_support_editor_uses_the_monitor_containing_its_parent(self):
+        geometry = responsive_dialog_geometry(
+            780,
+            760,
+            ((0, 0, 1366, 728), (1366, 0, 3286, 1040)),
+            anchor_geometry="1200x800+1500+80",
+        )
+
+        self.assertEqual(geometry, "780x760+1936+140")
+
+    def test_both_support_windows_apply_the_responsive_geometry(self):
+        solver_source = inspect.getsource(SupportSolverDialog.__init__)
+        editor_source = inspect.getsource(
+            SupportInputApp._open_support_plan_editor
+        )
+
+        self.assertIn("configure_responsive_dialog", solver_source)
+        self.assertIn("configure_responsive_dialog", editor_source)
+        self.assertLess(
+            editor_source.index('footer_frame.pack(side="bottom"'),
+            editor_source.index("status_var ="),
+        )
+
+    def test_main_action_row_is_reserved_below_the_expanding_workspace(self):
+        source = inspect.getsource(SupportInputApp._build_ui)
+
+        self.assertIn('side="bottom"', source)
+        self.assertIn("before=self.main_paned", source)
 
     def test_restore_moves_remembered_window_back_from_missing_monitor(self):
         app = SupportInputApp.__new__(SupportInputApp)

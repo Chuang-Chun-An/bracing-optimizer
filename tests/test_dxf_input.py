@@ -6,9 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import ezdxf
-from cad_view_interaction import CADViewport
+from bracing_optimizer.presentation.cad_view_interaction import CADViewport
 
-from DXFinput import (
+from dxf_import import (
     CandidatePoint,
     CandidatePointStore,
     CandidateTreeAdapter,
@@ -72,11 +72,13 @@ class DXFInputRecognitionTests(unittest.TestCase):
                 "中間柱",
                 "托梁",
                 "角撐",
+                "連續壁",
                 "輔助線",
                 "忽略",
             ),
         )
         expected_defaults = {
+            "L-SITE-WALL": "連續壁",
             "ES-圍令L1H350x350": "圍令",
             "ES-LH350x350": "支撐",
             "ES-大斜撐_支撐350x350": "斜撐",
@@ -85,6 +87,28 @@ class DXFInputRecognitionTests(unittest.TestCase):
             "ES-C250x90": "托梁",
         }
         self.assertTrue(expected_defaults.items() <= DEFAULT_LAYER_MAPPING.items())
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use("L-SITE-WALL", {}),
+            "連續壁",
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use(
+                "L-SITE-WALL",
+                {"L-SITE-WALL": "ignore"},
+            ),
+            "忽略",
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use(
+                "PROJECT-WALL",
+                {"PROJECT-WALL": "continuous_wall"},
+            ),
+            "連續壁",
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use("PROJECT-WALL", {}),
+            "忽略",
+        )
         self.assertEqual(
             DXFImportDialog._initial_layer_use("ES-LH350x350", {}),
             "支撐",
@@ -119,6 +143,86 @@ class DXFInputRecognitionTests(unittest.TestCase):
             ),
             "輔助線",
         )
+
+    def test_continuous_wall_is_preview_only_and_never_becomes_a_component(self):
+        doc = self.new_doc()
+        doc.layers.add("L-SITE-WALL")
+        model = doc.modelspace()
+        self.add_horizontal_walers(model)
+        self.add_default_strut_and_brace(model)
+        wall_entity = model.add_line(
+            (-250, -250),
+            (1250, -250),
+            dxfattribs={"layer": "L-SITE-WALL"},
+        )
+        self.counter += 1
+        path = Path(self.temp_dir.name) / f"continuous_wall_{self.counter}.dxf"
+        doc.saveas(path)
+
+        result = import_dxf(
+            path,
+            layer_roles={
+                "WALER": "waler",
+                "STRUT": "strut",
+                "BRACE": "brace",
+                "L-SITE-WALL": "continuous_wall",
+            },
+        )
+
+        self.assertEqual(
+            result.layer_classification["L-SITE-WALL"],
+            "continuous_wall",
+        )
+        self.assertEqual(
+            result.selected_layers["continuous_wall"],
+            ("L-SITE-WALL",),
+        )
+        self.assertEqual(result.source_entity_counts["continuous_wall"], 1)
+        wall_geometry = tuple(
+            geometry
+            for geometry in result.source_geometry
+            if geometry.role == "continuous_wall"
+        )
+        self.assertEqual(len(wall_geometry), 1)
+        self.assertEqual(wall_geometry[0].source_layer, "L-SITE-WALL")
+        self.assertFalse(
+            any(message.role == "continuous_wall" for message in result.messages)
+        )
+        engineering_members = (
+            *result.walers,
+            *result.struts,
+            *result.braces,
+            *result.columns,
+            *result.beams,
+            *result.corner_braces,
+        )
+        self.assertNotIn(
+            str(wall_entity.dxf.handle),
+            {
+                handle
+                for member in engineering_members
+                for handle in member.source_handles
+            },
+        )
+        self.assertNotIn(
+            str(wall_entity.dxf.handle),
+            {
+                handle
+                for member in engineering_members
+                for point in member.candidate_points
+                for handle in point.source_handles
+            },
+        )
+
+        debug = result.to_debug_dict()
+        self.assertIn(
+            {
+                "layer_name": "L-SITE-WALL",
+                "layer_type": "continuous_wall",
+            },
+            debug["layer_assignments"],
+        )
+        self.assertEqual(debug["summary"]["continuous_wall_geometry"], 1)
 
     def convert(self, doc, *, tolerances=None):
         self.counter += 1

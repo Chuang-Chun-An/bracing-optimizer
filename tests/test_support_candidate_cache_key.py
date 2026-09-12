@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-import support
+from bracing_optimizer.algorithms import support
 
 
 def make_config():

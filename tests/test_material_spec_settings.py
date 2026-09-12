@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 
 from main import SupportInputApp
-from project_data import DEFAULT_MATERIAL_SPECS, ProjectDataModel, TABLE_COLUMNS
+from bracing_optimizer.application.project_data import (
+    DEFAULT_MATERIAL_SPECS,
+    ProjectDataModel,
+    TABLE_COLUMNS,
+)
+from bracing_optimizer.application.solver_input_builder import SupportInputBuilder
 
 
 class MaterialSpecSettingsTests(unittest.TestCase):
@@ -233,7 +238,7 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         model = ProjectDataModel(material_specs=DEFAULT_MATERIAL_SPECS)
         self.assertIn({"Usage": "圍令", "Spec": "RC"}, model.material_specs)
 
-    def test_build_support_inputs_derives_waler_type_from_material_spec(self):
+    def test_support_input_builder_derives_waler_type_from_material_spec(self):
         app = SupportInputApp.__new__(SupportInputApp)
         app.project_data = ProjectDataModel(
             walers=[
@@ -261,7 +266,7 @@ class MaterialSpecSettingsTests(unittest.TestCase):
             ],
         )
 
-        result = app.build_support_inputs("Z1")
+        result = SupportInputBuilder().build_zone(app.project_data, "Z1").configs
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].from_waler_type, "RC")

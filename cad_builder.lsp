@@ -1,16 +1,20 @@
-;;; Support Distribution UV - progeCAD 與 Solver 的 CAD 匯入橋接程式
+;;; Support Distribution UV - progeCAD CAD bridge
+;;; Compatibility-first version: ASCII-only source, no vl-load-com,
+;;; no Visual LISP file helpers.
 ;;;
-;;; 使用 APPLOAD 載入後，可執行：
-;;;   ADDWALER - 點選圍令起點與終點
-;;;   ADDSTRUT - 點選支撐及選填托梁／中間柱位置
-;;;   ADDBRACE - 點選斜撐起點與終點
-;;;   SUPSTATUS - 顯示共享事件檔路徑與待匯入狀態
+;;; Commands:
+;;;   ADDWALER
+;;;   ADDSTRUT
+;;;   UPDSTRUT
+;;;   ADDBRACE
+;;;   SUPSTATUS
+;;;   SUPCLEAR
 
-(vl-load-com)
+(prompt "\n[CAD Bridge] Loading...")
 
 (setq cb:*event-file-name* "support_distribution_uv_cad_builder_temp.json")
 
-(defun cb:event-path (/ temp-dir last-character)
+(defun cb:event-path (/ temp-dir last-char)
   (setq temp-dir (getenv "TEMP"))
   (if (or (null temp-dir) (= temp-dir "") (= temp-dir " "))
     (setq temp-dir (getvar "TEMPPREFIX"))
@@ -18,10 +22,8 @@
   (if (or (null temp-dir) (= temp-dir "") (= temp-dir " "))
     nil
     (progn
-      (setq last-character
-        (substr temp-dir (strlen temp-dir) 1)
-      )
-      (if (or (= last-character "\\") (= last-character "/"))
+      (setq last-char (substr temp-dir (strlen temp-dir) 1))
+      (if (or (= last-char "\\") (= last-char "/"))
         (strcat temp-dir cb:*event-file-name*)
         (strcat temp-dir "\\" cb:*event-file-name*)
       )
@@ -29,41 +31,54 @@
   )
 )
 
-(defun cb:temp-path (/ event-path)
-  (setq event-path (cb:event-path))
-  (if (null event-path)
-    nil
-    (strcat event-path ".tmp")
+(defun cb:replace-char (text old-char new-char / i ch result)
+  (setq i 1)
+  (setq result "")
+  (while (<= i (strlen text))
+    (setq ch (substr text i 1))
+    (if (= ch old-char)
+      (setq result (strcat result new-char))
+      (setq result (strcat result ch))
+    )
+    (setq i (+ i 1))
   )
+  result
 )
 
 (defun cb:number-json (value / text)
   (setq text (rtos value 2 12))
-  (vl-string-translate "," "." text)
+  (cb:replace-char text "," ".")
 )
 
-(defun cb:event-id ()
-  (strcat
-    (vl-string-translate "." "-" (rtos (getvar "CDATE") 2 8))
-    "-"
-    (rtos (getvar "MILLISECS") 2 0)
+(defun cb:json-string (text / escaped)
+  (setq escaped (cb:replace-char text "\\" "\\\\"))
+  (cb:replace-char escaped "\"" "\\\"")
+)
+
+(defun cb:event-id (/ cdate-value)
+  ;; progeCAD compatibility:
+  ;; avoid MILLISECS because some versions return an incompatible value.
+  ;; CDATE alone is sufficient for this one-event-at-a-time bridge.
+  (setq cdate-value (getvar "CDATE"))
+  (if (numberp cdate-value)
+    (rtos cdate-value 2 8)
+    "cad-event"
   )
 )
 
-(defun cb:planar-length (start-point end-point / dx dy)
-  (setq dx (- (car end-point) (car start-point)))
-  (setq dy (- (cadr end-point) (cadr start-point)))
+(defun cb:planar-length (p1 p2 / dx dy)
+  (setq dx (- (car p2) (car p1)))
+  (setq dy (- (cadr p2) (cadr p1)))
   (sqrt (+ (* dx dx) (* dy dy)))
 )
 
-(defun cb:projection-distance
-       (start-point end-point selected-point / dx dy length)
-  (setq dx (- (car end-point) (car start-point)))
-  (setq dy (- (cadr end-point) (cadr start-point)))
-  (setq length (cb:planar-length start-point end-point))
-  (/ (+ (* (- (car selected-point) (car start-point)) dx)
-        (* (- (cadr selected-point) (cadr start-point)) dy))
-     length)
+(defun cb:projection-distance (p1 p2 p / dx dy len)
+  (setq dx (- (car p2) (car p1)))
+  (setq dy (- (cadr p2) (cadr p1)))
+  (setq len (cb:planar-length p1 p2))
+  (/ (+ (* (- (car p) (car p1)) dx)
+        (* (- (cadr p) (cadr p1)) dy))
+     len)
 )
 
 (defun cb:round-integer (value)
@@ -80,50 +95,50 @@
   )
 )
 
-(defun cb:pick-two-points
-       (object-name / start-ucs end-ucs)
-  (setq start-ucs
-    (getpoint (strcat "\n請點選" object-name "起點："))
-  )
-  (if start-ucs
+(defun cb:ucs-to-wcs (point)
+  (trans point 1 0)
+)
+
+(defun cb:pick-two-points (obj / p1-ucs p2-ucs p1-wcs p2-wcs)
+  (setq p1-ucs (getpoint (strcat "\nPick " obj " start point: ")))
+  (if p1-ucs
     (progn
-      (setq end-ucs
-        (getpoint start-ucs (strcat "\n請點選" object-name "終點："))
-      )
-      (if end-ucs
+      (setq p2-ucs (getpoint p1-ucs (strcat "\nPick " obj " end point: ")))
+      (if p2-ucs
         (progn
-          (if (> (cb:planar-length start-ucs end-ucs) 0.0)
-            (list start-ucs end-ucs)
-            (progn
-              (prompt "\n起點與終點不可相同。")
-              nil
-            )
+          (setq p1-wcs (cb:ucs-to-wcs p1-ucs))
+          (setq p2-wcs (cb:ucs-to-wcs p2-ucs))
+        )
+      )
+      (if p2-ucs
+        (if (> (cb:planar-length p1-wcs p2-wcs) 0.0)
+          (list p1-wcs p2-wcs)
+          (progn
+            (prompt "\nStart and end points cannot be the same.")
+            nil
           )
         )
         (progn
-          (prompt "\n已取消點位輸入。")
+          (prompt "\nPoint input cancelled.")
           nil
         )
       )
     )
     (progn
-      (prompt "\n已取消點位輸入。")
+      (prompt "\nPoint input cancelled.")
       nil
     )
   )
 )
 
-(defun cb:pick-stations
-       (start-point end-point prompt-text
-        / selected-ucs station length station-text)
+(defun cb:pick-stations (p1 p2 prompt-text / p-ucs p-wcs station len station-text)
   (setq station-text "")
-  (setq length (cb:planar-length start-point end-point))
-  (while (setq selected-ucs (getpoint prompt-text))
-    (setq station
-      (cb:projection-distance start-point end-point selected-ucs)
-    )
-    (if (or (< station 0.0) (> station length))
-      (prompt "\n警告：所選位置超出支撐範圍，仍會保留此測站。")
+  (setq len (cb:planar-length p1 p2))
+  (while (setq p-ucs (getpoint prompt-text))
+    (setq p-wcs (cb:ucs-to-wcs p-ucs))
+    (setq station (cb:projection-distance p1 p2 p-wcs))
+    (if (or (< station 0.0) (> station len))
+      (prompt "\nWarning: selected point is outside the strut range; station is kept.")
     )
     (setq station-text
       (cb:append-station station-text (cb:round-integer station))
@@ -132,38 +147,54 @@
   station-text
 )
 
-(defun cb:ask-for-stations
-       (question prompt-text start-point end-point / answer)
+(defun cb:ask-for-stations (question prompt-text p1 p2 / answer)
   (initget "Yes No")
   (setq answer (getkword question))
   (if (null answer)
     ""
     (if (= answer "Yes")
-      (cb:pick-stations start-point end-point prompt-text)
+      (cb:pick-stations p1 p2 prompt-text)
       ""
     )
   )
 )
 
-(defun cb:event-json
-       (event-type start-point end-point extra-fields)
+(defun cb:event-json (event-type operation target-id p1 p2 extra-fields)
   (strcat
     "{"
     "\"event_id\":\"" (cb:event-id) "\","
     "\"type\":\"" event-type "\","
+    "\"operation\":\"" operation "\","
+    "\"coordinate_space\":\"WCS\","
+    (if (= target-id "")
+      ""
+      (strcat "\"target_id\":\"" (cb:json-string target-id) "\",")
+    )
     "\"data\":{"
-    "\"StartX\":" (cb:number-json (car start-point)) ","
-    "\"StartY\":" (cb:number-json (cadr start-point)) ","
-    "\"EndX\":" (cb:number-json (car end-point)) ","
-    "\"EndY\":" (cb:number-json (cadr end-point))
+    "\"StartX\":" (cb:number-json (car p1)) ","
+    "\"StartY\":" (cb:number-json (cadr p1)) ","
+    "\"EndX\":" (cb:number-json (car p2)) ","
+    "\"EndY\":" (cb:number-json (cadr p2))
     (if (= extra-fields "") "" (strcat "," extra-fields))
     "}"
     "}"
   )
 )
 
-(defun cb:write-text-file (path content / stream)
-  (setq stream (open path "w"))
+(defun cb:cancel-event-json ()
+  (strcat
+    "{"
+    "\"event_id\":\"cancel-" (cb:event-id) "\","
+    "\"type\":\"control\","
+    "\"operation\":\"cancel\","
+    "\"coordinate_space\":\"WCS\","
+    "\"data\":{}"
+    "}"
+  )
+)
+
+(defun cb:write-text-file (file-path content / stream)
+  (setq stream (open file-path "w"))
   (if stream
     (progn
       (write-line content stream)
@@ -175,66 +206,37 @@
 )
 
 (defun cb:pending-message ()
-  (prompt
-    (strcat
-      "\n上一筆 CAD 匯入事件尚未處理完成。"
-      "請等待 Solver 匯入後再試一次。"
-    )
-  )
+  (prompt "\nA previous CAD event is still pending. Wait for Solver, or use SUPCLEAR to discard it.")
 )
 
 (defun cb:temp-directory-message ()
-  (prompt "\n無法取得 Windows 暫存資料夾。")
+  (prompt "\nCannot determine the Windows temporary directory.")
 )
 
-(defun cb:write-event
-       (event-type start-point end-point extra-fields
-        / event-path temp-path content renamed-path)
+(defun cb:write-event (event-type operation target-id p1 p2 extra-fields / event-path content)
   (setq event-path (cb:event-path))
-  (setq temp-path (cb:temp-path))
-  (if (or (null event-path) (null temp-path))
+  (if (null event-path)
     (progn
       (cb:temp-directory-message)
       nil
     )
-    (progn
-      (if (findfile event-path)
-        (progn
-          (cb:pending-message)
-          nil
+    (if (findfile event-path)
+      (progn
+        (cb:pending-message)
+        nil
+      )
+      (progn
+        (setq content
+          (cb:event-json event-type operation target-id p1 p2 extra-fields)
         )
-        (progn
-          (if (findfile temp-path)
-            (vl-file-delete temp-path)
+        (if (cb:write-text-file event-path content)
+          (progn
+            (prompt "\nEvent written. Waiting for Solver import.")
+            T
           )
-          (setq content
-            (cb:event-json event-type start-point end-point extra-fields)
-          )
-          (if (not (cb:write-text-file temp-path content))
-            (progn
-              (prompt
-                (strcat "\n無法寫入暫存事件檔：" temp-path)
-              )
-              nil
-            )
-            (progn
-              (setq renamed-path (vl-file-rename temp-path event-path))
-              (if renamed-path
-                (progn
-                  (prompt "\n事件已寫入，等待 Solver 匯入。")
-                  T
-                )
-                (progn
-                  (if (findfile temp-path)
-                    (vl-file-delete temp-path)
-                  )
-                  (prompt
-                    (strcat "\n無法發布事件檔：" event-path)
-                  )
-                  nil
-                )
-              )
-            )
+          (progn
+            (prompt (strcat "\nCannot write event file: " event-path))
+            nil
           )
         )
       )
@@ -242,18 +244,16 @@
   )
 )
 
-(defun cb:capture-simple (event-type object-name / event-path points)
+(defun cb:capture-simple (event-type obj / event-path points)
   (setq event-path (cb:event-path))
   (if (null event-path)
     (cb:temp-directory-message)
-    (progn
-      (if (findfile event-path)
-        (cb:pending-message)
-        (progn
-          (setq points (cb:pick-two-points object-name))
-          (if points
-            (cb:write-event event-type (car points) (cadr points) "")
-          )
+    (if (findfile event-path)
+      (cb:pending-message)
+      (progn
+        (setq points (cb:pick-two-points obj))
+        (if points
+          (cb:write-event event-type "add" "" (car points) (cadr points) "")
         )
       )
     )
@@ -262,54 +262,59 @@
 )
 
 (defun c:ADDWALER ()
-  (cb:capture-simple "waler" "圍令")
+  (cb:capture-simple "waler" "Waler")
 )
 
-(defun c:ADDSTRUT
-       (/ points start-point end-point beam-positions column-positions
-        extra-fields event-path)
+(defun cb:capture-strut (operation / points p1 p2 beam-positions column-positions extra-fields event-path target-id)
   (setq event-path (cb:event-path))
   (if (null event-path)
     (cb:temp-directory-message)
-    (progn
-      (if (findfile event-path)
-        (cb:pending-message)
-        (progn
-          (setq points (cb:pick-two-points "支撐"))
-          (if points
-            (progn
-              (setq start-point (car points))
-              (setq end-point (cadr points))
-              (setq beam-positions
-                (cb:ask-for-stations
-                  "\n是否要點選托梁位置？[Yes/No] <No>："
-                  "\n請點選托梁位置，按 Enter 結束："
-                  start-point
-                  end-point
-                )
-              )
-              (setq column-positions
-                (cb:ask-for-stations
-                  "\n是否要點選中間柱位置？[Yes/No] <No>："
-                  "\n請點選中間柱位置，按 Enter 結束："
-                  start-point
-                  end-point
-                )
-              )
-              (setq extra-fields
-                (strcat
-                  "\"BeamPositions\":\"" beam-positions "\","
-                  "\"ColumnPositions\":\"" column-positions "\","
-                  "\"TargetJackRegion\":\"\""
-                )
-              )
-              (cb:write-event
-                "strut"
-                start-point
-                end-point
-                extra-fields
+    (if (findfile event-path)
+      (cb:pending-message)
+      (progn
+        (setq target-id "")
+        (if (= operation "update")
+          (progn
+            (setq target-id (getstring T "\nTarget StrutID (example S5): "))
+            (if target-id (setq target-id (strcase target-id)))
+          )
+        )
+        (if (and (= operation "update") (= target-id ""))
+          (prompt "\nStrut update cancelled: target StrutID is required.")
+          (setq points (cb:pick-two-points "Strut"))
+        )
+        (if points
+          (progn
+            (setq p1 (car points))
+            (setq p2 (cadr points))
+
+            (setq beam-positions
+              (cb:ask-for-stations
+                "\nPick beam positions? [Yes/No] <No>: "
+                "\nPick a beam position, press Enter to finish: "
+                p1
+                p2
               )
             )
+
+            (setq column-positions
+              (cb:ask-for-stations
+                "\nPick column positions? [Yes/No] <No>: "
+                "\nPick a column position, press Enter to finish: "
+                p1
+                p2
+              )
+            )
+
+            (setq extra-fields
+              (strcat
+                "\"BeamPositions\":\"" beam-positions "\","
+                "\"ColumnPositions\":\"" column-positions "\""
+                (if (= operation "add") ",\"TargetJackRegion\":2" "")
+              )
+            )
+
+            (cb:write-event "strut" operation target-id p1 p2 extra-fields)
           )
         )
       )
@@ -318,26 +323,62 @@
   (princ)
 )
 
-(defun c:ADDBRACE ()
-  (cb:capture-simple "brace" "斜撐")
+(defun c:ADDSTRUT ()
+  (cb:capture-strut "add")
 )
 
-(defun c:SUPSTATUS (/ path)
-  (setq path (cb:event-path))
-  (if (null path)
+(defun c:UPDSTRUT ()
+  (cb:capture-strut "update")
+)
+
+(defun c:ADDBRACE ()
+  (cb:capture-simple "brace" "Brace")
+)
+
+(defun c:SUPSTATUS (/ event-path)
+  (setq event-path (cb:event-path))
+  (if (null event-path)
     (cb:temp-directory-message)
     (progn
-      (prompt (strcat "\nSolver CAD 匯入事件檔：" path))
-      (if (findfile path)
-        (prompt "\n狀態：有一筆事件等待匯入。")
-        (prompt "\n狀態：可接收新事件。")
+      (prompt (strcat "\nSolver CAD event file: " event-path))
+      (if (findfile event-path)
+        (prompt "\nStatus: one event is waiting for import. Use SUPCLEAR if it was rejected.")
+        (prompt "\nStatus: ready for a new event.")
       )
     )
   )
   (princ)
 )
 
-(prompt
-  "\nCAD 匯入橋接程式已載入。指令：ADDWALER、ADDSTRUT、ADDBRACE、SUPSTATUS。"
+(defun c:SUPCLEAR (/ event-path answer content)
+  (setq event-path (cb:event-path))
+  (if (null event-path)
+    (cb:temp-directory-message)
+    (if (findfile event-path)
+      (progn
+        (initget "Yes No")
+        (setq answer
+          (getkword
+            "\nDiscard the pending CAD event? [Yes/No] <No>: "
+          )
+        )
+        (if (= answer "Yes")
+          (progn
+            (setq content (cb:cancel-event-json))
+            (if (cb:write-text-file event-path content)
+              (prompt "\nDiscard requested. Wait for Solver, then use SUPSTATUS.")
+              (prompt "\nCannot replace the pending CAD event.")
+            )
+          )
+          (prompt "\nPending CAD event was kept.")
+        )
+      )
+      (prompt "\nStatus: ready for a new event. Nothing to discard.")
+    )
+  )
+  (princ)
 )
-(princ) 
+
+(prompt "\n[CAD Bridge] Loaded successfully.")
+(prompt "\nCommands: ADDWALER, ADDSTRUT, UPDSTRUT, ADDBRACE, SUPSTATUS, SUPCLEAR")
+(princ)

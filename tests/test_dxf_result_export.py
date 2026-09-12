@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import ezdxf
 
-from dxf_result_export import (
+from bracing_optimizer.infrastructure.dxf_result_export import (
     APP_ID,
     CLEAN_DXF_ACAD_VERSION,
     JACK_BLOCK_NAME,
@@ -499,6 +499,22 @@ class DXFResultExportTests(unittest.TestCase):
 
         self.assertNotIn(("waler", "W1"), bindings)
         self.assertEqual("NEW_DXF_WALER", bindings[("waler", "W5")].layer)
+
+    def test_same_id_does_not_override_geometry_mismatch(self):
+        dxf_state = clean_import_state()
+        rows = [
+            {
+                "WalerID": "W1",
+                "StartX": 1000,
+                "StartY": 0,
+                "EndX": 4000,
+                "EndY": 0,
+            }
+        ]
+
+        bindings = build_member_bindings(dxf_state, rows, [])
+
+        self.assertNotIn(("waler", "W1"), bindings)
 
     def test_rejects_conflicting_or_incomplete_plans_before_writing(self):
         bindings = basic_bindings()

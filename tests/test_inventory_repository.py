@@ -4,14 +4,18 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
-from inventory_repository import (
+from bracing_optimizer.infrastructure.inventory_repository import (
     INVENTORY_COLUMNS,
     InMemoryInventoryRepository,
     JsonInventoryRepository,
 )
-from inventory_conversion import convert_source_rows
+from tools.inventory_conversion import convert_source_rows
 from main import SupportInputApp, UNLIMITED_INVENTORY_QTY
-from project_data import DEFAULT_MATERIAL_SPECS, ProjectDataModel
+from bracing_optimizer.application.project_data import (
+    DEFAULT_MATERIAL_SPECS,
+    ProjectDataModel,
+)
+from bracing_optimizer.application.solver_input_builder import InventoryLookup
 
 
 class InventoryRepositoryTests(unittest.TestCase):
@@ -160,16 +164,17 @@ class InventorySettingsQueryTests(unittest.TestCase):
 
     def test_spec_and_usage_filter_purchasable_lengths_and_stock(self):
         app = self.app()
+        inventory = InventoryLookup(app.project_data.inventory)
 
         self.assertEqual(
-            app._get_purchasable_lengths("H350x350", "支撐"),
+            inventory.purchasable_lengths("H350x350", "支撐"),
             [4500, 5000],
         )
         self.assertEqual(
-            app._get_purchasable_lengths("H350x350", "圍令"),
+            inventory.purchasable_lengths("H350x350", "圍令"),
             [8000],
         )
-        self.assertEqual(app._get_inventory_items("H350x350", "支撐"), [{
+        self.assertEqual(inventory.stock_items("H350x350", "支撐"), [{
             "id": "S-45",
             "length": 4500,
             "qty": 2,
@@ -177,12 +182,13 @@ class InventorySettingsQueryTests(unittest.TestCase):
 
     def test_unspecified_spec_uses_unlimited_quantity_99(self):
         app = self.app()
+        inventory = InventoryLookup(app.project_data.inventory)
 
         self.assertEqual(
             app._inventory_quantity("", "支撐", 4500),
             UNLIMITED_INVENTORY_QTY,
         )
-        stock = app._get_inventory_items("", "支撐")
+        stock = inventory.stock_items("", "支撐")
         self.assertTrue(stock)
         self.assertTrue(all(item["qty"] == 99 for item in stock))
 

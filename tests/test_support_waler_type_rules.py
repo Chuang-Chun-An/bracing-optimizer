@@ -1,6 +1,6 @@
 import unittest
 
-import support
+from bracing_optimizer.algorithms import support
 
 
 def config(from_type="Steel", to_type="Steel", *, steel_lengths=None):

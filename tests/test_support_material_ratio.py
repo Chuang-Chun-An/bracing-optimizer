@@ -1,6 +1,6 @@
 import unittest
 
-import support
+from bracing_optimizer.algorithms import support
 
 
 def plan(support_id, steel_lengths, *, jack_center=0, region=1, score=0):

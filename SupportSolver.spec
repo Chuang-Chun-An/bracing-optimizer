@@ -28,7 +28,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='SupportSolver',
+    name='SupportOptimizer',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -50,10 +50,10 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='SupportSolver',
+    name='SupportOptimizer',
 )
 
-output_dir = Path(DISTPATH) / "SupportSolver"
+output_dir = Path(DISTPATH) / "SupportOptimizer"
 
 shutil.copy2(
     Path(SPECPATH) / "cad_builder.lsp",
@@ -63,5 +63,13 @@ shutil.copy2(
 shutil.copytree(
     Path(SPECPATH) / "test_cases",
     output_dir / "test_cases",
+    dirs_exist_ok=True,
+)
+
+# Project cases are writable user/project files, so keep their initial content
+# beside the executable instead of placing it under PyInstaller's _internal.
+shutil.copytree(
+    Path(SPECPATH) / "project_cases",
+    output_dir / "project_cases",
     dirs_exist_ok=True,
 )

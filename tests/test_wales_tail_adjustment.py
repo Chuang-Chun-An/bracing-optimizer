@@ -1,6 +1,6 @@
 import unittest
 
-import wales
+from bracing_optimizer.algorithms import wales
 
 
 class WalerTailAdjustmentTests(unittest.TestCase):

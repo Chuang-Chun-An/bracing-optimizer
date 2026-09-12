@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "project_information": {
     "project_name": "Y1A站第二層支撐",
     "saved_at": "2026-08-06T11:55:02",
@@ -695,7 +695,1132 @@
         "EndX": 82681,
         "EndY": 20963
       }
+    ],
+    "columns": [],
+    "beams": [],
+    "strut_obstacles": [
+      {
+        "ObstacleID": "S1-column-1",
+        "StrutID": "S1",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S1-column-2",
+        "StrutID": "S1",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S1-beam-1",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S1-beam-2",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S2-column-1",
+        "StrutID": "S2",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S2-column-2",
+        "StrutID": "S2",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S2-beam-1",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S2-beam-2",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S3-column-1",
+        "StrutID": "S3",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S3-column-2",
+        "StrutID": "S3",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S3-beam-1",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S3-beam-2",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S4-column-1",
+        "StrutID": "S4",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S4-column-2",
+        "StrutID": "S4",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S4-beam-1",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S4-beam-2",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S5-column-1",
+        "StrutID": "S5",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S5-column-2",
+        "StrutID": "S5",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S5-beam-1",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S5-beam-2",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S6-column-1",
+        "StrutID": "S6",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S6-column-2",
+        "StrutID": "S6",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S6-beam-1",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S6-beam-2",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S7-column-1",
+        "StrutID": "S7",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S7-column-2",
+        "StrutID": "S7",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S7-beam-1",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S7-beam-2",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S8-column-1",
+        "StrutID": "S8",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S8-column-2",
+        "StrutID": "S8",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S8-beam-1",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S8-beam-2",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S9-column-1",
+        "StrutID": "S9",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S9-column-2",
+        "StrutID": "S9",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S9-beam-1",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S9-beam-2",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S10-column-1",
+        "StrutID": "S10",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S10-column-2",
+        "StrutID": "S10",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S10-beam-1",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S10-beam-2",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S11-column-1",
+        "StrutID": "S11",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S11-column-2",
+        "StrutID": "S11",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S11-beam-1",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S11-beam-2",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S12-column-1",
+        "StrutID": "S12",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S12-column-2",
+        "StrutID": "S12",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S12-beam-1",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S12-beam-2",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S13-column-1",
+        "StrutID": "S13",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S13-column-2",
+        "StrutID": "S13",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S13-beam-1",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S13-beam-2",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S14-column-1",
+        "StrutID": "S14",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S14-column-2",
+        "StrutID": "S14",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S14-beam-1",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S14-beam-2",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S15-column-1",
+        "StrutID": "S15",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S15-column-2",
+        "StrutID": "S15",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S15-beam-1",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S15-beam-2",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S16-column-1",
+        "StrutID": "S16",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S16-column-2",
+        "StrutID": "S16",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S16-beam-1",
+        "StrutID": "S16",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S16-beam-2",
+        "StrutID": "S16",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S17-column-1",
+        "StrutID": "S17",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S17-column-2",
+        "StrutID": "S17",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S17-beam-1",
+        "StrutID": "S17",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S17-beam-2",
+        "StrutID": "S17",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S18-column-1",
+        "StrutID": "S18",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S18-column-2",
+        "StrutID": "S18",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S18-beam-1",
+        "StrutID": "S18",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S18-beam-2",
+        "StrutID": "S18",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S19-column-1",
+        "StrutID": "S19",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S19-column-2",
+        "StrutID": "S19",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S19-beam-1",
+        "StrutID": "S19",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7622.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S19-beam-2",
+        "StrutID": "S19",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13522.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S20-column-1",
+        "StrutID": "S20",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S20-column-2",
+        "StrutID": "S20",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S20-beam-1",
+        "StrutID": "S20",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S20-beam-2",
+        "StrutID": "S20",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S21-column-1",
+        "StrutID": "S21",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S21-column-2",
+        "StrutID": "S21",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S21-beam-1",
+        "StrutID": "S21",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7629.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S21-beam-2",
+        "StrutID": "S21",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13513.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S22-column-1",
+        "StrutID": "S22",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S22-column-2",
+        "StrutID": "S22",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S22-beam-1",
+        "StrutID": "S22",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S22-beam-2",
+        "StrutID": "S22",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S23-column-1",
+        "StrutID": "S23",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S23-column-2",
+        "StrutID": "S23",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S23-beam-1",
+        "StrutID": "S23",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S23-beam-2",
+        "StrutID": "S23",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S24-column-1",
+        "StrutID": "S24",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S24-column-2",
+        "StrutID": "S24",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S24-beam-1",
+        "StrutID": "S24",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S24-beam-2",
+        "StrutID": "S24",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S25-column-1",
+        "StrutID": "S25",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S25-column-2",
+        "StrutID": "S25",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S25-beam-1",
+        "StrutID": "S25",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 7808.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S25-beam-2",
+        "StrutID": "S25",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 13334.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S26-column-1",
+        "StrutID": "S26",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S26-column-2",
+        "StrutID": "S26",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S26-beam-1",
+        "StrutID": "S26",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S26-beam-2",
+        "StrutID": "S26",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S27-column-1",
+        "StrutID": "S27",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S27-column-2",
+        "StrutID": "S27",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S27-beam-1",
+        "StrutID": "S27",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S27-beam-2",
+        "StrutID": "S27",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S28-column-1",
+        "StrutID": "S28",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S28-column-2",
+        "StrutID": "S28",
+        "Kind": "column",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S28-beam-1",
+        "StrutID": "S28",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 8472.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      },
+      {
+        "ObstacleID": "S28-beam-2",
+        "StrutID": "S28",
+        "Kind": "beam",
+        "ComponentID": "",
+        "Station": 12672.0,
+        "IntersectionX": null,
+        "IntersectionY": null,
+        "Source": "legacy"
+      }
     ]
   },
-  "result": null
+  "result": null,
+  "dxf_asset": null
 }

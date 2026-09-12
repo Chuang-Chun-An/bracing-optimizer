@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "project_information": {
     "project_name": "Y1A站第一層支撐",
     "saved_at": "2026-08-12T22:31:58",
@@ -490,6 +490,1610 @@
         "StartY": 21300,
         "EndX": 95600,
         "EndY": 11750
+      }
+    ],
+    "columns": [
+      {
+        "ColumnID": "C1",
+        "StartX": 59035.096924158686,
+        "StartY": 7919.659427204751,
+        "EndX": 59064.901433260704,
+        "EndY": 7480.212621626561,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C2",
+        "StartX": 53037.365580265,
+        "StartY": 7917.939166506403,
+        "EndX": 53062.63300619676,
+        "EndY": 7481.932911811979,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C3",
+        "StartX": 71038.86733977217,
+        "StartY": 8066.761086525279,
+        "EndX": 71061.13140423136,
+        "EndY": 7633.111009226181,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C4",
+        "StartX": 91535.98701592087,
+        "StartY": 8768.992857466335,
+        "EndX": 91564.01143316069,
+        "EndY": 8330.87920356309,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C5",
+        "StartX": 77038.6897311327,
+        "StartY": 8066.902088848874,
+        "EndX": 77061.30899478745,
+        "EndY": 7632.970004973817,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C6",
+        "StartX": 53041.536488716374,
+        "StartY": 13814.585502028582,
+        "EndX": 53058.46252978657,
+        "EndY": 13385.284904262517,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C7",
+        "StartX": 71041.1146131513,
+        "StartY": 13664.93630415271,
+        "EndX": 71058.88436051353,
+        "EndY": 13234.93409842276,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C8",
+        "StartX": 77040.98288986634,
+        "StartY": 13665.045283898595,
+        "EndX": 77059.01607083151,
+        "EndY": 13234.82511752646,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C9",
+        "StartX": 65043.37144524703,
+        "StartY": 7913.028593778494,
+        "EndX": 65056.62778408552,
+        "EndY": 7486.843542485847,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C10",
+        "StartX": 59045.65585734666,
+        "StartY": 13811.0131756888,
+        "EndX": 59054.34362511453,
+        "EndY": 13388.857258649077,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C11",
+        "StartX": 4048.125019278261,
+        "StartY": 12958.736671710736,
+        "EndX": 4051.874753087817,
+        "EndY": 12541.13377123396,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C12",
+        "StartX": 83034.08439892164,
+        "StartY": 12529.46500514436,
+        "EndX": 83065.91750861931,
+        "EndY": 12970.405302131781,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C13",
+        "StartX": 12548.081267230853,
+        "StartY": 12958.777941828477,
+        "EndX": 12551.918500128959,
+        "EndY": 12541.09250102297,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C14",
+        "StartX": 24548.013962049095,
+        "StartY": 13658.84136154165,
+        "EndX": 24551.985796698194,
+        "EndY": 13241.029081153567,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C15",
+        "StartX": 30549.9981629292,
+        "StartY": 7906.937877473072,
+        "EndX": 30550.00183758739,
+        "EndY": 7492.934282762581,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C16",
+        "StartX": 83049.99261422723,
+        "StartY": 8342.928854776896,
+        "EndX": 83050.00738708983,
+        "EndY": 8756.943305458757,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C17",
+        "StartX": 41549.9970304888,
+        "StartY": 13806.938127308036,
+        "EndX": 41550.00296938955,
+        "EndY": 13392.932317680563,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C18",
+        "StartX": 18549.999779612874,
+        "StartY": 13656.935438178596,
+        "EndX": 18550.00022056827,
+        "EndY": 13242.935006810003,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C19",
+        "StartX": 35549.9984977424,
+        "StartY": 7906.937549636816,
+        "EndX": 35550.00150213594,
+        "EndY": 7492.934610598837,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C20",
+        "StartX": 91549.99722057843,
+        "StartY": 12956.937941123033,
+        "EndX": 91550.00277881307,
+        "EndY": 12542.932503865566,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C21",
+        "StartX": 41548.938125174725,
+        "StartY": 7491.907781992806,
+        "EndX": 41551.062004240695,
+        "EndY": 7907.96437758219,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C22",
+        "StartX": 35548.96163386374,
+        "StartY": 13391.929462789325,
+        "EndX": 35551.038493930595,
+        "EndY": 13807.940981561202,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C23",
+        "StartX": 65034.761644353624,
+        "StartY": 13379.96212909068,
+        "EndX": 65065.240183357615,
+        "EndY": 13819.90818927798,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C24",
+        "StartX": 24548.98397562449,
+        "StartY": 7641.951750798966,
+        "EndX": 24551.0161478832,
+        "EndY": 8057.920408833306,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C25",
+        "StartX": 12549.020566522668,
+        "StartY": 8341.98686771805,
+        "EndX": 12550.979552387784,
+        "EndY": 8757.88529195753,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C26",
+        "StartX": 47547.82561288541,
+        "StartY": 13390.85178590985,
+        "EndX": 47552.17465314863,
+        "EndY": 13809.018656311906,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C27",
+        "StartX": 30547.925730693038,
+        "StartY": 13390.945827726042,
+        "EndX": 30552.074523411633,
+        "EndY": 13808.924614740303,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C28",
+        "StartX": 18546.925449858652,
+        "StartY": 7640.0150734677445,
+        "EndX": 18553.074922244297,
+        "EndY": 8059.857081317692,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C29",
+        "StartX": 4047.0546791249653,
+        "StartY": 8340.134442232316,
+        "EndX": 4052.9456781503395,
+        "EndY": 8759.73771298735,
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "ColumnID": "C30",
+        "StartX": 47537.97984478745,
+        "StartY": 7482.409836164676,
+        "EndX": 47562.02158941899,
+        "EndY": 7917.462244814262,
+        "material_spec": "",
+        "Remark": ""
+      }
+    ],
+    "beams": [
+      {
+        "BeamID": "BM1",
+        "Path": [
+          [
+            11550,
+            13001.805679058423
+          ],
+          [
+            12755.307185212732,
+            13001.805679058423
+          ],
+          [
+            18344.075889708358,
+            13701.805679058423
+          ],
+          [
+            24753.10325325845,
+            13701.805679058423
+          ],
+          [
+            30346.76301146869,
+            13851.805679058423
+          ],
+          [
+            31550,
+            13851.805679058423
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM2",
+        "Path": [
+          [
+            11550,
+            12497.9352224943
+          ],
+          [
+            12755.307185212732,
+            12497.9352224943
+          ],
+          [
+            18344.075889708358,
+            13197.9352224943
+          ],
+          [
+            24753.10325325845,
+            13197.9352224943
+          ],
+          [
+            30346.76301146869,
+            13347.9352224943
+          ],
+          [
+            31550,
+            13347.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM3",
+        "Path": [
+          [
+            34550,
+            13851.9352224943
+          ],
+          [
+            60050,
+            13851.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM4",
+        "Path": [
+          [
+            34550,
+            13347.9352224943
+          ],
+          [
+            60050,
+            13347.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM5",
+        "Path": [
+          [
+            64050,
+            13851.9352224943
+          ],
+          [
+            65253.23698853137,
+            13851.9352224943
+          ],
+          [
+            70846.89674674155,
+            13701.9352224943
+          ],
+          [
+            77255.9241102917,
+            13701.9352224943
+          ],
+          [
+            82844.69281478721,
+            13001.9352224943
+          ],
+          [
+            84049.99999999994,
+            13001.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM6",
+        "Path": [
+          [
+            64050,
+            13347.9352224943
+          ],
+          [
+            65253.23698853137,
+            13347.9352224943
+          ],
+          [
+            70846.89674674155,
+            13197.9352224943
+          ],
+          [
+            77255.9241102917,
+            13197.9352224943
+          ],
+          [
+            82844.69281478721,
+            12497.9352224943
+          ],
+          [
+            84049.99999999994,
+            12497.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM7",
+        "Path": [
+          [
+            -450,
+            8801.936080117826
+          ],
+          [
+            4252.5,
+            8801.936080117826
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM8",
+        "Path": [
+          [
+            91347.50000017782,
+            12497.935219606967
+          ],
+          [
+            96050.00000003114,
+            12497.935222867993
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM9",
+        "Path": [
+          [
+            -450,
+            8297.936080117826
+          ],
+          [
+            4252.5,
+            8297.936080117826
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM10",
+        "Path": [
+          [
+            -450,
+            13001.9352224943
+          ],
+          [
+            4252.5,
+            13001.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM11",
+        "Path": [
+          [
+            -450,
+            12497.9352224943
+          ],
+          [
+            4252.5,
+            12497.9352224943
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM12",
+        "Path": [
+          [
+            11549.999999997206,
+            8298.065623555449
+          ],
+          [
+            12755.307185209938,
+            8298.065623554052
+          ],
+          [
+            18344.07588970469,
+            7598.0656235473
+          ],
+          [
+            24753.10325325484,
+            7598.065623539616
+          ],
+          [
+            30346.76301146485,
+            7448.065623532981
+          ],
+          [
+            31549.99999999616,
+            7448.065623531467
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM13",
+        "Path": [
+          [
+            11549.999999997788,
+            8801.936080119573
+          ],
+          [
+            12755.30718521052,
+            8801.936080118176
+          ],
+          [
+            18344.07588970533,
+            8101.9360801114235
+          ],
+          [
+            24753.103253255424,
+            8101.93608010374
+          ],
+          [
+            30346.76301146543,
+            7951.936080097104
+          ],
+          [
+            31549.9999999968,
+            7951.936080095591
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM14",
+        "Path": [
+          [
+            34550,
+            7447.936080116429
+          ],
+          [
+            60050,
+            7447.936080116429
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM15",
+        "Path": [
+          [
+            34550,
+            7951.936080116429
+          ],
+          [
+            60050,
+            7951.936080116429
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM16",
+        "Path": [
+          [
+            64050,
+            7447.9360801161965
+          ],
+          [
+            65253.23698853137,
+            7447.9360801161965
+          ],
+          [
+            70846.89674674155,
+            7597.9360801161965
+          ],
+          [
+            77255.9241102917,
+            7597.9360801161965
+          ],
+          [
+            82844.69281478721,
+            8297.936080116197
+          ],
+          [
+            84049.99999999994,
+            8297.936080116197
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM17",
+        "Path": [
+          [
+            64050,
+            7951.9360801161965
+          ],
+          [
+            65253.23698853137,
+            7951.9360801161965
+          ],
+          [
+            70846.89674674155,
+            8101.9360801161965
+          ],
+          [
+            77255.9241102917,
+            8101.9360801161965
+          ],
+          [
+            82844.69281478721,
+            8801.936080116197
+          ],
+          [
+            84049.99999999994,
+            8801.936080116197
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM18",
+        "Path": [
+          [
+            91347.50000017782,
+            13001.935225381632
+          ],
+          [
+            96050.00000003114,
+            13001.935222120606
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM19",
+        "Path": [
+          [
+            91347.50000017218,
+            8801.936083007953
+          ],
+          [
+            96050.0000000255,
+            8801.936079732375
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      },
+      {
+        "BeamID": "BM20",
+        "Path": [
+          [
+            91347.5000001706,
+            8297.936077233288
+          ],
+          [
+            96050.00000002392,
+            8297.936080479762
+          ]
+        ],
+        "material_spec": "",
+        "Remark": ""
+      }
+    ],
+    "strut_obstacles": [
+      {
+        "ObstacleID": "S1-column-C29",
+        "StrutID": "S1",
+        "Kind": "column",
+        "ComponentID": "C29",
+        "Station": 8549.94,
+        "IntersectionX": 3550.0000000236905,
+        "IntersectionY": 8549.93571696058,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S1-column-C11",
+        "StrutID": "S1",
+        "Kind": "column",
+        "ComponentID": "C11",
+        "Station": 12749.9,
+        "IntersectionX": 3550.0000000353903,
+        "IntersectionY": 12749.93546316016,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S1-beam-BM9",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "BM9",
+        "Station": 8297.94,
+        "IntersectionX": 3550.000000022992,
+        "IntersectionY": 8297.936080117826,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S1-beam-BM7",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "BM7",
+        "Station": 8801.94,
+        "IntersectionX": 3550.000000024389,
+        "IntersectionY": 8801.936080117826,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S1-beam-BM11",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "BM11",
+        "Station": 12497.9,
+        "IntersectionX": 3550.0000000346918,
+        "IntersectionY": 12497.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S1-beam-BM10",
+        "StrutID": "S1",
+        "Kind": "beam",
+        "ComponentID": "BM10",
+        "Station": 13001.9,
+        "IntersectionX": 3550.0000000360887,
+        "IntersectionY": 13001.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-column-C25",
+        "StrutID": "S2",
+        "Kind": "column",
+        "ComponentID": "C25",
+        "Station": 8549.94,
+        "IntersectionX": 13050.000000020198,
+        "IntersectionY": 8549.935958986054,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-column-C13",
+        "StrutID": "S2",
+        "Kind": "column",
+        "ComponentID": "C13",
+        "Station": 12749.9,
+        "IntersectionX": 13050.000000030093,
+        "IntersectionY": 12749.935462919646,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-beam-BM12",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "BM12",
+        "Station": 8261.15,
+        "IntersectionX": 13050.0000000195,
+        "IntersectionY": 8261.15499416925,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-beam-BM13",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "BM13",
+        "Station": 8765.03,
+        "IntersectionX": 13050.000000020722,
+        "IntersectionY": 8765.025450733374,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-beam-BM2",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "BM2",
+        "Station": 12534.8,
+        "IntersectionX": 13050.00000002957,
+        "IntersectionY": 12534.845851879567,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S2-beam-BM1",
+        "StrutID": "S2",
+        "Kind": "beam",
+        "ComponentID": "BM1",
+        "Station": 13038.7,
+        "IntersectionX": 13050.000000030792,
+        "IntersectionY": 13038.716308443923,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-column-C28",
+        "StrutID": "S3",
+        "Kind": "column",
+        "ComponentID": "C28",
+        "Station": 7849.94,
+        "IntersectionX": 19050.000000016473,
+        "IntersectionY": 7849.93571597978,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-column-C18",
+        "StrutID": "S3",
+        "Kind": "column",
+        "ComponentID": "C18",
+        "Station": 13449.9,
+        "IntersectionX": 19050.00000002823,
+        "IntersectionY": 13449.935222727945,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-beam-BM12",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "BM12",
+        "Station": 7598.07,
+        "IntersectionX": 19050.00000001595,
+        "IntersectionY": 7598.065623546485,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-beam-BM13",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "BM13",
+        "Station": 8101.94,
+        "IntersectionX": 19050.000000016997,
+        "IntersectionY": 8101.936080110609,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-beam-BM2",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "BM2",
+        "Station": 13197.9,
+        "IntersectionX": 19050.000000027707,
+        "IntersectionY": 13197.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S3-beam-BM1",
+        "StrutID": "S3",
+        "Kind": "beam",
+        "ComponentID": "BM1",
+        "Station": 13701.8,
+        "IntersectionX": 19050.000000028755,
+        "IntersectionY": 13701.805679058423,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-column-C24",
+        "StrutID": "S4",
+        "Kind": "column",
+        "ComponentID": "C24",
+        "Station": 7849.94,
+        "IntersectionX": 25050.000000014435,
+        "IntersectionY": 7849.935958890943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-column-C14",
+        "StrutID": "S4",
+        "Kind": "column",
+        "ComponentID": "C14",
+        "Station": 13449.9,
+        "IntersectionX": 25050.00000002474,
+        "IntersectionY": 13449.935462599387,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-beam-BM12",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "BM12",
+        "Station": 7590.1,
+        "IntersectionX": 25050.00000001397,
+        "IntersectionY": 7590.104018089711,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-beam-BM13",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "BM13",
+        "Station": 8093.97,
+        "IntersectionX": 25050.0000000149,
+        "IntersectionY": 8093.9744746538345,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-beam-BM2",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "BM2",
+        "Station": 13205.9,
+        "IntersectionX": 25050.000000024273,
+        "IntersectionY": 13205.896827943972,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S4-beam-BM1",
+        "StrutID": "S4",
+        "Kind": "beam",
+        "ComponentID": "BM1",
+        "Station": 13709.8,
+        "IntersectionX": 25050.000000025204,
+        "IntersectionY": 13709.767284508212,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-column-C15",
+        "StrutID": "S5",
+        "Kind": "column",
+        "ComponentID": "C15",
+        "Station": 7699.94,
+        "IntersectionX": 31050.000000012165,
+        "IntersectionY": 7699.9360810552025,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-column-C27",
+        "StrutID": "S5",
+        "Kind": "column",
+        "ComponentID": "C27",
+        "Station": 13599.9,
+        "IntersectionX": 31050.00000002142,
+        "IntersectionY": 13599.934982262552,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-beam-BM12",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "BM12",
+        "Station": 7448.07,
+        "IntersectionX": 31050.000000011758,
+        "IntersectionY": 7448.065623532049,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-beam-BM13",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "BM13",
+        "Station": 7951.94,
+        "IntersectionX": 31050.000000012515,
+        "IntersectionY": 7951.936080096173,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-beam-BM2",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "BM2",
+        "Station": 13347.9,
+        "IntersectionX": 31050.00000002107,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S5-beam-BM1",
+        "StrutID": "S5",
+        "Kind": "beam",
+        "ComponentID": "BM1",
+        "Station": 13851.8,
+        "IntersectionX": 31050.000000021828,
+        "IntersectionY": 13851.805679058423,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-column-C19",
+        "StrutID": "S6",
+        "Kind": "column",
+        "ComponentID": "C19",
+        "Station": 7699.94,
+        "IntersectionX": 36050.00000001048,
+        "IntersectionY": 7699.936080352054,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-column-C22",
+        "StrutID": "S6",
+        "Kind": "column",
+        "ComponentID": "C22",
+        "Station": 13599.9,
+        "IntersectionX": 36050.00000001845,
+        "IntersectionY": 13599.935102733434,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-beam-BM14",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "BM14",
+        "Station": 7447.94,
+        "IntersectionX": 36050.00000001013,
+        "IntersectionY": 7447.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-beam-BM15",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "BM15",
+        "Station": 7951.94,
+        "IntersectionX": 36050.00000001083,
+        "IntersectionY": 7951.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-beam-BM4",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "BM4",
+        "Station": 13347.9,
+        "IntersectionX": 36050.0000000181,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S6-beam-BM3",
+        "StrutID": "S6",
+        "Kind": "beam",
+        "ComponentID": "BM3",
+        "Station": 13851.9,
+        "IntersectionX": 36050.0000000188,
+        "IntersectionY": 13851.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-column-C21",
+        "StrutID": "S7",
+        "Kind": "column",
+        "ComponentID": "C21",
+        "Station": 7699.94,
+        "IntersectionX": 42050.00000000844,
+        "IntersectionY": 7699.935959421098,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-column-C17",
+        "StrutID": "S7",
+        "Kind": "column",
+        "ComponentID": "C17",
+        "Station": 13599.9,
+        "IntersectionX": 42050.00000001496,
+        "IntersectionY": 13599.935223063803,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-beam-BM14",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "BM14",
+        "Station": 7447.94,
+        "IntersectionX": 42050.00000000821,
+        "IntersectionY": 7447.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-beam-BM15",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "BM15",
+        "Station": 7951.94,
+        "IntersectionX": 42050.00000000873,
+        "IntersectionY": 7951.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-beam-BM4",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "BM4",
+        "Station": 13347.9,
+        "IntersectionX": 42050.00000001467,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S7-beam-BM3",
+        "StrutID": "S7",
+        "Kind": "beam",
+        "ComponentID": "BM3",
+        "Station": 13851.9,
+        "IntersectionX": 42050.00000001519,
+        "IntersectionY": 13851.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-column-C30",
+        "StrutID": "S8",
+        "Kind": "column",
+        "ComponentID": "C30",
+        "Station": 7699.93,
+        "IntersectionX": 48050.00000000646,
+        "IntersectionY": 7699.934868379147,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-column-C26",
+        "StrutID": "S8",
+        "Kind": "column",
+        "ComponentID": "C26",
+        "Station": 13599.9,
+        "IntersectionX": 48050.00000001135,
+        "IntersectionY": 13599.934981451603,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-beam-BM14",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "BM14",
+        "Station": 7447.94,
+        "IntersectionX": 48050.00000000623,
+        "IntersectionY": 7447.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-beam-BM15",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "BM15",
+        "Station": 7951.94,
+        "IntersectionX": 48050.000000006636,
+        "IntersectionY": 7951.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-beam-BM4",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "BM4",
+        "Station": 13347.9,
+        "IntersectionX": 48050.000000011176,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S8-beam-BM3",
+        "StrutID": "S8",
+        "Kind": "beam",
+        "ComponentID": "BM3",
+        "Station": 13851.9,
+        "IntersectionX": 48050.00000001158,
+        "IntersectionY": 13851.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-column-C2",
+        "StrutID": "S9",
+        "Kind": "column",
+        "ComponentID": "C2",
+        "Station": 7699.94,
+        "IntersectionX": 53550.0000000046,
+        "IntersectionY": 7699.937534555909,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-column-C6",
+        "StrutID": "S9",
+        "Kind": "column",
+        "ComponentID": "C6",
+        "Station": 13599.9,
+        "IntersectionX": 53550.00000000815,
+        "IntersectionY": 13599.936183779733,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-beam-BM14",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "BM14",
+        "Station": 7447.94,
+        "IntersectionX": 53550.00000000448,
+        "IntersectionY": 7447.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-beam-BM15",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "BM15",
+        "Station": 7951.94,
+        "IntersectionX": 53550.00000000477,
+        "IntersectionY": 7951.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-beam-BM4",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "BM4",
+        "Station": 13347.9,
+        "IntersectionX": 53550.000000007974,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S9-beam-BM3",
+        "StrutID": "S9",
+        "Kind": "beam",
+        "ComponentID": "BM3",
+        "Station": 13851.9,
+        "IntersectionX": 53550.000000008265,
+        "IntersectionY": 13851.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-column-C1",
+        "StrutID": "S10",
+        "Kind": "column",
+        "ComponentID": "C1",
+        "Station": 7699.94,
+        "IntersectionX": 59550.00000000256,
+        "IntersectionY": 7699.937777976273,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-column-C10",
+        "StrutID": "S10",
+        "Kind": "column",
+        "ComponentID": "C10",
+        "Station": 13599.9,
+        "IntersectionX": 59550.0000000046,
+        "IntersectionY": 13599.935704103671,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-beam-BM14",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "BM14",
+        "Station": 7447.94,
+        "IntersectionX": 59550.0000000025,
+        "IntersectionY": 7447.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-beam-BM15",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "BM15",
+        "Station": 7951.94,
+        "IntersectionX": 59550.00000000268,
+        "IntersectionY": 7951.936080116429,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-beam-BM4",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "BM4",
+        "Station": 13347.9,
+        "IntersectionX": 59550.00000000448,
+        "IntersectionY": 13347.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S10-beam-BM3",
+        "StrutID": "S10",
+        "Kind": "beam",
+        "ComponentID": "BM3",
+        "Station": 13851.9,
+        "IntersectionX": 59550.00000000466,
+        "IntersectionY": 13851.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-column-C9",
+        "StrutID": "S11",
+        "Kind": "column",
+        "ComponentID": "C9",
+        "Station": 7699.94,
+        "IntersectionX": 65550.00000000058,
+        "IntersectionY": 7699.936807054328,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-column-C23",
+        "StrutID": "S11",
+        "Kind": "column",
+        "ComponentID": "C23",
+        "Station": 13599.9,
+        "IntersectionX": 65550.00000000105,
+        "IntersectionY": 13599.933780303109,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-beam-BM16",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "BM16",
+        "Station": 7455.89,
+        "IntersectionX": 65550.00000000058,
+        "IntersectionY": 7455.894099310157,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-beam-BM17",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "BM17",
+        "Station": 7959.89,
+        "IntersectionX": 65550.00000000058,
+        "IntersectionY": 7959.894099310157,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-beam-BM6",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "BM6",
+        "Station": 13340.0,
+        "IntersectionX": 65550.00000000105,
+        "IntersectionY": 13339.97720330034,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S11-beam-BM5",
+        "StrutID": "S11",
+        "Kind": "beam",
+        "ComponentID": "BM5",
+        "Station": 13844.0,
+        "IntersectionX": 65550.00000000105,
+        "IntersectionY": 13843.97720330034,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-column-C3",
+        "StrutID": "S12",
+        "Kind": "column",
+        "ComponentID": "C3",
+        "Station": 7849.94,
+        "IntersectionX": 71549.99999999854,
+        "IntersectionY": 7849.937292939401,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-column-C7",
+        "StrutID": "S12",
+        "Kind": "column",
+        "ComponentID": "C7",
+        "Station": 13449.9,
+        "IntersectionX": 71549.9999999975,
+        "IntersectionY": 13449.936183880316,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-beam-BM16",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "BM16",
+        "Station": 7597.94,
+        "IntersectionX": 71549.9999999986,
+        "IntersectionY": 7597.9360801161965,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-beam-BM17",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "BM17",
+        "Station": 8101.94,
+        "IntersectionX": 71549.99999999849,
+        "IntersectionY": 8101.9360801161965,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-beam-BM6",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "BM6",
+        "Station": 13197.9,
+        "IntersectionX": 71549.99999999756,
+        "IntersectionY": 13197.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S12-beam-BM5",
+        "StrutID": "S12",
+        "Kind": "beam",
+        "ComponentID": "BM5",
+        "Station": 13701.9,
+        "IntersectionX": 71549.99999999744,
+        "IntersectionY": 13701.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-column-C5",
+        "StrutID": "S13",
+        "Kind": "column",
+        "ComponentID": "C5",
+        "Station": 7849.94,
+        "IntersectionX": 77549.99999999651,
+        "IntersectionY": 7849.937292658258,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-column-C8",
+        "StrutID": "S13",
+        "Kind": "column",
+        "ComponentID": "C8",
+        "Station": 13449.9,
+        "IntersectionX": 77549.99999999395,
+        "IntersectionY": 13449.936183804646,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-beam-BM16",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "BM16",
+        "Station": 7634.77,
+        "IntersectionX": 77549.99999999657,
+        "IntersectionY": 7634.76943888946,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-beam-BM17",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "BM17",
+        "Station": 8138.77,
+        "IntersectionX": 77549.99999999633,
+        "IntersectionY": 8138.76943888946,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-beam-BM6",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "BM6",
+        "Station": 13161.1,
+        "IntersectionX": 77549.99999999412,
+        "IntersectionY": 13161.101863721386,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S13-beam-BM5",
+        "StrutID": "S13",
+        "Kind": "beam",
+        "ComponentID": "BM5",
+        "Station": 13665.1,
+        "IntersectionX": 77549.99999999389,
+        "IntersectionY": 13665.101863721386,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-column-C16",
+        "StrutID": "S14",
+        "Kind": "column",
+        "ComponentID": "C16",
+        "Station": 8549.94,
+        "IntersectionX": 83549.99999999395,
+        "IntersectionY": 8549.936079704203,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-column-C12",
+        "StrutID": "S14",
+        "Kind": "column",
+        "ComponentID": "C12",
+        "Station": 12749.9,
+        "IntersectionX": 83549.99999999098,
+        "IntersectionY": 12749.933777878876,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-beam-BM16",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "BM16",
+        "Station": 8297.94,
+        "IntersectionX": 83549.99999999412,
+        "IntersectionY": 8297.936080116197,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-beam-BM17",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "BM17",
+        "Station": 8801.94,
+        "IntersectionX": 83549.99999999377,
+        "IntersectionY": 8801.936080116197,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-beam-BM6",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "BM6",
+        "Station": 12497.9,
+        "IntersectionX": 83549.99999999115,
+        "IntersectionY": 12497.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S14-beam-BM5",
+        "StrutID": "S14",
+        "Kind": "beam",
+        "ComponentID": "BM5",
+        "Station": 13001.9,
+        "IntersectionX": 83549.9999999908,
+        "IntersectionY": 13001.9352224943,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-column-C4",
+        "StrutID": "S15",
+        "Kind": "column",
+        "ComponentID": "C4",
+        "Station": 8549.94,
+        "IntersectionX": 92049.9999999908,
+        "IntersectionY": 8549.93753267324,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-column-C20",
+        "StrutID": "S15",
+        "Kind": "column",
+        "ComponentID": "C20",
+        "Station": 12749.9,
+        "IntersectionX": 92049.99999998626,
+        "IntersectionY": 12749.935222556465,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-beam-BM20",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "BM20",
+        "Station": 8297.94,
+        "IntersectionX": 92049.9999999911,
+        "IntersectionY": 8297.936077718274,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-beam-BM19",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "BM19",
+        "Station": 8801.94,
+        "IntersectionX": 92049.99999999051,
+        "IntersectionY": 8801.93608251866,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-beam-BM8",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "BM8",
+        "Station": 12497.9,
+        "IntersectionX": 92049.99999998655,
+        "IntersectionY": 12497.935220094165,
+        "Source": "dxf"
+      },
+      {
+        "ObstacleID": "S15-beam-BM18",
+        "StrutID": "S15",
+        "Kind": "beam",
+        "ComponentID": "BM18",
+        "Station": 13001.9,
+        "IntersectionX": 92049.99999998597,
+        "IntersectionY": 13001.935224894434,
+        "Source": "dxf"
       }
     ]
   },

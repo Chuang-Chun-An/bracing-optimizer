@@ -1,8 +1,8 @@
 import unittest
 from types import SimpleNamespace
 
-from main import SupportSolverDialog
-from solver_search import (
+from bracing_optimizer.application.optimize_support_zone import OptimizeSupportZone
+from bracing_optimizer.algorithms.solver_search import (
     CANDIDATE_INSUFFICIENT,
     ENGINEERING_CONSTRAINT_LIMITED,
     SCORING_PREFERENCE,
@@ -41,7 +41,7 @@ def candidate_status(
 
 class SupportDiagnosticsClassificationTests(unittest.TestCase):
     def setUp(self):
-        self.dialog = SupportSolverDialog.__new__(SupportSolverDialog)
+        self.use_case = OptimizeSupportZone(candidate_cache={})
 
     @staticmethod
     def assessment(*, stable=True, reasons=()):
@@ -55,7 +55,7 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
         )
 
     def test_search_insufficient_is_distinct(self):
-        diagnostics = self.dialog._build_support_diagnostics(
+        diagnostics = self.use_case._build_support_diagnostics(
             candidate_statuses=[candidate_status("S1", 100)],
             solution=SimpleNamespace(valid=False),
             stage_records=[{
@@ -74,7 +74,7 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
         self.assertFalse(diagnostics.infeasibility_proven)
 
     def test_candidate_insufficient_is_distinct(self):
-        diagnostics = self.dialog._build_support_diagnostics(
+        diagnostics = self.use_case._build_support_diagnostics(
             candidate_statuses=[candidate_status("S5", 2)],
             solution=SimpleNamespace(valid=True),
             stage_records=[{
@@ -90,7 +90,7 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
         self.assertEqual(diagnostics.affected_component_ids, ["S5"])
 
     def test_engineering_constraint_limited_is_distinct(self):
-        diagnostics = self.dialog._build_support_diagnostics(
+        diagnostics = self.use_case._build_support_diagnostics(
             candidate_statuses=[candidate_status(
                 "S8",
                 0,
@@ -108,7 +108,7 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
         self.assertEqual(diagnostics.issue_counts["接頭落入禁止區"], 12)
 
     def test_concentrated_phase1_options_are_candidate_insufficient(self):
-        diagnostics = self.dialog._build_support_diagnostics(
+        diagnostics = self.use_case._build_support_diagnostics(
             candidate_statuses=[candidate_status(
                 "S12",
                 100,
@@ -137,7 +137,7 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
             )
             for index in range(1, 5)
         ]
-        diagnostics = self.dialog._build_support_diagnostics(
+        diagnostics = self.use_case._build_support_diagnostics(
             candidate_statuses=[
                 candidate_status(f"S{index}", 100)
                 for index in range(1, 5)

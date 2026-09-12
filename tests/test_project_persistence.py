@@ -6,12 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import ezdxf
-import support
+from bracing_optimizer.algorithms import support
 
 from main import SupportInputApp
-from solver_search import SolverDiagnostics
-from project_data import ProjectDataModel
-from project_persistence import (
+from bracing_optimizer.algorithms.solver_search import SolverDiagnostics
+from bracing_optimizer.application.project_data import ProjectDataModel
+from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
     DxfCompatibilityChecker,
     DxfStatus,
@@ -66,7 +66,7 @@ def import_state(source: Path, *, handle="10", layer="STRUCTURE", offset=0.0):
 
 def payload(state=None, *, result=None):
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "project_information": {"project_name": "測試專案"},
         "input_data": {
             "walers": [{
@@ -123,7 +123,7 @@ class ProjectPersistenceTests(unittest.TestCase):
         self.assertTrue(managed.is_file())
         self.assertTrue(result.copied_dxf)
         saved = json.loads(self.project_path.read_text(encoding="utf-8"))
-        self.assertEqual(saved["schema_version"], 2)
+        self.assertEqual(saved["schema_version"], 3)
         self.assertEqual(
             saved["dxf_asset"]["relative_path"],
             MANAGED_DXF_RELATIVE_PATH,
@@ -566,7 +566,7 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
         self.assertEqual(app.dxf_asset_status_report.status, DxfStatus.READY)
         self.assertFalse(app.project_dirty)
 
-    def test_legacy_null_state_loads_solver_result_and_disables_dxf_export(self):
+    def test_current_null_state_loads_solver_result_and_disables_dxf_export(self):
         app = self.app()
         legacy_result = {
             "last_calculated_time": "2026-01-01T00:00:00",
@@ -582,20 +582,18 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
                 }]
             },
         }
-        legacy_path = self.root / "legacy.json"
-        legacy_payload = payload(None, result=legacy_result)
-        legacy_payload.pop("dxf_asset")
-        legacy_path.write_text(
-            json.dumps(legacy_payload, ensure_ascii=False),
+        project_path = self.root / "manual.json"
+        project_path.write_text(
+            json.dumps(payload(None, result=legacy_result), ensure_ascii=False),
             encoding="utf-8",
         )
 
-        app.load_project_case("legacy", silent=True)
+        app.load_project_case("manual", silent=True)
 
         self.assertIn("W1-plan-1", app.result_items)
         self.assertEqual(
             app.dxf_asset_status_report.status,
-            DxfStatus.LEGACY_NO_STATE,
+            DxfStatus.NO_DXF,
         )
         self.assertFalse(app.dxf_asset_status_report.can_export)
         self.assertFalse(app.project_dirty)
@@ -604,7 +602,6 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
         app = self.app()
         dxf_path = create_dxf(self.root / "legacy-source.dxf")
         legacy_payload = payload(import_state(dxf_path))
-        legacy_payload.pop("dxf_asset")
         (self.root / "legacy-linked.json").write_text(
             json.dumps(legacy_payload, ensure_ascii=False),
             encoding="utf-8",
@@ -646,7 +643,7 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
         self.assertEqual(app.dxf_asset_status_report.status, DxfStatus.NO_DXF)
         self.assertIn("W1-plan-1", app.result_items)
 
-    def test_resaving_legacy_json_upgrades_without_changing_solver_result(self):
+    def test_project_missing_required_dxf_state_is_rejected_by_structure(self):
         app = self.app()
         legacy_result = {
             "last_calculated_time": "2026-01-01T00:00:00",
@@ -669,15 +666,10 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
             json.dumps(legacy_payload, ensure_ascii=False),
             encoding="utf-8",
         )
-        app.load_project_case("legacy", silent=True)
-        before = copy.deepcopy(app._build_project_result_payload())
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            app.load_project_case("legacy", silent=True)
 
-        saved_path = app.save_project_case("legacy")
-        saved_payload = json.loads(saved_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(saved_payload["schema_version"], 2)
-        self.assertEqual(saved_payload["result"], before)
-        self.assertTrue((self.root / "legacy.json").is_file())
+        self.assertIn("dxf_asset", raised.exception.detail)
 
     def test_exact_relink_keeps_solver_results_and_manual_corrections(self):
         app = self.app()

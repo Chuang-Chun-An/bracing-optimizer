@@ -4,7 +4,7 @@
 
 本文件以目前工作目錄中的實際程式碼為準，供未來維護者重新理解專案。它不只是操作說明，也記錄資料模型、模組責任、主要函式、Solver 流程、評分公式、JSON contract、GUI 呼叫關係及已知待重構區域。
 
-更新日期：2026-08-12
+更新日期：2026-09-11
 
 ---
 
@@ -35,6 +35,7 @@
 - 將托梁位置轉成 waler forbidden zone。
 - 產生鋼材、調整塊、千斤頂與餘長組合。
 - 先求每根支撐的合法候選方案。
+- 雙路支撐仍保留為兩支實體支撐，但同群組必須採用相同的 ordered pieces。
 - 再考量相鄰支撐的千斤頂間距與區域一致性，求多支支撐全域方案。
 
 ## 1.3 CAD 半自動匯入
@@ -43,8 +44,11 @@ progeCAD 端使用 `cad_builder.lsp`：
 
 - 點選圍令、支撐或斜撐起終點。
 - 支撐可加選托梁與中間柱位置。
+- `UPDSTRUT` 可依 `StrutID` 原位修正既有支撐幾何。
+- LSP 在寫入事件前將 UCS 點位轉成 WCS。
+- DXF 匯入會找出中心線距離約 1000 mm 的平行雙路支撐候選，供使用者採用或取消。
 - 產生單一 TEMP JSON 事件。
-- `main.py` 每 500 ms 監看事件並直接加入正式資料模型。
+- `main.py` 每 500 ms 監看事件，依 `operation=add/update` 加入或更新正式資料模型。
 
 CAD Builder 沒有獨立正式 GUI。`main.py` 是唯一工程資料 GUI。
 
@@ -70,6 +74,7 @@ CAD Builder 沒有獨立正式 GUI。`main.py` 是唯一工程資料 GUI。
 - 個別切換方案是否顯示。
 - 在預覽圖疊加圍令分段與支撐材料配置。
 - 依目前可見方案統計材料用量與庫存差額。
+- 將目前可見方案的逐根材料明細與庫存彙總匯出為 Excel。
 - 匯出高解析度 PNG/JPEG 完整配置圖。
 - 依專案已保存的工程幾何，建立目前可見圍令與支撐配置的乾淨 DXF 成果檔。
 
@@ -84,6 +89,7 @@ progeCAD
 └─ cad_builder.lsp
    ├─ ADDWALER
    ├─ ADDSTRUT
+   ├─ UPDSTRUT
    ├─ ADDBRACE
    └─ SUPSTATUS
           │
@@ -92,7 +98,7 @@ Windows TEMP JSON
 support_distribution_uv_cad_builder_temp.json
           │
           ▼
-cad_builder.py
+bracing_optimizer/infrastructure/cad_builder.py
 ├─ CadEventReader
 ├─ CadEventMapper
 └─ TempEventWatcher
@@ -104,34 +110,77 @@ main.py / SupportInputApp
 │  ├─ struts
 │  ├─ braces
 │  └─ inventory
+├─ ProjectDomainModel
+│  └─ Waler / Strut / Brace（Column／Beam 位置由各 Strut 持有）
 ├─ 資料表與驗證
 ├─ 案例 JSON
 ├─ Matplotlib Preview
-├─ Results / 自訂方案 / 材料統計
-├─ WalerSolverDialog ───────► wales.py
-└─ SupportSolverDialog ─────► support.py
+├─ Results / 方案直接編輯 / 材料統計
+└─ bracing_optimizer/application/solver_input_builder.py
+   ├─ WalerProblemInput ─► WalerSolverDialog ─► OptimizeWaler ─► algorithms/wales.py ────┐
+   └─ SupportZoneInput ─► SupportSolverDialog ─► OptimizeSupportZone ─► algorithms/support.py ──┴─► domain/material_rules.py
 ```
 
 模組責任邊界：
 
 ```text
 main.py
-    GUI、資料編輯、驗證、流程協調、結果模型、預覽與輸出
+    GUI 主視窗、資料編輯、流程協調、預覽與輸出；驗證、結果模型與
+    手動方案重算已轉交 application/，共用 UI 已轉交 presentation/
 
-project_data.py
-    唯一共用輸入 schema、資料列正規化、ID 產生、案例資料模型
+bracing_optimizer/domain/
+    不依賴 GUI、Application 或外部資源的工程 entity 與材料規則
 
-cad_builder.py
-    無 GUI；讀取、驗證、映射 CAD 事件，成功後確認與刪檔
+bracing_optimizer/algorithms/
+    圍令／支撐最佳化演算法與共用搜尋政策
 
-wales.py
+bracing_optimizer/application/
+    Use Case、Solver Input Builder、工程驗證、結果模型與手動方案編輯服務
+
+bracing_optimizer/presentation/
+    Tkinter presentation 子系統；包含共用 Widget、選擇 Dialog、
+    Solver Dialog、主執行緒橋接與純文字結果格式化
+
+bracing_optimizer/application/project_data.py
+    應用程式資料列模型、正式欄位 schema、ID 產生與 Domain 投影
+
+bracing_optimizer/domain/project_domain.py + application/project_mapper.py
+    純工程 entity／aggregate；將 Strut 內的 Column／Beam 位置轉成 typed tuples
+
+bracing_optimizer/application/solver_input_builder.py
+    唯讀地將 ProjectDataModel 幾何與庫存轉成 WalerProblemInput / SupportZoneInput
+
+bracing_optimizer/infrastructure/
+    庫存來源、專案持久化、CAD 事件、Excel 與 DXF 成果輸出的外部資源實作；
+    InventoryRepository 與其 JSON／記憶體實作仍維持同一個小型 cohesive module
+
+bracing_optimizer/algorithms/wales.py
     單根圍令接頭位置型 GA、材料配置與評分
 
-support.py
+bracing_optimizer/algorithms/support.py
     單支支撐候選生成及多支支撐全域最佳化
+
+bracing_optimizer/application/optimize_support_zone.py
+    單一支撐分區的候選快取、分階段搜尋、最佳解選擇與診斷 Use Case
+
+bracing_optimizer/application/optimize_waler.py
+    單根圍令的 Config 建立、分階段搜尋、結果合併與診斷 Use Case
+
+bracing_optimizer/domain/material_rules.py
+    圍令與支撐共用的材料長度分類、比例目標與比例懲罰規則
+
+dxf_import/
+    DXF 匯入子系統；模型、幾何、辨識、候選點、驗證、控制器、預覽、讀檔與 Tkinter Dialog 分開維護
+
+dxf_import/__init__.py
+    DXF 匯入子系統的正式公開 API；實作由各自的 models、geometry、importer、dialog 等模組持有
 
 cad_builder.lsp
     CAD 端點位輸入與 JSON 寫入
+
+bracing_optimizer/application/project_service.py + infrastructure/project_persistence.py
+    專案存取流程、schema 3 嚴格驗證與 DXF managed-copy lifecycle
+
 ```
 
 ---
@@ -140,15 +189,53 @@ cad_builder.lsp
 
 ```text
 support_distribution_uv\
+├─ bracing_optimizer\
+│  ├─ domain\
+│  │  ├─ material_rules.py
+│  │  └─ project_domain.py
+│  ├─ algorithms\
+│  │  ├─ solver_search.py
+│  │  ├─ support.py
+│  │  └─ wales.py
+│  ├─ application\
+│  │  ├─ optimize_support_zone.py
+│  │  ├─ optimize_waler.py
+│  │  ├─ solver_input_builder.py
+│  │  ├─ plan_editing.py
+│  │  ├─ project_data.py
+│  │  ├─ project_mapper.py
+│  │  ├─ project_results.py
+│  │  ├─ project_service.py
+│  │  └─ project_validation.py
+│  ├─ infrastructure\
+│  │  ├─ cad_builder.py
+│  │  ├─ dxf_result_export.py
+│  │  ├─ excel_result_export.py
+│  │  ├─ inventory_repository.py
+│  │  └─ project_persistence.py
+│  └─ presentation\
+│     ├─ cad_view_interaction.py
+│     ├─ result_formatters.py
+│     ├─ widgets\
+│     └─ dialogs\
 ├─ main.py
-├─ project_data.py
-├─ inventory_repository.py
-├─ inventory_conversion.py
-├─ cad_builder.py
+├─ bootstrap.py
+├─ app_dependencies.py
 ├─ cad_builder.lsp
 ├─ cad_bridge_event_examples.json
-├─ wales.py
-├─ support.py
+├─ tools\
+│  ├─ inventory_conversion.py
+│  └─ upgrade_project_schema.py
+├─ dxf_import\
+│  ├─ models.py
+│  ├─ geometry.py
+│  ├─ recognition.py
+│  ├─ importer.py
+│  ├─ candidate_points.py
+│  ├─ validation.py
+│  ├─ controllers.py
+│  ├─ preview.py
+│  └─ dialog.py
 ├─ data\
 │  ├─ inventory.json
 │  └─ default_inventory.json
@@ -164,35 +251,44 @@ support_distribution_uv\
 │  └─ wales\
 │     └─ README.md
 ├─ SupportSolver.spec
-├─ main.spec
-├─ support.spec
-├─ SupportOptimizer.spec
 ├─ pyproject.toml
 └─ uv.lock
 ```
 
 | 檔案 | 類型 | GUI | Solver | 主要責任 |
 |---|---|---:|---:|---|
-| `main.py` | 主應用程式 | 是 | 協調 | Tkinter GUI、資料表、驗證、預覽、案例、結果、Solver Dialog |
-| `project_data.py` | 資料模型 | 否 | 否 | TABLE schema、legacy migration、ID、ProjectDataModel |
-| `inventory_repository.py` | 資料來源介面 | 否 | 否 | InventoryRepository 及 JSON 實作；隔離未來 SQL/API 資料源 |
-| `inventory_conversion.py` | 資料整理工具 | 否 | 否 | 將機料清冊 JSON 轉為執行期 `inventory.json`，不是 Solver 依賴 |
-| `cad_builder.py` | CAD 工具模組 | 否 | 否 | CAD event JSON 讀取、映射、監看、acknowledge |
+| `main.py` | 主應用程式 | 是 | 協調 | Tkinter 主視窗、資料表、預覽與流程協調；委派 Application service 與 Presentation 類別 |
+| `bracing_optimizer/presentation/` | UI 子系統 | 是 | 協調 | Preview toolbar、選擇 Dialog、Solver Dialog、執行緒橋接與結果文字格式化 |
+| `bracing_optimizer/application/project_data.py` | Application Model | 否 | 否 | TABLE schema、ID、可變資料列與 Domain 投影 |
+| `bracing_optimizer/domain/project_domain.py` | Domain Model | 否 | 間接 | Waler、Strut、Brace；各 Strut 自己持有 Column／Beam 位置與 aggregate invariant |
+| `bracing_optimizer/application/project_mapper.py` | Domain Mapper | 否 | 間接 | schema 3 row 與純 Domain entity 的唯一映射邊界 |
+| `bracing_optimizer/application/project_service.py` | Application Service | 否 | 否 | 儲存、載入、DXF relink 流程協調；沿用既有可注入 persistence components |
+| `bracing_optimizer/infrastructure/project_persistence.py` | Persistence | 否 | 否 | schema 3 驗證、DXF managed copy 與交易式 JSON 寫入 |
+| `bracing_optimizer/infrastructure/inventory_repository.py` | 資料來源模組 | 否 | 否 | InventoryRepository 及 JSON／記憶體實作維持同檔，不為分層而拆分 |
+| `tools/inventory_conversion.py` | 資料整理工具 | 否 | 否 | 將機料清冊 JSON 轉為執行期 `inventory.json`，不是 Solver 依賴 |
+| `bracing_optimizer/infrastructure/cad_builder.py` | CAD Adapter | 否 | 否 | CAD event JSON 讀取、映射、監看、acknowledge |
+| `bracing_optimizer/infrastructure/dxf_result_export.py` | DXF Adapter | 否 | 否 | 建立、驗證並交易式交付正式成果 DXF |
+| `bracing_optimizer/infrastructure/excel_result_export.py` | Excel Adapter | 否 | 否 | 建立、驗證並交易式交付材料明細與庫存彙總活頁簿 |
 | `cad_builder.lsp` | progeCAD 外掛 | CAD 命令列 | 否 | 點選座標、產生 JSON、寫入 TEMP |
-| `wales.py` | 圍令 Solver | 含舊版獨立 GUI | 是 | 接頭型 GA、分段、材料配置、評分 |
-| `support.py` | 支撐 Solver | 否 | 是 | 單支候選與多支全域最佳化 |
+| `bracing_optimizer/algorithms/wales.py` | 圍令 Solver | 否 | 是 | 接頭型 GA、分段、材料配置、評分；不依賴 GUI framework |
+| `bracing_optimizer/algorithms/support.py` | 支撐 Solver | 否 | 是 | 單支候選與多支全域最佳化 |
+| `bracing_optimizer/application/optimize_support_zone.py` | Application Use Case | 否 | 協調 | 支撐分區 Phase 1/2、候選快取、搜尋升級、最佳解與診斷 |
+| `bracing_optimizer/application/optimize_waler.py` | Application Use Case | 否 | 協調 | 圍令 Config、分階段搜尋、結果合併與診斷 |
+| `bracing_optimizer/application/solver_input_builder.py` | Application Input Builder | 否 | 輸入 | ProjectDataModel→工程 Input；庫存查詢、幾何轉換且不修改 Model |
+| `bracing_optimizer/application/plan_editing.py` | Application Service | 否 | 協調 | 手動支撐／圍令方案的重算與工程規則檢查 |
+| `bracing_optimizer/application/project_results.py` | Application Model | 否 | 間接 | Solver 結果狀態、序列化、逐根材料明細與材料用量彙整 |
+| `bracing_optimizer/application/project_validation.py` | Application Service | 否 | 否 | 以 data-only report 驗證工程資料，不操作 Tkinter |
+| `bracing_optimizer/domain/material_rules.py` | 共用領域規則 | 否 | 共用 | 材料長度分類、比例正規化、比例統計與懲罰；不依賴任何 Solver |
+| `dxf_import/` | DXF 匯入子系統 | 僅 `dialog.py` | 否 | 分離模型、幾何辨識、雙路配對、候選點、驗證、控制器、預覽與 `ezdxf` importer |
 | `inventory.json` | 資料 | 否 | 間接輸入 | 系統預設 Inventory，由設定頁籤載入後才交給 Solver |
 | `default_inventory.json` | 歷史資料 | 否 | 否 | 舊版預設庫存，不再是執行期資料源 |
 | `test_cases/*.json` | 資料 | 否 | 輸入 | 可載入與儲存的工程案例 |
-| `cad_bridge_event_examples.json` | 文件／測試資料 | 否 | 否 | 三種 CAD 事件範例 |
+| `cad_bridge_event_examples.json` | 文件／測試資料 | 否 | 否 | CAD add 與 Strut update 事件範例 |
 | `picture/*.txt` | 資源 | 否 | 否 | 彩蛋 ASCII art |
 | `test_cad_builder_integration.py` | 測試 | 否 | 否 | CAD→Mapper→main→case 端到端測試 |
-| `SupportSolver.spec` | 封裝 | 否 | 否 | 目前正式 PyInstaller onedir 設定 |
-| `main.spec` | 舊封裝設定 | 否 | 否 | 舊 onefile `main.exe` |
-| `support.spec` | 舊封裝設定 | 否 | 否 | 單獨封裝 `support.py` |
-| `SupportOptimizer.spec` | 舊封裝設定 | 否 | 否 | 舊 console 封裝 |
+| `SupportSolver.spec` | 封裝 | 否 | 否 | 唯一正式 PyInstaller onedir 設定 |
 
-正式發佈應使用 `SupportSolver.spec`。其他 spec 目前屬於歷史檔案，尚未統一清理。
+正式發佈只使用 `SupportSolver.spec`。
 
 ---
 
@@ -209,17 +305,23 @@ support_distribution_uv\
                   │
                   ▼
            validate_data()
+                  │
+                  ▼
+bracing_optimizer/application/solver_input_builder.py
       ┌───────────┴───────────┐
-      │                       │
       ▼                       ▼
-build_waler_inputs()   build_support_inputs()
+WalerProblemInput       SupportZoneInput
       │                       │
       ▼                       ▼
 WalerSolverDialog      SupportSolverDialog
       │                       │
       ▼                       ▼
-   wales.py               support.py
+OptimizeWaler          OptimizeSupportZone
       │                       │
+      ▼                       ▼
+algorithms/wales.py     algorithms/support.py
+      │                       │
+      ├────► domain/material_rules.py ◄┤
       └───────────┬───────────┘
                   ▼
              result_items
@@ -235,10 +337,10 @@ WalerSolverDialog      SupportSolverDialog
 ## 4.2 CAD 匯入資料流
 
 ```text
-ADDWALER / ADDSTRUT / ADDBRACE
+ADDWALER / ADDSTRUT / UPDSTRUT / ADDBRACE
               │
               ▼
-cad_builder.lsp 取得目前 UCS 點位
+cad_builder.lsp 以 UCS 點選，再用 trans point 1 0 轉成 WCS
               │
               ▼
 %TEMP%\support_distribution_uv_cad_builder_temp.json
@@ -250,15 +352,16 @@ TempEventWatcher.check_new_event()
 CadEventReader.load()
               │
               ▼
-CadEventMapper.map_event()
+CadEventMapper.map_command()
               │
-              ▼
-project_data.build_input_row()
+              ├─ add → project_data.build_input_row()
+              └─ update → 複製既有 Strut 並原索引 replace
               │
               ▼
 SupportInputApp._apply_cad_event()
               │
-              ├─ append 到 ProjectDataModel
+              ├─ append 或原位更新 ProjectDataModel
+              ├─ 條件式同步 DXF confirmed binding
               ├─ acknowledge 並刪除同 event_id JSON
               ├─ 清除舊 Solver 結果與快取
               └─ 更新表格與預覽
@@ -294,6 +397,7 @@ Brace rows
 ```text
 Strut row
 ├─ StrutID / 舊 SupportID
+├─ SharedLayoutGroup → 雙路支撐共用配置關係
 ├─ 起終點 → total_length
 ├─ ColumnPositions → pile_centers
 ├─ BeamPositions → waler_centers
@@ -302,7 +406,9 @@ Strut row
 
           ▼
 
-support.SupportConfig
+SupportZoneInput
+├─ 單支 SupportOptimizationUnit
+└─ 雙路 SupportOptimizationUnit（兩個 SupportConfig）
 ```
 
 ---
@@ -313,7 +419,8 @@ support.SupportConfig
 
 ### `project_data.ProjectDataModel`
 
-唯一正式可變輸入資料模型。
+GUI 的唯一正式可變資料列 adapter；Solver 與工程規則透過 `to_domain()`
+取得不可變的 `ProjectDomainModel`，不直接解讀字典 key。
 
 主要欄位：
 
@@ -324,6 +431,11 @@ braces
 inventory
 ```
 
+`ColumnPositions`／`BeamPositions` 直接屬於各 Strut。Domain Mapper 將儲存用的
+逗號字串轉成 `Strut.column_positions`／`Strut.beam_positions` typed tuples；DXF 的
+完整 Column／Beam 幾何只保留在匯入狀態，不提升為正式專案 entity。
+兩筆 Strut 使用相同的 `SharedLayoutGroup` 時，Domain 以 `SupportGroup` 表達雙路
+關係；兩支仍是各自獨立的實體與材料用量，不會合併成一筆虛擬支撐。
 資料由 `SupportInputApp` properties 代理，因此 `main.py` 不再另外維護第二份 BuilderModel。
 
 ### `wales.Config`
@@ -362,6 +474,7 @@ inventory
 | `pile_centers` | 中間柱位置 |
 | `waler_centers` | 托梁位置 |
 | `target_jack_region` | 目標千斤頂區域 |
+| `shared_layout_group` | 雙路支撐共用配置群組；空字串表示一般單支撐 |
 
 ### `support.SupportPlan`
 
@@ -375,6 +488,7 @@ inventory
 | `jack_center` | 千斤頂中心位置 |
 | `jack_region_id` | 千斤頂所在區域 |
 | `score` | 單支支撐分數 |
+| `shared_layout_group` | 所屬雙路共用配置群組 |
 | `valid` | 是否通過硬限制 |
 | `reason` | 不合法原因 |
 | `breakdown` | 各評分項目 |
@@ -399,6 +513,9 @@ inventory
 - 最上層必須是 dict。
 - 必須有 `event_id`。
 - `type` 必須可映射為正式資料表。
+- `operation` 必須是 `add` 或 `update`。
+- `coordinate_space` 必須是 `WCS`。
+- `update` 第一版只接受 Strut，且必須有 `target_id`。
 - `data` 必須是 dict。
 
 ### `cad_builder.CadEventMapper`
@@ -411,7 +528,8 @@ inventory
 event + rows_by_table
 ```
 
-並呼叫 `project_data.build_input_row()` 產生完整資料列及下一個 ID。
+`add` 會呼叫 `project_data.build_input_row()` 產生完整資料列及下一個 ID；
+`update` 則複製既有 Strut，只覆寫允許的幾何欄位。
 
 ### `cad_builder.TempEventWatcher`
 
@@ -478,12 +596,14 @@ Matplotlib 自訂工具列，只保留：
 
 責任：
 
-- 設定鋼材組合探索數。
-- 設定每支支撐合法候選保留數。
-- 產生／重用 Phase 1 候選快取。
-- 候選不足時停止 Phase 2。
-- 執行 `support.build_global_solution()`。
+- 取得並驗證使用者輸入的材料比例。
+- 在背景 thread 呼叫 `OptimizeSupportZone.execute()`。
+- 顯示 Use Case 回報的進度、診斷與結果。
 - 將結果 callback 回 `SupportInputApp`。
+
+### `optimize_support_zone.OptimizeSupportZone`
+
+不依賴 Tkinter 的支撐分區最佳化 Use Case。接收 `SupportZoneInput` 與 `MaterialRatioTargets`，負責 Phase 1 候選、cache、Phase 2 分階段搜尋、搜尋升級、最佳解選擇與 diagnostics，回傳 `OptimizeSupportZoneResult`。
 
 ### `main.WalerSolverDialog`
 
@@ -492,11 +612,14 @@ Matplotlib 自訂工具列，只保留：
 責任：
 
 - 顯示固定工程資訊與評分權重。
-- 輸入 generations、population size、短中長比例。
-- 建立 `wales.Config`。
+- 取得並驗證使用者輸入的短中長比例。
 - 重用同一執行期間的 Solver memory。
-- 背景執行 `wales.evolve()`。
+- 在背景 thread 呼叫 `OptimizeWaler.execute()`。
 - 顯示 Top 5，並 callback 回主結果模型。
+
+### `optimize_waler.OptimizeWaler`
+
+不依賴 Tkinter 的單根圍令最佳化 Use Case。接收 `WalerProblemInput` 與 `MaterialRatioTargets`，負責建立 `wales.Config`、分階段搜尋、搜尋升級、合併結果與 diagnostics。
 
 ---
 
@@ -504,26 +627,63 @@ Matplotlib 自訂工具列，只保留：
 
 以下索引涵蓋所有 Solver、資料模型與 CAD 函式，以及 `main.py` 的重要 GUI 方法。純粹的 Tk button callback、字串格式化與 Treeview IID helper 依責任分組列出。
 
-## 6.1 `project_data.py`
+### `bracing_optimizer/application/optimize_support_zone.py`
 
-| 函數 | 輸入 | 輸出 | 用途 |
+| 類別／方法 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
-| `_legacy_position_list()` | 舊位置序列 | 逗號字串 | 將 Beam1/2、Column1/2 合併 |
-| `normalize_legacy_fields()` | table、row | normalized dict | 舊支撐欄位遷移；移除 brace `Type` |
-| `next_identifier()` | rows、ID field、prefix | `Wn/Sn/Bn` | 取相同 prefix 最大數字加一 |
-| `build_input_row()` | table、values、existing rows | 完整 row | 套 defaults、產生 ID、限制正式 columns |
-| `normalize_project_row()` | table、source | normalized row | 載入案例時補 defaults 並保留相容欄位 |
-| `ProjectDataModel.rows()` | table | mutable list | 取得指定資料表 |
-| `replace_table()` | table、rows | `None` | 正規化後替換整張表 |
-| `geometry_rows()` | 無 | 三表 dict | 提供 CAD mapper 目前資料 |
-| `to_case_data()` | 無 | 三表 deep copy | 產生案例 JSON 的 `data` |
+| `OptimizeSupportZoneRequest` | `SupportZoneInput`、比例 | immutable request | Use Case 輸入邊界 |
+| `OptimizationProgress` | stage、message、support ID | progress event | GUI 無關的進度回報 |
+| `OptimizeSupportZone.execute()` | request、callbacks | result | 完整支撐分區最佳化流程 |
+| `OptimizeSupportZoneResult` | solution、diagnostics | immutable result | Use Case 輸出邊界 |
 
-## 6.2 `project_persistence.py`
+### `bracing_optimizer/application/optimize_waler.py`
+
+| 類別／方法 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `OptimizeWalerRequest` | `WalerProblemInput`、比例 | immutable request | Use Case 輸入邊界 |
+| `WalerOptimizationProgress` | stage、message | progress event | GUI 無關的進度回報 |
+| `OptimizeWaler.execute()` | request、callbacks | result | 完整單根圍令最佳化流程 |
+| `OptimizeWalerResult` | solutions、diagnostics、config | immutable result | Use Case 輸出邊界 |
+
+### `bracing_optimizer/application/solver_input_builder.py`
 
 | 類別／函數 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
-| `ProjectSerializer.migrate()` | 任意舊專案 payload | schema 2 dict | 補欄位但不改 Solver 資料 |
-| `ProjectSerializer.validate()` | payload | `None` | JSON 可序列化與 `dxf_asset` 契約驗證 |
+| `SupportZoneInput` | zoning、configs | immutable input | 整理好的支撐分區工程題目 |
+| `SupportOptimizationUnit` | 一或兩個 `SupportConfig` | immutable input | 一般單支或共用配置的雙路求解單位 |
+| `WalerProblemInput` | 圍令工程資料、庫存 | immutable input | Dialog 與 Use Case 共用的圍令題目 |
+| `InventoryLookup` | Project inventory rows | 長度、stock、qty | 查詢已載入的庫存，不接觸資料來源 |
+| `SupportInputBuilder.build_zone()` | ProjectDataModel、zoning | `SupportZoneInput` | 唯讀建立支撐 Solver 輸入 |
+| `WalerInputBuilder.build_all()` | ProjectDataModel | Waler input map | 唯讀建立所有圍令輸入，保留既有 eager 行為 |
+| `project_point_onto_segment()` | 線段與點 | station/None | 建立圍令 forbidden point |
+
+### `bracing_optimizer/domain/material_rules.py`
+
+| 類別／函數 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `MaterialLengthRules` | 短／中／長邊界 | immutable rules | Solver 無關的分類規則 |
+| `MaterialRatioTargets.normalized()` | 三類比例 | normalized targets | 驗證並正規化比例 |
+| `classify_length()` | length、rules | short/mid/long/out | 唯一正式材料分類實作 |
+| `analyze_material_ratios()` | lengths、targets、weight | analysis | 共用統計、偏差與 penalty 計算 |
+
+## 6.1 `bracing_optimizer/application/project_data.py`
+
+| 函數 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `next_identifier()` | rows、ID field、prefix | `Wn/Sn/Bn` | 取相同 prefix 最大數字加一 |
+| `build_input_row()` | table、values、existing rows | 完整 row | 套 defaults、產生 ID、限制正式 columns |
+| `normalize_project_row()` | table、source | normalized row | 依 schema 3 補 defaults 並限制正式欄位 |
+| `ProjectDataModel.rows()` | table | mutable list | 取得指定資料表 |
+| `replace_table()` | table、rows | `None` | 正規化後替換整張表 |
+| `to_domain()` | 無 | `ProjectDomainModel` | 建立供 Solver／工程規則使用的不可變 aggregate |
+| `geometry_rows()` | 無 | 三種構件 dict | 提供 CAD／DXF mapper 目前資料 |
+| `to_case_data()` | 無 | schema 3 deep copy | 產生專案 JSON 的 `input_data` |
+
+## 6.2 `bracing_optimizer/infrastructure/project_persistence.py`
+
+| 類別／函數 | 輸入 | 輸出 | 用途 |
+|---|---|---|---|
+| `ProjectSerializer.validate()` | payload | `None` | schema 3、Strut 位置與 `dxf_asset` 契約的嚴格驗證 |
 | `DxfAssetManager.file_info()` | DXF path | hash、size、mtime | SHA-256 與 DXF 可讀性驗證 |
 | `DxfAssetManager.inspect()` | project path、asset、state | `DxfAssetStatusReport` | 唯一的 DXF 狀態判斷與同 hash 修復入口 |
 | `DxfAssetManager.save_project()` | payload、已驗證 DXF | `ProjectSaveResult` | 管理副本與 JSON 的交易式儲存／回復 |
@@ -532,7 +692,7 @@ Matplotlib 自訂工具列，只保留：
 
 `DxfStatus` 包含 `READY`、`SOURCE_MODIFIED`、`MISSING`、`RELINK_REQUIRED`、`BINDING_REQUIRED`、`LEGACY_NO_STATE` 與 `INCOMPATIBLE`，並另有 runtime／待儲存／管理副本異常等細分狀態。這些狀態仍用於專案保存、來源追蹤與重新連結；正式成果匯出只依賴專案內已確認的 `dxf_import_state`，不讀取或重新儲存來源檔。
 
-### 6.2.1 `dxf_result_export.py`
+### 6.2.1 `bracing_optimizer/infrastructure/dxf_result_export.py`
 
 | 函數 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
@@ -541,7 +701,7 @@ Matplotlib 自訂工具列，只保留：
 
 正式輸出只在新文件上執行一次 `saveas()` 到同資料夾唯一暫存檔，重新讀取後要求 Audit 為 0 errors／0 fixes，並驗證背景及成果世界座標、圖層、Dimension、Jack Block、重複 Layer、XRecord 與懸空 Handle。全部通過後才以 `os.replace()` 取代正式檔。
 
-## 6.3 `cad_builder.py`
+## 6.3 `bracing_optimizer/infrastructure/cad_builder.py`
 
 | 函數／方法 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
@@ -554,7 +714,7 @@ Matplotlib 自訂工具列，只保留：
 | `check_new_event()` | 無 | event 或 `None` | 檔案存在且非 last event 才回傳 |
 | `acknowledge()` | 已成功 event | `None` | 同 event_id 才刪檔並記錄 last ID |
 
-## 6.4 `support.py`
+## 6.4 `bracing_optimizer/algorithms/support.py`
 
 ### 資料與顯示工具
 
@@ -608,7 +768,7 @@ Matplotlib 自訂工具列，只保留：
 | `build_global_solution()` | 每支候選、beam width | `GlobalSolution` | Phase 2 beam search |
 | `fallback_global_solution()` | 每支候選 | invalid `GlobalSolution` | 全域無路徑時取各支最低分並加 5M |
 
-## 6.5 `wales.py`
+## 6.5 `bracing_optimizer/algorithms/wales.py`
 
 完整逐函式教學另見 `docs/wales/README.md`。
 
@@ -620,9 +780,7 @@ Matplotlib 自訂工具列，只保留：
 | `set_logger()` | callback | `None` | 設定 GUI logger |
 | `generate_candidate_joint_points()` | total、min、step | points | 產生染色體候選點 |
 | `Config.__post_init__()` | self | `None` | 補候選點與購買長度預設 |
-| `get_initial_config_from_gui()` | defaults | config dict/None | 舊版獨立設定 GUI |
-| `get_stock_items_from_gui()` | lengths、qty defaults | stock/None | 舊版獨立庫存 GUI |
-| `classify_length()` | segment、config | short/mid/long/out | 段長分類 |
+| `classify_length()` | segment、config | short/mid/long/out | 保留舊 API，轉呼叫 `material_rules.classify_length()` |
 | `is_joint_allowed()` | point、config | bool | forbidden/support 安全距離 |
 | `expand_stock_items()` | qty stock | 單支庫存 | 展開庫存 |
 
@@ -703,15 +861,15 @@ Matplotlib 自訂工具列，只保留：
 | 彩蛋 | `_on_ascii_art_*()`、`_show_ascii_art_window()` | code→picture text→最大化視窗 |
 | 案例管理 | `_test_case_json_files()`、`_sanitize_test_case_name()`、`_test_case_path()`、`_refresh_test_case_list()`、`_selected_test_case_name()`、`_load_selected_test_case()`、`_delete_selected_test_case()`、`_save_current_test_case_from_prompt()`、`_build_test_case_payload()`、`save_test_case()`、`load_test_case()` | case name/path/payload；讀寫 JSON |
 | 專案持久化 | `_new_project()`、`_save_current_project()`、`_save_project_as()`、`save_project_case()`、`load_project_case()`、`_relink_dxf()`、`_mark_project_dirty()` | 協調 serializer／asset manager，更新 GUI 與 Dirty；不自行做 hash 或幾何比對 |
-| 結果互動 | `_on_results_tree_click()`、`_on_results_tree_space()`、`_on_results_tree_double_click()`、`_show_result_details()` | 切換顯示、展開、詳細資訊 |
-| 結果刪除 | `_selected_result_id_for_*()`、`_is_custom_result_item()`、`_delete_result_display_name()`、`_remove_result_from_session_caches()`、`_delete_selected_result_plan()` | 刪方案及關聯快取 |
+| 結果互動 | `_on_results_tree_click()`、`_on_results_tree_space()`、`_on_results_tree_double_click()`、`_show_result_details()` | 切換顯示、展開、詳細資訊與雙擊編輯 |
 | 支撐方案編輯 | `_support_config_by_id()`、`_support_plan_piece_rows()`、`_support_kind_*()`、`_replace_support_plan()`、`_recalculate_support_global_solution()`、`_find_support_forbidden_zone_hit()`、`_format_support_status()`、`_format_support_plan_breakdown()`、`_support_neighbor_penalty_for_plan()`、`_open_support_plan_editor()` | 編輯 pieces、重評單體與鄰支撐 penalty |
-| 圍令自訂方案 | `_create_custom_waler_plan_from_selection()`、`_open_custom_waler_plan_editor()`、`_next_custom_waler_result_id()`、`_recalculate_custom_waler_plan()`、`_get_waler_required_length()`、`_validate_custom_waler_plan()` | 自訂 segments、重算 score、工程合法性 |
-| 結果 ID/群組 | `_result_group_iid()`、`_is_result_group_iid()`、`_support_plan_iid()`、`_is_support_plan_iid()`、`_parse_support_plan_iid()`、`_custom_suffix_from_index()`、`_custom_label_sort_value()`、`_get_result_tree_info()`、`_get_result_group_entries()` | Treeview IID 與排序 |
+| 圍令方案編輯 | `_open_waler_plan_editor()`、`_apply_waler_plan_segments()`、`_recalculate_waler_plan()`、`_has_modified_waler_results()` | 直接編輯 Top 5 方案的鋼材順序，立即重算 score、工程合法性與預覽 |
+| 結果 ID/群組 | `_result_group_iid()`、`_is_result_group_iid()`、`_support_plan_iid()`、`_is_support_plan_iid()`、`_parse_support_plan_iid()`、`_get_result_tree_info()`、`_get_result_group_entries()` | Treeview IID 與排序 |
 | 顯示狀態 | `_result_group_visible_mark()`、`_result_item_visible_mark()`、`_support_plan_ids()`、`_support_plan_visible()`、`_support_group_visible_mark()`、`_toggle_result_group_visibility()`、`_toggle_result_visibility()`、`_toggle_support_plan_visibility()` | 管理方案可見性 |
 | 結果格式 | `_format_result_value()`、`_format_result_list()`、`_format_waler_score_breakdown()`、`_format_result_details()`、`_describe_result_item()` | 結果與評分拆解文字 |
 | Results tree | `_refresh_results_tree()`、`_store_result_item()` | result_items→階層 Treeview |
 | 材料統計 | `_material_length_key()`、`_collect_visible_material_usage()`、`_collect_inventory_quantities()`、`_update_material_summary()` | 可見方案材料用量、庫存、剩餘量 |
+| Excel 匯出 | `_export_visible_results_to_excel()` | 可見唯一方案→逐根材料明細與鋼材庫存彙總 `.xlsx` |
 | Preview 建立 | `_build_preview()`、`_format_preview_coordinates()`、`_capture_preview_home_view()`、`_get_preview_zoom_percent()` | Figure/Canvas/Toolbar |
 | Preview 效能 | `_begin_preview_interaction()`、`_begin_preview_pan_interaction()`、`_end_preview_interaction()`、`_on_preview_scroll()`、`_schedule_preview_scroll_redraw()`、`_flush_preview_scroll_redraw()`、`_cancel_preview_scroll_redraw()` | 文字隱藏、scroll debounce、pan throttle 協調 |
 | 圖片匯出 | `_ask_export_scale()`、`_export_preview_image()` | scale→PNG/JPEG；先重建完整圖面 |
@@ -724,10 +882,9 @@ Matplotlib 自訂工具列，只保留：
 | 幾何 helper | `_waler_coords()`、`_point_on_waler_segment_with_tolerance()`、`_walers_are_nearly_parallel()`、`_line_is_nearly_perpendicular_to_waler()`、`_to_number()`、`_line_length()`、`_line_length_positive()`、`_readable_line_angle()`、`_waler_direction_unit()` | 平面幾何與安全轉數字 |
 | 基礎圖面 | `_draw_segment_length_label()`、`_draw_strut_angle_brace()`、`update_preview()` | 繪製輸入圍令、支撐、斜撐、托梁、中間柱與角撐 |
 | 結果疊圖 | `_draw_result_overlays()`、`_draw_single_waler_solution_overlay()`、`_draw_support_solution_overlay()` | 只疊加可見結果 |
-| Inventory | `_get_inventory_items()`、`_get_purchasable_lengths()` | `Qty>0` stock；所有 Length 可購買 |
-| Solver 開啟 | `_open_waler_solver()`、`_open_support_solver()` | validate→選擇→建立 Dialog |
+| Inventory 顯示 | `_inventory_quantity()`、`_update_material_summary()` | 透過 `InventoryLookup` 取得數量並呈現 |
+| Solver 開啟 | `_open_waler_solver()`、`_open_support_solver()` | validate→Builder→選擇／建立 Dialog |
 | Solver 結果 | `_store_support_solution()`、`_store_waler_result()` | callback 結果→result_items |
-| Solver inputs | `build_support_inputs()`、`build_waler_inputs()` | Model rows→Solver Config/derived dict |
 | 應用生命週期 | `_on_main_window_close()`、`_on_tab_changed()`、`show_result()`、`_set_window_size()` | 停止 polling、切換 tab、append log、視窗尺寸 |
 
 ### Dialog 與 thread 方法
@@ -740,7 +897,7 @@ Matplotlib 自訂工具列，只保留：
 | `WalerSelectionDialog` | `_on_ok()`、`_on_cancel()`、`open()` | 回傳 WalerID 或 None |
 | `ZoningSelectionDialog` | `_on_ok()`、`_on_cancel()`、`open()` | 回傳 Zoning 或 None |
 | `TextRedirector` | `write()`、`_flush_queue()`、`flush()` | thread-safe GUI log |
-| `SupportSolverDialog` | `_run_solver()`、`_solve()`、`_solver_thread()`、`_display_solution()` | Phase 1 cache、候選充分性、Phase 2、結果 callback |
+| `SupportSolverDialog` | `_run_solver()`、`_solver_thread()`、`_display_solution()` | 收集比例、背景呼叫 Use Case、顯示與結果 callback |
 | `WalerSolverDialog` | `_build_solver_key()`、`_ask_use_memory_result()`、`_save_solver_memory()`、`_restore_solver_memory()` | 本次執行記憶 |
 |  | `_run_solver()`、`_solver_thread()` | 建 Config 並背景執行 GA |
 |  | `_waler_ratio_targets()`、`_waler_segment_counts()`、`_with_waler_display_metadata()` | 補顯示 metadata |
@@ -860,6 +1017,17 @@ and plan.jack_region_id == target_jack_region
 
 當成正式候選。
 
+### 雙路支撐候選交集
+
+同一個 `SharedLayoutGroup` 必須剛好包含兩支實體支撐，且兩支必須具有相同的
+Zoning、材料規格、FromWaler 與 ToWaler 方向。Phase 1 仍分別檢查兩支支撐各自的
+中間柱、托梁與端部條件，之後以 ordered `(piece kind, length)` 取候選交集；沒有共同
+排列時不進入 Phase 2。
+
+兩支支撐的材料會分別計數，因此同一組配置需要兩套材料。雙路群組內的兩個 Jack
+允許位於相同測站，不套用一般相鄰支撐的 600 mm Jack 間距；群組與前後其他支撐仍
+照常檢查間距。手動修改群組任一成員時，同一組的另一成員會一起重新套用並各自驗證。
+
 ## 7.3 Phase 2：多支支撐全域解
 
 ```text
@@ -869,6 +1037,7 @@ candidates_by_support
 build_global_solution()
           │
           ├─ 依支撐表順序逐支擴展
+          ├─ 雙路群組只接受相同 ordered pieces
           ├─ pair_penalty()
           ├─ 保留最低分 beam
           └─ 找不到路徑時 fallback
@@ -1004,6 +1173,7 @@ population_size × (generations + 1)
 |---|---|
 | `ADDWALER` | 點選圍令起點、終點 |
 | `ADDSTRUT` | 點選支撐起終點，選填托梁與中間柱測站 |
+| `UPDSTRUT` | 輸入既有 StrutID，重新點選支撐及托梁／中間柱測站 |
 | `ADDBRACE` | 點選斜撐起點、終點 |
 | `SUPSTATUS` | 顯示 TEMP 路徑及 pending 狀態 |
 
@@ -1011,16 +1181,16 @@ population_size × (generations + 1)
 
 ## 9.2 座標系
 
-`getpoint` 目前保留執行指令當下的 UCS 座標，不再使用 `(trans point 1 0)` 轉回 WCS。
+`getpoint` 保留執行指令當下的 UCS 操作；起終點與測站選點都會在運算及寫入 JSON 前使用 `(trans point 1 0)` 轉成 WCS。
 
 因此建議：
 
 ```text
-UCS 設定新原點／方向
-↓
-保持目前 UCS
-↓
-執行 ADDWALER / ADDSTRUT / ADDBRACE
+getpoint（UCS）
+↓ trans point 1 0
+TEMP JSON（WCS）
+↓ CoordinateSystem.transform()
+Project world/local 座標
 ```
 
 ## 9.3 TEMP 路徑
@@ -1054,8 +1224,7 @@ CAD 與 Solver 應使用同一 Windows 帳號及權限層級。
 若正式 JSON 已存在
     → 顯示 pending，拒絕覆寫
 否則
-    → 先寫 .json.tmp
-    → vl-file-rename 成正式 JSON
+    → 寫入正式 JSON
 ```
 
 Python 成功匯入後：
@@ -1170,16 +1339,16 @@ project_cases/
 
 以群組顯示：
 
-- WalerID 下的 Top 5／自訂方案
+- WalerID 下的 Top 5 方案
 - Zoning 下的各支支撐
 
 功能：
 
 - 群組或單案顯示切換
-- 雙擊查看詳細配置
-- 建立自訂圍令方案
+- 雙擊圍令方案直接編輯鋼材長度與順序
 - 編輯支撐 piece 順序
-- 刪除方案
+- 圍令方案新增／刪除鋼材及上移／下移
+- 修改後立即檢查合法性、重新計分並更新預覽
 - 依可見方案更新材料統計
 
 ## 10.7 Solver Dialog
@@ -1313,6 +1482,7 @@ B1, B2...
 ```json
 {
   "StrutID": "S1",
+  "SharedLayoutGroup": "G1",
   "FromWaler": "W1",
   "ToWaler": "W2",
   "StartX": 0,
@@ -1330,6 +1500,11 @@ B1, B2...
 }
 ```
 
+`SharedLayoutGroup` 為空時是一般單支撐；相同非空群組值必須剛好出現兩次。DXF
+匯入以中心線距離 `1000 ± 150 mm`、平行角度、投影重疊率及長度差產生候選；若同一
+支撐有多個可能配對，預設不採用並要求人工選擇。反向繪製的第二支在轉成正式 row
+時會連同測站與角撐端欄位一起翻轉，確保兩支使用同一個 FromWaler → ToWaler 方向。
+
 ### Brace
 
 ```json
@@ -1344,7 +1519,20 @@ B1, B2...
 }
 ```
 
-舊案例中的 brace `Type` 會由 `normalize_legacy_fields()` 移除。
+### 支撐內的 Column／Beam 位置
+
+```json
+{
+  "StrutID": "S1",
+  "ColumnPositions": "5000,10000",
+  "BeamPositions": "3500,7000",
+  "AssociatedColumnIDs": "C1,C2",
+  "AssociatedBeamIDs": "BM1,BM2"
+}
+```
+
+Solver 的正式輸入是每支 Strut 上的 station。`AssociatedColumnIDs`／
+`AssociatedBeamIDs` 只保留匯入標籤；完整 DXF 幾何留在 `dxf_import_state`。
 
 ## 11.3 Inventory
 
@@ -1428,11 +1616,11 @@ Inventory 不儲存在案例 `data` 中，也不會因載入案例而被替換�
 
 ## 11.5 專案 JSON 與 DXF 資產
 
-專案使用 `schema_version: 2`。`dxf_import_state` 繼續保存既有的純資料辨識狀態；DXF 檔案完整性與管理位置由 `dxf_asset` 單獨負責：
+專案使用 `schema_version: 3`。`dxf_import_state` 繼續保存既有的純資料辨識狀態；DXF 檔案完整性與管理位置由 `dxf_asset` 單獨負責：
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "project_information": {
     "project_name": "Y1A站第一層支撐",
     "saved_at": "2026-08-12T15:30:00",
@@ -1475,6 +1663,14 @@ Inventory 不儲存在案例 `data` 中，也不會因載入案例而被替換�
 ```
 
 純手動專案的 `dxf_asset` 與 `dxf_import_state` 均可為 `null`。JSON 不保存 Base64 DXF，也不保存 `ezdxf` 的 Document、Entity、Layout 或 Block 執行階段物件。
+
+Application 只接受 schema 3，不在載入時自動轉換舊格式。受版本控制的舊專案可一次執行：
+
+```powershell
+.\.venv\Scripts\python.exe tools\upgrade_project_schema.py --no-backup project_cases\舊專案.json
+```
+
+工具會從既有 `dxf_import_state` 提取可確認的 Column／Beam 幾何；無法恢復幾何時只建立 `Source: legacy` 的未連結障礙，不猜測或捏造構件。
 
 交易式儲存順序：
 
@@ -1602,9 +1798,10 @@ buy_count × 100,000
 
 材料配置目前只接受庫存長度與段長完全相同。庫存不足但該長度可購買時產生 `BUY-長度`。
 
-## 12.4 自訂圍令方案
+## 12.4 圍令方案直接編輯
 
-`main.py._recalculate_custom_waler_plan()` 重新實作同一套 Waler score，並另外呼叫 `_validate_custom_waler_plan()` 檢查：
+`bracing_optimizer.application.plan_editing.WalerPlanEditing` 負責重算 Waler score，
+並透過 `validate()` 檢查：
 
 - 總長是否等於圍令需求長。
 - 接頭是否進 forbidden zone。
@@ -1612,7 +1809,12 @@ buy_count × 100,000
 - min/max 段長。
 - 庫存不足警告。
 
-這是目前一個重複評分來源，未來應收斂回 `wales.py` 的單一 API。
+結果頁中的 Top 5 圍令方案可直接雙擊編輯。編輯器提供新增鋼材、刪除鋼材、
+上移、下移與雙擊更換料長；每次操作立即更新原方案、合法性、分數和圖面預覽。
+修改後以 `[已修改]` 標示，不再另外建立自訂方案。
+
+`main.py` 現在只委派給這個 data-only service。Application 與演算法層之間仍有一份
+評分公式重複，未來可再收斂回 `algorithms/wales.py` 的單一 API。
 
 ---
 
@@ -1686,9 +1888,13 @@ Beam 與 Column 點先收集，再各自呼叫一次 `scatter()` 批次繪製。
 
 剩餘數量小於零會標紅。
 
-統計只包含目前可見結果。Waler 使用 assignments 的 stock length；沒有 assignments 時 fallback segments。Support 目前會計數 `pieces` 中所有 kind，因此 jack 600 與 shim 也可能被算進材料統計，這是待確認的業務規則。
+統計只包含目前可見結果，且庫存比較只計鋼材。Waler 優先使用方案的 `pieces`；舊資料沒有 `pieces` 時依序 fallback `segments` 與 assignments 的 stock length。Support 只計 `pieces` 中的 steel；jack、shim 與 gap 不納入鋼材庫存差額。
 
-## 13.6 DXF 配置標註輸出
+## 13.6 Excel 材料明細輸出
+
+「配置結果」頁的 Excel 按鈕不依賴 DXF，只匯出目前勾選為可見且每個構件唯一的方案。`project_results.py` 先建立一件材料一列的標準資料，包含材料用途、構件編號、成果方案、分區、段次、材料類型、材料規格、長度與數量；鋼材、調整塊、千斤頂會列入明細，gap 不列入。`excel_result_export.py` 再產生「材料明細」與「材料彙總」兩張工作表，設定標題、篩選、凍結窗格、數字格式及缺料標示，並以同資料夾暫存檔驗證後原子替換正式 `.xlsx`。
+
+## 13.7 DXF 配置標註輸出
 
 結果頁的「匯出支撐配置成果DXF」會：
 
@@ -1712,42 +1918,57 @@ Dimension 不直接在大世界座標下 render。每支構件先以自身起點
 
 ```text
 main.py
-├─ project_data.py
-├─ cad_builder.py
-│  └─ project_data.py
-├─ project_persistence.py
-│  ├─ ProjectSerializer
-│  ├─ DxfAssetManager
-│  └─ DxfCompatibilityChecker
-├─ dxf_result_export.py
-│  └─ assets/dxf/jack_symbol.dxf
-├─ wales.py
-├─ support.py
+├─ bracing_optimizer/application/
+│  ├─ optimize_waler.py
+│  ├─ optimize_support_zone.py
+│  ├─ solver_input_builder.py
+│  ├─ plan_editing.py
+│  ├─ project_data.py
+│  ├─ project_mapper.py
+│  ├─ project_results.py
+│  ├─ project_service.py
+│  └─ project_validation.py
+├─ bracing_optimizer/algorithms/
+│  ├─ wales.py
+│  ├─ support.py
+│  └─ solver_search.py
+├─ bracing_optimizer/domain/
+│  ├─ project_domain.py
+│  └─ material_rules.py
+├─ bracing_optimizer/infrastructure/
+│  ├─ cad_builder.py
+│  ├─ dxf_result_export.py ─► assets/dxf/jack_symbol.dxf
+│  ├─ excel_result_export.py ─► openpyxl
+│  ├─ inventory_repository.py
+│  └─ project_persistence.py
+├─ bracing_optimizer/presentation/
 ├─ tkinter
 └─ matplotlib
 
 tests/test_cad_builder_integration.py
 ├─ main.py
-├─ project_data.py
-└─ cad_builder.py
+├─ bracing_optimizer/application/project_data.py
+└─ bracing_optimizer/infrastructure/cad_builder.py
 ```
 
-`support.py` 與 `wales.py` 不 import `main.py`，因此 Solver 不依賴 GUI。
+`bracing_optimizer/algorithms/` 與 `bracing_optimizer/domain/` 不 import `main.py` 或
+`bracing_optimizer/presentation/`，因此 Solver 與 Domain 不依賴 GUI。
 
 ## 14.2 Waler call graph
 
 ```text
 SupportInputApp._open_waler_solver()
 └─ validate_data()
-└─ build_waler_inputs()
+└─ WalerInputBuilder.build_all()
 └─ WalerSelectionDialog.open()
 └─ WalerSolverDialog
    └─ _run_solver()
-      └─ wales.Config
+      └─ OptimizeWalerRequest
       └─ threading.Thread
          └─ _solver_thread()
-            └─ wales.set_logger()
-            └─ wales.evolve()
+            └─ OptimizeWaler.execute()
+               └─ wales.Config
+               └─ wales.evolve()
                ├─ initial_population()
                │  └─ create_individual()
                │     ├─ build_valid_individual()
@@ -1771,12 +1992,13 @@ SupportInputApp._open_waler_solver()
 SupportInputApp._open_support_solver()
 └─ validate_data()
 └─ ZoningSelectionDialog.open()
-└─ build_support_inputs()
+└─ SupportInputBuilder.build_zone()
 └─ SupportSolverDialog
    └─ _run_solver()
+      └─ OptimizeSupportZoneRequest
       └─ threading.Thread
          └─ _solver_thread()
-            └─ _solve()
+            └─ OptimizeSupportZone.execute()
                ├─ get_support_config_key()
                ├─ generate_single_support_candidates()
                │  ├─ generate_length_combinations_dp()
@@ -1839,11 +2061,9 @@ ui/
 └─ solver_dialogs.py
 ```
 
-## 15.2 `wales.py` 混合 Solver、舊 GUI 與診斷
+## 15.2 `wales.py` 已移除舊 GUI，仍可繼續拆分 Solver 內部責任
 
-`get_initial_config_from_gui()`、`get_stock_items_from_gui()`、命令列 main block 與核心 GA 在同一檔案。
-
-建議：
+舊版 Tkinter 輸入函式與命令列 main block 已刪除；`wales.py` 現在不依賴 GUI framework。若要進一步降低 Solver 單檔複雜度，建議：
 
 ```text
 wales/
@@ -1854,8 +2074,6 @@ wales/
 ├─ ga.py
 └─ diagnostics.py
 ```
-
-舊 GUI 可以移到 `tools/wales_standalone.py`。
 
 ## 15.3 `repair_individual()` 過大
 
@@ -1874,13 +2092,11 @@ wales/
 
 ## 15.4 Waler 評分邏輯重複
 
-三處存在相同或近似公式：
+兩處存在相同或近似公式：
 
-- `wales.evaluate_individual()`
-- `main._recalculate_custom_waler_plan()`
-- `main._format_waler_score_breakdown()`
-
-建議由 `wales.py` 提供：
+- `bracing_optimizer.algorithms.wales.evaluate_individual()`
+- `bracing_optimizer.application.plan_editing.WalerPlanEditing.recalculate()`
+建議由 `bracing_optimizer.algorithms.wales` 提供：
 
 ```python
 score_waler_plan(...)
@@ -1910,53 +2126,36 @@ Usage + Spec + Length
 
 這樣不同用途或規格的同長度材料不會共用庫存數量。
 
-## 15.7 JSON schema 與 runtime 設定未完全對稱
+## 15.7 JSON schema 與離線升級
 
-案例儲存包含：
+舊版測試案例另包含：
 
 - `derived`
 - `solver_settings`
 - `parameters`
 
-但載入沒有恢復這些設定。Inventory 也不在案例內。
+這些測試案例設定不等同於正式專案 schema。正式專案已使用 schema 3，
+包含 Inventory 與三種工程構件；Column／Beam 位置保存於各 Strut，舊專案必須先由離線工具升級。
 
-建議：
+仍待決定：
 
-- 明確定義 schema version migration。
-- 決定案例是否包含 Inventory。
-- 決定 solver settings 是紀錄還是可恢復設定。
-- 用 TypedDict/Pydantic/dataclass 取代鬆散 dict。
+- 舊版測試案例的 solver settings 是紀錄還是可恢復設定。
+- 測試案例格式是否也應收斂到正式專案 schema。
 
-## 15.8 CAD LISP、範例與測試 contract 漂移
+## 15.8 CAD LISP、範例與測試 contract
 
-目前實際觀察：
-
-- LISP 已改成保留 UCS，不含 `(trans ... 1 0)`。
-- 既有整合測試仍期待 `(trans`，因此目前 12 個測試中有 1 個失敗。
-- LISP `event_id` 仍使用 `CDATE + MILLISECS`。
-- LISP 仍有 pending event check 與 `.tmp → rename`。
-- `cad_bridge_event_examples.json` 的 Strut `TargetJackRegion` 是數值 `2`。
-- 目前 LISP `ADDSTRUT` 實際輸出空字串；Mapper 會保留空字串，`validate_data()` 因而拒絕執行 Solver，使用者必須補成正整數。`build_support_inputs()` 雖有 fallback 2，但正常流程會先被驗證擋下。
-
-應先決定唯一正式 contract，再同步：
+目前 LSP、JSON 範例、Python Reader/Mapper 與整合測試共用同一契約：
 
 ```text
-cad_builder.lsp
-cad_bridge_event_examples.json
-cad_builder.py
-tests/test_cad_builder_integration.py
-README.md
+event_id + type + operation + coordinate_space=WCS + data
 ```
 
-## 15.9 PyInstaller spec 重複
+`UPDSTRUT` 另要求 `target_id`。`ADDSTRUT` 的 `TargetJackRegion` 明確輸出數值 `2`。
 
-目前有四份 spec，但只有 `SupportSolver.spec` 是正式 onedir。
+## 15.9 PyInstaller 打包入口
 
-建議：
-
-- 保留一份正式 spec。
-- 歷史 spec 移到 `archive/` 或刪除。
-- 在 CI/打包腳本中固定使用同一指令。
+專案只保留 `SupportSolver.spec` 作為正式 onedir 打包設定。打包及 CI
+一律使用 README 第 16.9 節的固定指令，避免產生不同名稱或缺少資源的成品。
 
 ## 15.10 結果模型型別不一致
 
@@ -2075,7 +2274,8 @@ evolve()
 再看：
 
 ```text
-main.build_waler_inputs()
+solver_input_builder.WalerInputBuilder
+optimize_waler.OptimizeWaler
 WalerSolverDialog._run_solver()
 SupportInputApp._store_waler_result()
 ```
@@ -2100,8 +2300,8 @@ build_global_solution()
 再看：
 
 ```text
-main.build_support_inputs()
-SupportSolverDialog._solve()
+solver_input_builder.SupportInputBuilder
+OptimizeSupportZone.execute()
 _draw_support_solution_overlay()
 ```
 
@@ -2170,11 +2370,14 @@ tests
 輸出：
 
 ```text
-dist\SupportSolver\
-├─ SupportSolver.exe
+dist\SupportOptimizer\
+├─ SupportOptimizer.exe
 ├─ cad_builder.lsp
+├─ project_cases\
 ├─ test_cases\
 └─ _internal\
+   ├─ assets\dxf\
+   │  └─ jack_symbol.dxf
    ├─ data\
    ├─ picture\
    ├─ _tcl_data\
@@ -2182,7 +2385,7 @@ dist\SupportSolver\
    └─ Python / Matplotlib dependencies
 ```
 
-發佈時必須複製整個 `dist\SupportSolver`，不能只拿 EXE。
+發佈時必須複製整個 `dist\SupportOptimizer`，不能只拿 EXE。
 
 若 PyInstaller 顯示：
 
@@ -2299,8 +2502,8 @@ AutoLISP
 | `_on_ascii_art_code_enter` | Enter 後載入並顯示 ASCII art |
 | `_load_default_inventory` | 透過 `JsonInventoryRepository` 從 `data/inventory.json` 載入預設庫存 |
 | `_tree_column_key` | 把 Treeview `#n` 欄位轉成正式欄名 |
-| `_selected_result_id_for_custom_plan` | 解析目前選取項目對應的圍令方案 |
-| `_selected_result_id_for_delete` | 解析目前可刪除的結果 ID |
+| `_has_modified_waler_results` | 判斷重新計算是否會覆蓋已修改的圍令方案 |
+| `_apply_waler_plan_segments` | 將編輯後的鋼材順序套用至原方案並重新驗證 |
 | `_support_kind_label` | steel/shim/jack 顯示名稱 |
 | `_support_kind_key` | 將顯示名稱轉回正式 piece kind |
 | `_table_label` | table key 轉中文表名 |

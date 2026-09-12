@@ -2,6 +2,8 @@
   "ADDWALER": {
     "event_id": "example-waler-001",
     "type": "waler",
+    "operation": "add",
+    "coordinate_space": "WCS",
     "data": {
       "StartX": 1000,
       "StartY": 2000,
@@ -12,6 +14,8 @@
   "ADDSTRUT": {
     "event_id": "example-strut-001",
     "type": "strut",
+    "operation": "add",
+    "coordinate_space": "WCS",
     "data": {
       "StartX": 0,
       "StartY": 0,
@@ -22,14 +26,38 @@
       "TargetJackRegion": 2
     }
   },
+  "UPDSTRUT": {
+    "event_id": "example-strut-update-001",
+    "type": "strut",
+    "operation": "update",
+    "coordinate_space": "WCS",
+    "target_id": "S5",
+    "data": {
+      "StartX": 100100,
+      "StartY": 200000,
+      "EndX": 112050,
+      "EndY": 200000,
+      "BeamPositions": "3450,6950,10450",
+      "ColumnPositions": "4950,9950"
+    }
+  },
   "ADDBRACE": {
     "event_id": "example-brace-001",
     "type": "brace",
+    "operation": "add",
+    "coordinate_space": "WCS",
     "data": {
       "StartX": 2500,
       "StartY": 1000,
       "EndX": 6500,
       "EndY": 4500
     }
+  },
+  "SUPCLEAR": {
+    "event_id": "cancel-example-001",
+    "type": "control",
+    "operation": "cancel",
+    "coordinate_space": "WCS",
+    "data": {}
   }
 }
