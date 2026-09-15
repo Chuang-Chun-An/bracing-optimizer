@@ -254,6 +254,7 @@ class MainProjectEditingTests(unittest.TestCase):
             dimension_count=1,
             actual_jack_count=0,
             jack_count=0,
+            project_geometry_count=2,
             result_waler_count=1,
             result_support_count=0,
             output_path="result.dxf",
@@ -264,7 +265,6 @@ class MainProjectEditingTests(unittest.TestCase):
                 "main.filedialog.asksaveasfilename",
                 return_value="result.dxf",
             ),
-            patch("main.build_member_bindings", return_value={}) as build_bindings,
             patch(
                 "main.export_results_to_dxf",
                 return_value=export_report,
@@ -273,8 +273,11 @@ class MainProjectEditingTests(unittest.TestCase):
         ):
             app._export_visible_results_to_dxf()
 
-        build_bindings.assert_called_once()
         export_results.assert_called_once()
+        args = export_results.call_args.args
+        self.assertIs(args[2], app.walers)
+        self.assertIs(args[3], app.struts)
+        self.assertIs(args[4], app.braces)
         show_info.assert_called_once()
 
     def test_only_binding_fields_are_classified_as_dxf_stale_changes(self):
@@ -347,8 +350,9 @@ class MainProjectEditingTests(unittest.TestCase):
         self.assertEqual(app.struts[0]["material_spec"], "H400x400")
         self.assertEqual(app.events["solver"], 1)
 
-    def test_export_stops_before_binding_fallback_after_geometry_edit(self):
+    def test_stale_binding_does_not_block_current_project_export(self):
         app = self.make_app()
+        app.dxf_asset_status_report = SimpleNamespace(can_export=False)
         app._commit_project_field_edit("struts", 0, "StartX", "500")
         app._visible_dxf_export_plans = lambda: (
             MemberExportPlan(
@@ -358,19 +362,61 @@ class MainProjectEditingTests(unittest.TestCase):
                 result_id="S1-plan",
             ),
         )
+        export_report = SimpleNamespace(
+            background_counts=(),
+            layer_name_fallbacks=(),
+            dxf_version="R2018",
+            coordinate_units="mm",
+            background_layer_count=0,
+            background_segment_count=0,
+            project_geometry_count=2,
+            final_audit=SimpleNamespace(error_count=0, fix_count=0),
+            actual_dimension_count=1,
+            dimension_count=1,
+            actual_jack_count=0,
+            jack_count=0,
+            result_waler_count=0,
+            result_support_count=1,
+            output_path="result.dxf",
+            merge_guidance="",
+        )
+
+        with (
+            patch("main.messagebox.showwarning") as warning,
+            patch("main.filedialog.asksaveasfilename", return_value="result.dxf"),
+            patch(
+                "main.export_results_to_dxf",
+                return_value=export_report,
+            ) as export_results,
+            patch("main.messagebox.showinfo"),
+        ):
+            app._export_visible_results_to_dxf()
+
+        warning.assert_not_called()
+        export_results.assert_called_once()
+        self.assertEqual(500, export_results.call_args.args[3][0]["StartX"])
+
+    def test_main_reports_missing_project_to_world_coordinate_metadata(self):
+        app = self.make_app(with_dxf=False)
+        app._visible_dxf_export_plans = lambda: (
+            MemberExportPlan(
+                "W1",
+                "waler",
+                (ExportPiece("steel", 3000),),
+                result_id="W1-plan",
+            ),
+        )
 
         with (
             patch("main.messagebox.showwarning") as warning,
             patch("main.filedialog.asksaveasfilename") as save_dialog,
-            patch("main.build_member_bindings") as build_bindings,
             patch("main.export_results_to_dxf") as export_results,
         ):
             app._export_visible_results_to_dxf()
 
         warning.assert_called_once()
-        self.assertIn("避免成果輸出至錯誤位置", warning.call_args.args[1])
+        self.assertIn("Project → World", warning.call_args.args[0])
         save_dialog.assert_not_called()
-        build_bindings.assert_not_called()
         export_results.assert_not_called()
 
     def test_translated_same_length_strut_is_incompatible(self):

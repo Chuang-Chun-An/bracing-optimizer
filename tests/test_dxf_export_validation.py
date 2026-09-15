@@ -19,10 +19,11 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     DXFAuditIssue,
     DXFAuditSummary,
     DXFExportValidationError,
+    ExportCoordinateSystem,
     ExportPiece,
-    MemberBinding,
     MemberExportPlan,
-    build_member_bindings,
+    build_project_member_bindings,
+    export_coordinate_system_from_import_state,
     export_results_to_dxf,
 )
 
@@ -88,15 +89,28 @@ def validation_state(*, source_path: str = "") -> dict:
     }
 
 
-def validation_bindings() -> dict[tuple[str, str], MemberBinding]:
-    return {
-        ("waler", "W1"): MemberBinding(
-            "W1", "waler", "WALER_SOURCE", (10_000, -20_000), (13_000, -20_000)
-        ),
-        ("strut", "S1"): MemberBinding(
-            "S1", "strut", "STRUT_SOURCE", (15_000, -20_000), (15_000, -17_400)
-        ),
-    }
+def validation_project_rows():
+    return (
+        [
+            {
+                "WalerID": "W1",
+                "StartX": 10_000,
+                "StartY": -20_000,
+                "EndX": 13_000,
+                "EndY": -20_000,
+            }
+        ],
+        [
+            {
+                "StrutID": "S1",
+                "StartX": 15_000,
+                "StartY": -20_000,
+                "EndX": 15_000,
+                "EndY": -17_400,
+            }
+        ],
+        [],
+    )
 
 
 def validation_plans() -> tuple[MemberExportPlan, ...]:
@@ -122,11 +136,15 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _export(self, output_path: Path | None = None):
+        walers, struts, braces = validation_project_rows()
         return export_results_to_dxf(
-            validation_state(),
             output_path or self.temp_path / "result.dxf",
             validation_plans(),
-            validation_bindings(),
+            walers,
+            struts,
+            braces,
+            ExportCoordinateSystem("world"),
+            background_state=validation_state(),
         )
 
     def _assert_old_output_preserved(self, output_path: Path, original: bytes):
@@ -183,11 +201,15 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         with mock.patch.object(exporter.ezdxf, "readfile", side_effect=track_read), mock.patch.object(
             exporter, "_save_clean_document", side_effect=track_save
         ):
+            walers, struts, braces = validation_project_rows()
             export_results_to_dxf(
-                state,
                 output_path,
                 validation_plans(),
-                validation_bindings(),
+                walers,
+                struts,
+                braces,
+                ExportCoordinateSystem("world"),
+                background_state=state,
             )
 
         self.assertNotIn(source_path.resolve(), read_paths)
@@ -200,11 +222,15 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         missing = self.temp_path / "deleted original.dxf"
         output_path = self.temp_path / "independent result.dxf"
 
+        walers, struts, braces = validation_project_rows()
         report = export_results_to_dxf(
-            validation_state(source_path=str(missing)),
             output_path,
             validation_plans(),
-            validation_bindings(),
+            walers,
+            struts,
+            braces,
+            ExportCoordinateSystem("world"),
+            background_state=validation_state(source_path=str(missing)),
         )
 
         self.assertFalse(missing.exists())
@@ -214,14 +240,33 @@ class DXFCleanExportValidationTests(unittest.TestCase):
 
     def test_invalid_or_result_colliding_source_layers_use_central_fallbacks(self):
         state = validation_state()
-        state["source_geometry"][0]["source_layer"] = "BAD/LAYER"
-        state["converted"]["walers"][0]["source_layer"] = "BAD/LAYER"
-        state["source_geometry"][1]["source_layer"] = RESULT_SUPPORT_LAYER
-        state["converted"]["struts"][0]["source_layer"] = RESULT_SUPPORT_LAYER
+        state["source_geometry"].extend(
+            [
+                {
+                    "role": "auxiliary",
+                    "source_handle": "A1",
+                    "points": [[0, 0], [100, 0]],
+                    "source_layer": "BAD/LAYER",
+                },
+                {
+                    "role": "column",
+                    "source_handle": "C1",
+                    "points": [[200, 0], [300, 0]],
+                    "source_layer": RESULT_SUPPORT_LAYER,
+                },
+            ]
+        )
         output_path = self.temp_path / "fallback.dxf"
 
+        walers, struts, braces = validation_project_rows()
         report = export_results_to_dxf(
-            state, output_path, validation_plans(), validation_bindings()
+            output_path,
+            validation_plans(),
+            walers,
+            struts,
+            braces,
+            ExportCoordinateSystem("world"),
+            background_state=state,
         )
 
         self.assertEqual(2, len(report.layer_name_fallbacks))
@@ -259,10 +304,12 @@ class DXFCleanExportValidationTests(unittest.TestCase):
     def test_y1a_special_project_exports_clean_without_reading_duplicate_layer_source(self):
         project = json.loads(SPECIAL_PROJECT.read_text(encoding="utf-8"))
         state = project["dxf_import_state"]
-        bindings = build_member_bindings(
-            state,
-            project["input_data"]["walers"],
-            project["input_data"]["struts"],
+        coordinate_system = export_coordinate_system_from_import_state(state)
+        input_data = project["input_data"]
+        bindings = build_project_member_bindings(
+            input_data["walers"],
+            input_data["struts"],
+            coordinate_system,
         )
         waler = bindings[("waler", "W1")]
         strut = bindings[("strut", "S1")]
@@ -286,15 +333,24 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             else None
         )
 
-        report = export_results_to_dxf(state, output_path, plans, bindings)
+        report = export_results_to_dxf(
+            output_path,
+            plans,
+            input_data["walers"],
+            input_data["struts"],
+            input_data["braces"],
+            coordinate_system,
+            background_state=state,
+        )
 
         self.assertEqual(0, report.final_audit.error_count)
         self.assertEqual(0, report.final_audit.fix_count)
         self.assertEqual(report.dimension_count, report.actual_dimension_count)
         self.assertEqual(report.jack_count, report.actual_jack_count)
-        self.assertEqual(
-            {"waler", "strut", "brace", "corner_brace", "column", "beam", "auxiliary"},
-            {role for role, _count in report.background_counts},
+        self.assertTrue(
+            {role for role, _count in report.background_counts}.isdisjoint(
+                {"waler", "strut", "brace"}
+            )
         )
         document = ezdxf.readfile(output_path)
         self.assertFalse(

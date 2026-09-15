@@ -56,6 +56,40 @@ class DxfStatus(str, Enum):
     NO_DXF = "NO_DXF"
 
 
+class DxfWorkflowStatus(str, Enum):
+    """Project lifecycle state for one-way DXF review and import."""
+
+    NONE = "NONE"
+    REVIEW = "REVIEW"
+    COMPLETED = "COMPLETED"
+
+
+def dxf_workflow_status_from_payload(
+    payload: Mapping[str, Any],
+) -> DxfWorkflowStatus:
+    """Read the explicit workflow state with a safe legacy default.
+
+    Projects written before the workflow field existed used
+    ``dxf_import_state`` only after a formal import. Such projects therefore
+    map to COMPLETED, while projects without DXF context map to NONE.
+    """
+
+    raw = payload.get("dxf_workflow_status")
+    if raw is None or str(raw).strip() == "":
+        return (
+            DxfWorkflowStatus.COMPLETED
+            if isinstance(payload.get("dxf_import_state"), Mapping)
+            else DxfWorkflowStatus.NONE
+        )
+    try:
+        return DxfWorkflowStatus(str(raw).strip().upper())
+    except ValueError as exc:
+        raise ProjectPersistenceError(
+            "JSON 驗證失敗",
+            f"不支援的 DXF workflow 狀態：{raw}",
+        ) from exc
+
+
 @dataclass(frozen=True)
 class DxfFileInfo:
     path: Path
@@ -153,6 +187,15 @@ class ProjectSerializer:
             raise ProjectPersistenceError(
                 "JSON 驗證失敗",
                 "schema version 3 必須明確包含 dxf_asset（可為 null）",
+            )
+        workflow = dxf_workflow_status_from_payload(decoded)
+        if (
+            workflow == DxfWorkflowStatus.REVIEW
+            and not isinstance(decoded.get("dxf_import_state"), dict)
+        ):
+            raise ProjectPersistenceError(
+                "JSON 驗證失敗",
+                "DXF workflow 為 REVIEW 時必須包含 dxf_import_state。",
             )
         input_data = decoded.get("input_data")
         if not isinstance(input_data, dict):
@@ -995,6 +1038,11 @@ class DxfCompatibilityChecker:
             "layer_classification",
             "layer_assignments",
             "layer_info",
+            # Opaque DXF Review state: persistence does not interpret source
+            # exclusion semantics, but a relink must adopt the candidate file's
+            # scope and decisions instead of retaining stale handles.
+            "source_fingerprint",
+            "excluded_sources",
         ):
             if key in candidate_state:
                 merged[key] = copy.deepcopy(candidate_state[key])
@@ -1011,10 +1059,12 @@ __all__ = [
     "DxfCompatibilityReport",
     "DxfFileInfo",
     "DxfStatus",
+    "DxfWorkflowStatus",
     "MANAGED_DXF_RELATIVE_PATH",
     "PROJECT_SCHEMA_VERSION",
     "ProjectPersistenceError",
     "ProjectSaveResult",
     "ProjectSerializer",
     "VerifiedDxfSource",
+    "dxf_workflow_status_from_payload",
 ]

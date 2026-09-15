@@ -738,6 +738,58 @@ def _candidate_from_group(
                     [],
                 )
 
+    # A straight MLINE already carries its physical rail spacing.  Preserve
+    # that width for material recognition and expose both rails so a Waler can
+    # select its support-side contact face and opposite outer face.
+    straight_mlines = [
+        primitive
+        for primitive in group.primitives
+        if (
+            primitive.entity_type == "MLINE"
+            and len(primitive.points) == 2
+            and primitive.source_width > 0.0
+        )
+    ]
+    if len(straight_mlines) == 1:
+        primitive = straight_mlines[0]
+        start, end = _ordered_line(*primitive.points)
+        axis = _unit(start, end)
+        if axis is not None:
+            normal = -axis[1], axis[0]
+            half_width = primitive.source_width / 2.0
+            boundaries = tuple(
+                _ordered_line(
+                    (
+                        start[0] + normal[0] * offset,
+                        start[1] + normal[1] * offset,
+                    ),
+                    (
+                        end[0] + normal[0] * offset,
+                        end[1] + normal[1] * offset,
+                    ),
+                )
+                for offset in (-half_width, half_width)
+            )
+            return (
+                _Candidate(
+                    start,
+                    end,
+                    "mline_center_path",
+                    True,
+                    primitive.source_width,
+                    0.99,
+                    group.layer,
+                    set(group.handles),
+                    set(group.entity_types),
+                    list(group.block_instances),
+                    {group.key},
+                    [],
+                    boundaries,
+                    recognized_axis=(start, end),
+                ),
+                [],
+            )
+
     messages: list[ValidationMessage] = []
     ambiguous_line_code = (
         "AMBIGUOUS_INNER_LINE" if role == "waler" else "AMBIGUOUS_CENTERLINE"

@@ -291,7 +291,7 @@ class InterfacePresentationTests(unittest.TestCase):
         self.assertEqual(counts, {"waler": 2, "support": 0})
         self.assertEqual(conflicts, (("圍令", "W1", 2),))
 
-    def test_excel_export_is_available_without_dxf_geometry(self):
+    def test_export_actions_remain_available_without_dxf_coordinate_metadata(self):
         class Tree:
             @staticmethod
             def selection():
@@ -331,12 +331,13 @@ class InterfacePresentationTests(unittest.TestCase):
             app.export_results_excel_button.options["state"],
             "normal",
         )
-        self.assertEqual(app.export_results_dxf_button.options["state"], "disabled")
+        self.assertEqual(app.export_results_dxf_button.options["state"], "normal")
         self.assertIn(
             "匯出目前 1 個配置成果 Excel",
             app.export_results_excel_button.options["text"],
         )
         self.assertIn("Excel 材料明細仍可匯出", app.result_scope_var.value)
+        self.assertIn("Project → World 座標資訊", app.result_scope_var.value)
 
     def test_excel_export_callback_uses_visible_results_without_dxf(self):
         app = SupportInputApp.__new__(SupportInputApp)

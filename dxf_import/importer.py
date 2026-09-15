@@ -40,6 +40,7 @@ from .models import (
     CornerBrace,
     DXFImportError,
     DXFImportResult,
+    ExcludedSource,
     EntityDebugInfo,
     GeometryTolerances,
     LayerInfo,
@@ -49,6 +50,10 @@ from .models import (
     ValidationMessage,
     Waler,
     apply_coordinate_system,
+)
+from .source_exclusion import (
+    normalize_excluded_sources,
+    source_file_fingerprint,
 )
 from .recognition import (
     _Candidate,
@@ -64,10 +69,35 @@ from .recognition import (
 )
 from .validation import validate_duplicate_engineering_members
 from .support_pairing import detect_double_support_candidates
+from .waler_contact_adjustment import initialize_waler_contact_review
+from .material_recognition import recognize_result_material_specs
+
+
+def _lwpolyline_world_vertices(entity: Any) -> list[Point]:
+    """Return LWPOLYLINE vertices normalized from entity OCS to WCS."""
+
+    return [_point(vertex) for vertex in entity.vertices_in_wcs()]
+
+
+def _polyline_world_vertices(entity: Any) -> list[Point]:
+    """Return 2D/3D POLYLINE vertices in WCS using ezdxf semantics."""
+
+    return [_point(vertex) for vertex in entity.points_in_wcs()]
+
+
+def _solid_trace_world_vertices(entity: Any) -> list[Point]:
+    """Return graphical SOLID/TRACE vertices normalized from OCS to WCS."""
+
+    return [_point(vertex) for vertex in entity.wcs_vertices()]
 
 
 class DXFImporter:
-    """Read one DXF and recognize component-level engineering-line candidates."""
+    """Read one DXF and recognize component-level engineering-line candidates.
+
+    Raw DXF entities may use OCS or block-local coordinates.  All primitives
+    and ``SourceGeometry`` leaving this importer boundary are normalized to
+    WCS.  Project-local coordinates are a separate, later presentation step.
+    """
 
     GEOMETRY_TYPES = {
         "LINE",
@@ -95,6 +125,7 @@ class DXFImporter:
                 endpoint_tolerance_mm=max(float(geometry_tolerance), 1e-9),
             )
         self._document: Any = None
+        self._source_fingerprint = ""
 
     def read(self) -> "DXFImporter":
         if ezdxf is None:
@@ -103,6 +134,7 @@ class DXFImporter:
             raise DXFImportError(f"找不到 DXF 檔案：{self.file_path}")
         try:
             self._document = ezdxf.readfile(str(self.file_path))
+            self._source_fingerprint = source_file_fingerprint(self.file_path)
         except Exception as exc:
             raise DXFImportError(f"無法讀取 DXF：{exc}") from exc
         return self
@@ -116,6 +148,12 @@ class DXFImporter:
     @property
     def layer_names(self) -> tuple[str, ...]:
         return tuple(layer.dxf.name for layer in self.document.layers)
+
+    @property
+    def source_fingerprint(self) -> str:
+        if not self._source_fingerprint:
+            self.read()
+        return self._source_fingerprint
 
     def layer_information(self) -> tuple[LayerInfo, ...]:
         counts: dict[str, Counter[str]] = defaultdict(Counter)
@@ -144,6 +182,8 @@ class DXFImporter:
         layer_roles: Mapping[str, str] | None = None,
         endpoint_tolerance: float | None = None,
         coordinate_system: CoordinateSystem | None = None,
+        material_specs: Sequence[Mapping[str, Any]] = (),
+        excluded_sources: Sequence[ExcludedSource | Mapping[str, Any]] = (),
     ) -> DXFImportResult:
         tolerances = self.tolerances
         if endpoint_tolerance is not None:
@@ -225,11 +265,18 @@ class DXFImporter:
         source_texts: list[SourceText] = []
         source_counts: dict[str, int] = {}
         candidates_by_role: dict[str, list[_Candidate]] = {}
+        normalized_exclusions = normalize_excluded_sources(excluded_sources)
+        excluded_handles_by_role: dict[str, set[str]] = defaultdict(set)
+        for excluded in normalized_exclusions:
+            excluded_handles_by_role[excluded.role].update(excluded.source_handles)
 
         for role in engineering_roles:
             layers = selected[role]
             role_candidates: list[_Candidate] = []
             source_counts[role] = 0
+            role_group_count = 0
+            active_group_count = 0
+            excluded_group_count = 0
             for layer in layers:
                 entities = self.entities_on_layer(layer)
                 source_counts[role] += len(entities)
@@ -241,6 +288,22 @@ class DXFImporter:
                     debug,
                     source_geometry,
                 )
+                role_group_count += len(groups)
+                excluded_handles = excluded_handles_by_role.get(role, set())
+                if excluded_handles:
+                    active_groups = []
+                    for group in groups:
+                        group_handles = {
+                            str(handle).strip().upper()
+                            for handle in group.handles
+                            if str(handle).strip()
+                        }
+                        if group_handles.intersection(excluded_handles):
+                            excluded_group_count += 1
+                            continue
+                        active_groups.append(group)
+                    groups = active_groups
+                active_group_count += len(groups)
                 ignored_text = sum(
                     item.status == "ignored"
                     and item.entity_type in self.TEXT_TYPES
@@ -358,7 +421,12 @@ class DXFImporter:
             deduplicated, duplicate_messages = _deduplicate_candidates(role_candidates, role, tolerances)
             messages.extend(duplicate_messages)
             candidates_by_role[role] = deduplicated
-            if layers and not deduplicated:
+            all_geometry_explicitly_excluded = bool(
+                role_group_count
+                and not active_group_count
+                and excluded_group_count == role_group_count
+            )
+            if layers and not deduplicated and not all_geometry_explicitly_excluded:
                 messages.append(ValidationMessage("critical", f"{role.upper()}_RECOGNITION_FAILED", f"{role} 圖層沒有可匯入的工程構件。", role))
 
         # Preview-only roles retain source geometry while intentionally bypassing
@@ -416,6 +484,10 @@ class DXFImporter:
             )
         )
         struts, braces, connection_messages = connect_components_to_walers(struts, braces, walers, tolerances)
+        double_support_candidates = detect_double_support_candidates(
+            struts,
+            tolerances,
+        )
         (
             struts,
             columns,
@@ -427,15 +499,12 @@ class DXFImporter:
             columns,
             beams,
             tolerances,
+            double_support_candidates=double_support_candidates,
         )
         struts = attach_corner_braces_to_struts(
             struts,
             walers,
             corner_braces,
-            tolerances,
-        )
-        double_support_candidates = detect_double_support_candidates(
-            struts,
             tolerances,
         )
         messages.extend(connection_messages)
@@ -466,8 +535,16 @@ class DXFImporter:
                 crossing for beam in beams for crossing in beam.crossings
             ),
             double_support_candidates=double_support_candidates,
+            source_fingerprint=self.source_fingerprint,
+            excluded_sources=normalized_exclusions,
+        )
+        world_result = recognize_result_material_specs(
+            world_result,
+            material_specs,
+            tolerance_mm=tolerances.material_width_tolerance_mm,
         )
         world_result = build_candidate_points(world_result, tolerances)
+        world_result = initialize_waler_contact_review(world_result, tolerances)
         return apply_coordinate_system(
             world_result,
             coordinate_system or CoordinateSystem(),
@@ -703,17 +780,17 @@ class DXFImporter:
             if entity_type == "LINE":
                 points = [_point(entity.dxf.start), _point(entity.dxf.end)]
             elif entity_type == "LWPOLYLINE":
-                points = [(float(x), float(y)) for x, y in entity.get_points("xy")]
+                points = _lwpolyline_world_vertices(entity)
                 closed = bool(entity.closed)
             elif entity_type == "POLYLINE":
-                points = [_point(vertex.dxf.location) for vertex in entity.vertices]
+                points = _polyline_world_vertices(entity)
                 closed = bool(entity.is_closed)
             elif entity_type == "MLINE":
                 points, source_width = _mline_center_path(entity)
                 is_closed = getattr(entity, "is_closed", False)
                 closed = bool(is_closed() if callable(is_closed) else is_closed)
             elif entity_type in {"SOLID", "TRACE"}:
-                points = [_point(getattr(entity.dxf, f"vtx{index}")) for index in range(4)]
+                points = _solid_trace_world_vertices(entity)
                 closed = True
             else:
                 debug.append(EntityDebugInfo(group.role, group.layer, entity_type, root_handle, "unsupported", "info", block_instance=block_name, detail="非直線工程幾何，已略過。"))
@@ -1004,6 +1081,8 @@ def import_dxf(
     endpoint_tolerance: float | None = None,
     tolerances: GeometryTolerances | None = None,
     coordinate_system: CoordinateSystem | None = None,
+    material_specs: Sequence[Mapping[str, Any]] = (),
+    excluded_sources: Sequence[ExcludedSource | Mapping[str, Any]] = (),
 ) -> DXFImportResult:
     return DXFImporter(file_path, tolerances=tolerances).read().convert(
         strut_layer=strut_layer,
@@ -1012,10 +1091,12 @@ def import_dxf(
         layer_roles=layer_roles,
         endpoint_tolerance=endpoint_tolerance,
         coordinate_system=coordinate_system,
+        material_specs=material_specs,
+        excluded_sources=excluded_sources,
     )
 
 
-DEFAULT_LAYER_MAPPING = {
+Y1A_LAYER_MAPPING = {
     "L-SITE-WALL": "連續壁",
     "ES-圍令L1H350x350": "圍令",
     "ES-LH350x350": "支撐",
@@ -1026,3 +1107,32 @@ DEFAULT_LAYER_MAPPING = {
     "DIM-軸線U": "輔助線",
     "DIM-軸線X": "輔助線",
 }
+
+Y29_LAYER_MAPPING = {
+    "圍令": "圍令",
+    "支撐": "支撐",
+    "斜撐": "斜撐",
+    "細線": "連續壁",
+    "s": "中間柱",
+    "S-GRID": "輔助線",
+    "S-GRID-IDEN": "輔助線",
+    "壓梁": "托梁",
+    "壓樑": "托梁",
+    "角撐": "角撐",
+}
+
+# Backwards-compatible name for the original Y1A defaults.  The import dialog
+# uses default_layer_mapping_for_file() so these defaults never leak to an
+# unrelated DXF merely because it contains the same layer name.
+DEFAULT_LAYER_MAPPING = Y1A_LAYER_MAPPING
+
+LAYER_MAPPING_BY_FILENAME = {
+    "y1a擋土支撐簡化版.dxf": Y1A_LAYER_MAPPING,
+    "y29_test.dxf": Y29_LAYER_MAPPING,
+}
+
+
+def default_layer_mapping_for_file(file_path: str | Path) -> Mapping[str, str]:
+    """Return exact filename-scoped layer defaults, or no defaults."""
+
+    return LAYER_MAPPING_BY_FILENAME.get(Path(file_path).name.casefold(), {})

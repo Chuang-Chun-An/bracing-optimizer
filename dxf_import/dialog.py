@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
 from collections import Counter
-from dataclasses import replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -16,10 +17,11 @@ from .candidate_points import (
     CandidatePointStore,
     add_cad_candidate_points,
     apply_candidate_point_selection,
+    rebuild_component_associations,
 )
 from .controllers import ImportModelController, SelectionController
 from .geometry import Point, _distance, _midpoint
-from .importer import DEFAULT_LAYER_MAPPING, DXFImporter
+from .importer import DXFImporter, default_layer_mapping_for_file
 from .models import (
     AuxiliaryComponent,
     Beam,
@@ -31,7 +33,9 @@ from .models import (
     DXFImportError,
     DXFImportResult,
     ERROR_SEVERITIES,
+    ExcludedSource,
     ProblemRecord,
+    ReviewItem,
     SelectionState,
     SourceGeometry,
     SourceText,
@@ -53,16 +57,60 @@ from .preview import (
 )
 from .validation import (
     build_problem_records,
+    build_review_items,
     build_validation_overview,
+    problem_severity_rank,
+    review_item_guidance,
     validate_candidate_point_pair,
 )
-from .support_pairing import set_double_support_candidate_accepted
+from .support_pairing import (
+    DoubleSupportSourceIdentity,
+    apply_double_support_decisions,
+    double_support_candidate_identity,
+    double_support_decisions_from_review_state,
+    preserve_double_support_result_decisions,
+    serialize_double_support_decisions,
+    set_double_support_candidate_accepted,
+)
+from .material_recognition import (
+    material_spec_options,
+)
+from .waler_contact_adjustment import (
+    WalerContactAdjustmentPlan,
+    format_adjustment_plan,
+)
+from .source_exclusion import (
+    ManualReplayReport,
+    canonical_source_identity,
+    capture_manual_overrides,
+    excluded_source_from_review_item,
+    exclusions_from_review_state,
+    manual_overrides_from_review_state,
+    normalize_excluded_sources,
+    normalize_source_handles,
+    replay_manual_overrides,
+    result_member_counts,
+    result_severity_counts,
+    review_state_matches_source,
+    shared_handle_conflicts,
+)
 from window_layout import (
     WorkArea,
     _active_monitor_work_areas,
     _parse_window_geometry,
     fit_window_geometry_to_work_areas,
 )
+
+
+@dataclass(frozen=True)
+class DXFImportDialogOutcome:
+    """Explicit boundary between pausing review and completing an import."""
+
+    action: str
+    review_state: dict[str, Any]
+    import_mode: str
+    result: DXFImportResult | None = None
+    world_result: DXFImportResult | None = None
 
 
 class DXFImportDialog:
@@ -123,11 +171,46 @@ class DXFImportDialog:
         cls,
         layer: str,
         saved_classification: Mapping[str, Any],
+        default_mapping: Mapping[str, str] | None = None,
     ) -> str:
         if layer in saved_classification:
             saved_role = str(saved_classification[layer])
             return cls.ROLE_TO_USE.get(saved_role, "忽略")
-        return DEFAULT_LAYER_MAPPING.get(layer, "忽略")
+        return (default_mapping or {}).get(layer, "忽略")
+
+    @staticmethod
+    def _saved_classification_matches_file(
+        file_path: str | Path,
+        initial_state: Mapping[str, Any],
+    ) -> bool:
+        saved_path = str(initial_state.get("source_path", "") or "").strip()
+        if not saved_path:
+            return True
+        saved_name = saved_path.replace("\\", "/").rsplit("/", 1)[-1]
+        current_name = str(file_path).replace("\\", "/").rsplit("/", 1)[-1]
+        return saved_name.casefold() == current_name.casefold()
+
+    @staticmethod
+    def _coordinate_system_from_review_state(
+        state: Mapping[str, Any] | None,
+    ) -> CoordinateSystem:
+        if not isinstance(state, Mapping):
+            return CoordinateSystem()
+        raw = state.get("coordinate_system")
+        if not isinstance(raw, Mapping):
+            return CoordinateSystem()
+        mode = str(raw.get("mode", "world") or "world").strip().lower()
+        try:
+            return CoordinateSystem(
+                mode=mode,
+                origin_x=float(raw.get("origin_x", 0.0) or 0.0),
+                origin_y=float(raw.get("origin_y", 0.0) or 0.0),
+                source=str(raw.get("source", "cad_world") or "cad_world"),
+            )
+        except (TypeError, ValueError) as exc:
+            raise DXFImportError(
+                "保存的 DXF Review 座標設定格式錯誤，無法繼續。"
+            ) from exc
 
     @staticmethod
     def _ui_state_path() -> Path:
@@ -166,6 +249,11 @@ class DXFImportDialog:
         file_path: str | Path,
         initial_state: Mapping[str, Any] | None = None,
         cad_event_watcher: Any = None,
+        material_specs: Sequence[Mapping[str, Any]] = (),
+        restore_saved_layer_classification: bool | None = None,
+        resume_review: bool = False,
+        initial_world_result: DXFImportResult | None = None,
+        allow_pause: bool = True,
     ):
         import tkinter as tk
         from tkinter import scrolledtext, ttk
@@ -178,24 +266,104 @@ class DXFImportDialog:
         self.tk = tk
         self.ttk = ttk
         self.file_path = Path(file_path)
+        self.default_layer_mapping = default_layer_mapping_for_file(self.file_path)
         self.initial_state = dict(initial_state or {})
+        self.restore_saved_layer_classification = (
+            self._saved_classification_matches_file(
+                self.file_path,
+                self.initial_state,
+            )
+            if restore_saved_layer_classification is None
+            else bool(restore_saved_layer_classification)
+        )
+        self.material_specs = tuple(
+            dict(row) for row in material_specs if isinstance(row, Mapping)
+        )
         self.ui_state = self._load_ui_state()
         self.cad_event_watcher = cad_event_watcher or TempEventWatcher(
             DEFAULT_TEMP_PATH
         )
         self.importer = DXFImporter(file_path).read()
+        self.resume_review = bool(resume_review)
+        self.allow_pause = bool(allow_pause)
+        self._initial_state_matches_source = review_state_matches_source(
+            self.initial_state,
+            self.importer.source_fingerprint,
+            self.file_path,
+        )
+        if self.resume_review and not self._initial_state_matches_source:
+            raise DXFImportError(
+                "此專案保存的 DXF Review 使用的是不同版本的 DXF。"
+                "為避免人工修正套用到錯誤來源，目前無法直接繼續此 Review。"
+            )
+        restore_decision = exclusions_from_review_state(
+            self.initial_state,
+            self.importer.source_fingerprint,
+        )
+        self.excluded_sources: tuple[ExcludedSource, ...] = (
+            restore_decision.excluded_sources
+        )
+        self.exclusion_fingerprint_mismatch = (
+            restore_decision.fingerprint_mismatch
+        )
+        self._exclusion_fingerprint_notice_shown = False
         self.result: DXFImportResult | None = None
-        self.world_result: DXFImportResult | None = None
+        self.world_result: DXFImportResult | None = (
+            initial_world_result
+            if (
+                initial_world_result is not None
+                and str(initial_world_result.source_fingerprint).strip().upper()
+                == str(self.importer.source_fingerprint).strip().upper()
+            )
+            else None
+        )
+        self.dialog_action = ""
+        self.review_state: dict[str, Any] = {}
+        self.double_support_decisions: dict[
+            DoubleSupportSourceIdentity,
+            bool,
+        ] = (
+            double_support_decisions_from_review_state(self.initial_state)
+            if self._initial_state_matches_source
+            else {}
+        )
+        self.waler_adjustment_preview_plan: WalerContactAdjustmentPlan | None = None
+        self._waler_adjustment_overlay_items: list[int] = []
+        self._contact_panel_waler_id = ""
         self.coordinate_valid = False
-        self.selected_origin_world: Point | None = None
-        self.import_mode = "replace"
+        saved_coordinate = self._coordinate_system_from_review_state(
+            self.initial_state
+            if self._initial_state_matches_source
+            else None
+        )
+        self.selected_origin_world: Point | None = (
+            (saved_coordinate.origin_x, saved_coordinate.origin_y)
+            if saved_coordinate.mode == "local"
+            else None
+        )
+        saved_import_mode = str(
+            self.initial_state.get("import_mode", "replace")
+            if self._initial_state_matches_source
+            else "replace"
+        ).strip().lower()
+        self.import_mode = (
+            saved_import_mode
+            if saved_import_mode in {"replace", "append"}
+            else "replace"
+        )
         self.problem_records: tuple[ProblemRecord, ...] = ()
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.selected_problem: ProblemRecord | None = None
+        self.review_items: tuple[ReviewItem, ...] = ()
+        self.review_item_by_key: dict[str, ReviewItem] = {}
+        self.review_item_by_tree_iid: dict[str, str] = {}
+        self.selected_review_item_key = ""
+        self.detail_problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.focus_member_ids: set[str] = set()
         self.focus_handles: set[str] = set()
         self.selection_state = SelectionState()
         self.member_by_tree_iid: dict[str, str] = {}
+        self.member_tree_iid_by_member_id: dict[str, str] = {}
         self._updating_member_tree = False
         self.preview_viewport = CADViewport()
         self.preview_view_bounds: tuple[float, float, float, float] | None = None
@@ -240,7 +408,7 @@ class DXFImportDialog:
         )
         self.window.minsize(920, 680)
         self.window.resizable(True, True)
-        self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.window.protocol("WM_DELETE_WINDOW", self._close_dialog)
         self.window.bind("<Configure>", self._on_main_window_configure)
         self.window.bind("<Escape>", self._cancel_active_pick)
         self.performance_diagnostics = PerformanceDiagnostics()
@@ -370,9 +538,13 @@ class DXFImportDialog:
         saved_classification = self.initial_state.get("layer_classification", {})
         if not isinstance(saved_classification, Mapping):
             saved_classification = {}
+        if not self.restore_saved_layer_classification:
+            saved_classification = {}
         if not saved_classification:
             assignments = self.initial_state.get("layer_assignments", ())
-            if isinstance(assignments, Sequence) and not isinstance(
+            if self.restore_saved_layer_classification and isinstance(
+                assignments, Sequence
+            ) and not isinstance(
                 assignments,
                 (str, bytes),
             ):
@@ -399,7 +571,11 @@ class DXFImportDialog:
                 text=str(layer_counts.get(layer, 0)),
             ).grid(row=row, column=1, padx=8, pady=2, sticky="e")
             variable = tk.StringVar(
-                value=self._initial_layer_use(layer, saved_classification)
+                value=self._initial_layer_use(
+                    layer,
+                    saved_classification,
+                    self.default_layer_mapping,
+                )
             )
             combo = ttk.Combobox(
                 classification_rows,
@@ -416,7 +592,7 @@ class DXFImportDialog:
 
         action_row = ttk.Frame(controls)
         action_row.pack(fill="x", padx=8, pady=(0, 7))
-        self.mode_var = tk.StringVar(value="replace")
+        self.mode_var = tk.StringVar(value=self.import_mode)
         ttk.Radiobutton(action_row, text="取代目前工程模型", variable=self.mode_var, value="replace").pack(side="left")
         ttk.Radiobutton(action_row, text="附加到目前工程模型", variable=self.mode_var, value="append").pack(side="left", padx=12)
         self.recognize_button = ttk.Button(
@@ -444,8 +620,13 @@ class DXFImportDialog:
         self.status_var = tk.StringVar(value="")
         self.status_label = ttk.Label(footer, textvariable=self.status_var)
         self.status_label.pack(side="left", fill="x", expand=True)
-        ttk.Button(footer, text="取消", command=self._cancel).pack(side="right", padx=(6, 0))
-        self.apply_button = ttk.Button(footer, text="STEP8 匯入工程模型", command=self._apply)
+        pause_text = "返回主畫面" if self.allow_pause else "取消"
+        pause_command = self._pause if self.allow_pause else self._cancel
+        ttk.Button(footer, text=pause_text, command=pause_command).pack(
+            side="right",
+            padx=(6, 0),
+        )
+        self.apply_button = ttk.Button(footer, text="完成匯入", command=self._apply)
         self.apply_button.pack(side="right")
         self.apply_button.configure(state="disabled", text="不可匯入")
         self.status_var.set("請先完成圖層用途分類，再按下「開始辨識」。")
@@ -453,6 +634,13 @@ class DXFImportDialog:
         if bool(self.ui_state.get("main_maximized", False)):
             self.window.after_idle(lambda: self._set_maximized(True))
         self.window.after_idle(self._open_preview_window)
+        if self.exclusion_fingerprint_mismatch:
+            self.window.after_idle(self._show_exclusion_fingerprint_notice)
+        if self.resume_review:
+            if self.world_result is not None:
+                self.window.after_idle(self._restore_memory_review)
+            else:
+                self.window.after_idle(self._convert_preview)
 
     def _is_maximized(self) -> bool:
         try:
@@ -586,7 +774,7 @@ class DXFImportDialog:
     def _build_engineering_review(self, parent: Any) -> None:
         body = self.ttk.Panedwindow(parent, orient="horizontal")
 
-        member_frame = self.ttk.LabelFrame(body, text="STEP3 構件清單")
+        member_frame = self.ttk.LabelFrame(body, text="STEP3 工程檢核項目")
         self.member_tree = self.ttk.Treeview(
             member_frame,
             show="tree",
@@ -599,6 +787,12 @@ class DXFImportDialog:
             command=self.member_tree.yview,
         )
         self.member_tree.configure(yscrollcommand=member_scroll.set)
+        for level in ("info", "warning", "error", "critical"):
+            self.member_tree.tag_configure(
+                level,
+                foreground=self.LEVEL_COLORS[level],
+            )
+        self.member_tree.tag_configure("excluded", foreground="#78909c")
         self.member_tree.pack(side="left", fill="both", expand=True)
         member_scroll.pack(side="right", fill="y")
         self.member_tree.bind("<<TreeviewSelect>>", self._on_member_selected)
@@ -607,15 +801,21 @@ class DXFImportDialog:
             self.window.after_idle,
         )
 
-        detail_frame = self.ttk.LabelFrame(body, text="STEP4 人工確認與修正")
+        detail_frame = self.ttk.LabelFrame(
+            body,
+            text="STEP4 項目明細、問題與既有調整",
+        )
         self.member_info_vars = {
             key: self.tk.StringVar(value="—")
             for key in (
                 "id",
+                "status",
                 "role",
                 "layer",
                 "entities",
                 "method",
+                "reason",
+                "source_width",
                 "start_x",
                 "start_y",
                 "end_x",
@@ -624,10 +824,13 @@ class DXFImportDialog:
         }
         info_rows = (
             ("構件編號", "id"),
+            ("狀態", "status"),
             ("構件類型", "role"),
             ("來源圖層", "layer"),
             ("來源 DXF 圖元", "entities"),
             ("辨識方法", "method"),
+            ("排除原因", "reason"),
+            ("圖面寬度 (mm)", "source_width"),
             ("StartX", "start_x"),
             ("StartY", "start_y"),
             ("EndX", "end_x"),
@@ -649,6 +852,254 @@ class DXFImportDialog:
             ).grid(row=row, column=1, padx=(0, 8), pady=2, sticky="nw")
 
         detail_frame.columnconfigure(1, weight=1)
+
+        material_row = len(info_rows)
+        self.material_spec_frame = self.ttk.LabelFrame(
+            detail_frame,
+            text="材料規格確認",
+        )
+        self.material_spec_frame.grid(
+            row=material_row + 1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8,
+            pady=(8, 2),
+        )
+        self.material_spec_var = self.tk.StringVar(value="")
+        self.material_spec_status_var = self.tk.StringVar(value="")
+        self.ttk.Label(self.material_spec_frame, text="材料規格：").grid(
+            row=0, column=0, sticky="w", padx=(6, 4), pady=5
+        )
+        self.material_spec_combo = self.ttk.Combobox(
+            self.material_spec_frame,
+            textvariable=self.material_spec_var,
+            state="readonly",
+        )
+        self.material_spec_combo.grid(
+            row=0, column=1, sticky="ew", padx=(0, 6), pady=5
+        )
+        self.material_spec_combo.bind(
+            "<<ComboboxSelected>>", self._on_material_spec_selected
+        )
+        self.ttk.Label(
+            self.material_spec_frame,
+            textvariable=self.material_spec_status_var,
+            foreground="#455a64",
+            wraplength=300,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 5))
+        self.material_spec_frame.columnconfigure(1, weight=1)
+        self.material_spec_frame.grid_remove()
+
+        self.waler_contact_frame = self.ttk.LabelFrame(
+            detail_frame,
+            text="Waler 接觸位置調整",
+        )
+        self.waler_contact_frame.grid(
+            row=material_row + 2,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8,
+            pady=(8, 6),
+        )
+        self.waler_contact_title_var = self.tk.StringVar(value="")
+        self.waler_contact_displacement_var = self.tk.StringVar(
+            value="接觸位置調整：—"
+        )
+        self.waler_contact_impact_var = self.tk.StringVar(value="影響：—")
+        self.waler_contact_status_var = self.tk.StringVar(value="")
+        self.waler_contact_value_vars = {
+            "original_backfill_mm": self.tk.StringVar(value=""),
+            "adopted_backfill_mm": self.tk.StringVar(value=""),
+            "original_waler_width_mm": self.tk.StringVar(value=""),
+            "adopted_waler_width_mm": self.tk.StringVar(value=""),
+        }
+        self.ttk.Label(
+            self.waler_contact_frame,
+            textvariable=self.waler_contact_title_var,
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(5, 2))
+        self.ttk.Label(self.waler_contact_frame, text="").grid(row=1, column=0)
+        self.ttk.Label(self.waler_contact_frame, text="圖面值").grid(row=1, column=1)
+        self.ttk.Label(self.waler_contact_frame, text="採用值").grid(row=1, column=2)
+        for row, (label, original_key, adopted_key) in enumerate(
+            (
+                (
+                    "背填厚度 (mm)",
+                    "original_backfill_mm",
+                    "adopted_backfill_mm",
+                ),
+                (
+                    "圍令寬度 (mm)",
+                    "original_waler_width_mm",
+                    "adopted_waler_width_mm",
+                ),
+            ),
+            start=2,
+        ):
+            self.ttk.Label(self.waler_contact_frame, text=label).grid(
+                row=row, column=0, sticky="w", padx=6, pady=2
+            )
+            for column, key in ((1, original_key), (2, adopted_key)):
+                entry = self.ttk.Entry(
+                    self.waler_contact_frame,
+                    textvariable=self.waler_contact_value_vars[key],
+                    width=12,
+                )
+                entry.grid(row=row, column=column, sticky="ew", padx=4, pady=2)
+                entry.bind("<KeyRelease>", self._on_waler_contact_value_changed)
+        self.ttk.Separator(self.waler_contact_frame).grid(
+            row=4, column=0, columnspan=3, sticky="ew", padx=6, pady=5
+        )
+        self.ttk.Label(
+            self.waler_contact_frame,
+            textvariable=self.waler_contact_displacement_var,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+        self.ttk.Label(
+            self.waler_contact_frame,
+            textvariable=self.waler_contact_impact_var,
+            wraplength=300,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", padx=6, pady=2)
+        action = self.ttk.Frame(self.waler_contact_frame)
+        action.grid(row=7, column=0, columnspan=3, sticky="ew", padx=6, pady=4)
+        self.ttk.Button(
+            action,
+            text="預覽影響",
+            command=self._preview_waler_contact_adjustment,
+        ).pack(side="left")
+        self.waler_contact_apply_button = self.ttk.Button(
+            action,
+            text="套用",
+            command=self._apply_waler_contact_adjustment,
+            state="disabled",
+        )
+        self.waler_contact_apply_button.pack(side="right")
+        self.ttk.Label(
+            self.waler_contact_frame,
+            textvariable=self.waler_contact_status_var,
+            foreground="#9a6700",
+            wraplength=300,
+            justify="left",
+        ).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 5))
+        self.waler_contact_frame.columnconfigure(1, weight=1)
+        self.waler_contact_frame.columnconfigure(2, weight=1)
+        self.waler_contact_frame.grid_remove()
+
+        self.review_issue_frame = self.ttk.LabelFrame(
+            detail_frame,
+            text="此項目問題與建議處理方式",
+        )
+        self.review_issue_frame.grid(
+            row=material_row,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=8,
+            pady=(8, 2),
+        )
+        self.detail_problem_tree = self.ttk.Treeview(
+            self.review_issue_frame,
+            columns=("severity", "code", "description"),
+            show="headings",
+            selectmode="browse",
+            height=5,
+        )
+        for column, title, width, anchor in (
+            ("severity", "等級", 60, "center"),
+            ("code", "代碼", 150, "w"),
+            ("description", "說明", 280, "w"),
+        ):
+            self.detail_problem_tree.heading(column, text=title)
+            self.detail_problem_tree.column(
+                column,
+                width=width,
+                anchor=anchor,
+                stretch=column == "description",
+            )
+        for level in ("info", "warning", "error", "critical"):
+            self.detail_problem_tree.tag_configure(
+                level,
+                foreground=self.LEVEL_COLORS[level],
+            )
+        detail_problem_scroll = self.ttk.Scrollbar(
+            self.review_issue_frame,
+            orient="vertical",
+            command=self.detail_problem_tree.yview,
+        )
+        self.detail_problem_tree.configure(
+            yscrollcommand=detail_problem_scroll.set,
+        )
+        self.detail_problem_tree.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(6, 0),
+            pady=(6, 2),
+        )
+        detail_problem_scroll.grid(
+            row=0,
+            column=1,
+            sticky="ns",
+            padx=(0, 6),
+            pady=(6, 2),
+        )
+        self.detail_problem_tree.bind(
+            "<Double-Button-1>",
+            self._on_detail_problem_activated,
+        )
+        self.detail_problem_tree.bind(
+            "<Return>",
+            self._on_detail_problem_activated,
+        )
+        self.detail_problem_empty_var = self.tk.StringVar(value="請先選取檢核項目。")
+        self.ttk.Label(
+            self.review_issue_frame,
+            textvariable=self.detail_problem_empty_var,
+            foreground="#455a64",
+            wraplength=420,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(1, 3))
+        self.detail_guidance_var = self.tk.StringVar(value="")
+        self.ttk.Label(
+            self.review_issue_frame,
+            text="建議處理方式",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(3, 1))
+        self.ttk.Label(
+            self.review_issue_frame,
+            textvariable=self.detail_guidance_var,
+            foreground="#37474f",
+            wraplength=420,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        exclusion_action = self.ttk.Frame(self.review_issue_frame)
+        exclusion_action.grid(
+            row=4,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=6,
+            pady=(2, 4),
+        )
+        self.source_exclusion_button = self.ttk.Button(
+            exclusion_action,
+            text="排除此 DXF 來源",
+            command=self._on_source_exclusion_action,
+            state="disabled",
+        )
+        self.source_exclusion_button.pack(side="right")
+        self.source_exclusion_status_var = self.tk.StringVar(value="")
+        self.ttk.Label(
+            self.review_issue_frame,
+            textvariable=self.source_exclusion_status_var,
+            foreground="#795548",
+            wraplength=420,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        self.review_issue_frame.columnconfigure(0, weight=1)
 
         candidate_frame = self.ttk.LabelFrame(
             body,
@@ -1036,7 +1487,9 @@ class DXFImportDialog:
     def _build_coordinate_system_settings(self, parent: Any) -> None:
         frame = self.ttk.LabelFrame(parent, text="STEP2 座標系統狀態")
         frame.pack(fill="x", padx=10, pady=(0, 8))
-        self.coordinate_mode_var = self.tk.StringVar(value="world")
+        self.coordinate_mode_var = self.tk.StringVar(
+            value=("local" if self.selected_origin_world is not None else "world")
+        )
         self.coordinate_error_var = self.tk.StringVar(value="")
         self.coordinate_info_var = self.tk.StringVar(value="")
         self.coordinate_example_var = self.tk.StringVar(value="")
@@ -1197,12 +1650,29 @@ class DXFImportDialog:
         self.debug_text = scrolledtext.ScrolledText(self.developer_frame, wrap="none", height=12, font=("Consolas", 9))
         self.debug_text.pack(fill="both", expand=True, padx=5, pady=5)
 
-    def show(self) -> tuple[DXFImportResult, str] | None:
+    def show(self) -> DXFImportDialogOutcome | None:
         self.window.grab_set()
         self.window.wait_window()
-        return None if self.result is None else (self.result, self.import_mode)
+        if self.dialog_action not in {"pause", "complete"}:
+            return None
+        return DXFImportDialogOutcome(
+            action=self.dialog_action,
+            review_state=copy.deepcopy(self.review_state),
+            import_mode=self.import_mode,
+            result=self.result,
+            world_result=self.world_result,
+        )
+
+    def _restore_memory_review(self) -> None:
+        """Reopen a valid in-memory result without repeating recognition."""
+
+        if self.world_result is None:
+            return
+        self._apply_coordinate_settings(show_error=False)
+        self.status_var.set("已恢復尚未完成的 DXF Review。")
 
     def _convert_preview(self) -> None:
+        self._clear_waler_adjustment_preview()
         self.selection_state = SelectionState()
         self.selection_controller.state = self.selection_state
         self.preview_view_bounds = None
@@ -1217,23 +1687,91 @@ class DXFImportDialog:
             pass
         self.window.after_idle(self._perform_conversion)
 
+    def _current_layer_roles(self) -> dict[str, str]:
+        layer_roles: dict[str, str] = {}
+        for layer, variable in self.layer_use_vars.items():
+            selected_use = variable.get()
+            role = self.USE_TO_ROLE.get(selected_use)
+            if role is None:
+                raise DXFImportError(
+                    f"圖層「{layer}」使用了不支援的用途：{selected_use or '空白'}"
+                )
+            layer_roles[layer] = role
+        return layer_roles
+
+    def _recognize_staged_result(
+        self,
+        excluded_sources: Sequence[ExcludedSource],
+        manual_overrides: Sequence[Any] = (),
+        *,
+        layer_roles: Mapping[str, str] | None = None,
+    ) -> tuple[DXFImportResult, ManualReplayReport]:
+        """Build a complete WCS result without changing dialog state."""
+
+        staged = self.importer.convert(
+            layer_roles=layer_roles or self._current_layer_roles(),
+            coordinate_system=CoordinateSystem(),
+            material_specs=self.material_specs,
+            excluded_sources=excluded_sources,
+        )
+        staged, replay_report = replay_manual_overrides(
+            staged,
+            manual_overrides,
+            material_specs=self.material_specs,
+            tolerances=self.importer.tolerances,
+        )
+        candidates = staged.double_support_candidates
+        previous_result = getattr(self, "world_result", None)
+        if previous_result is not None:
+            candidates = preserve_double_support_result_decisions(
+                previous_result,
+                staged,
+            )
+        saved_double_support_decisions = getattr(
+            self,
+            "double_support_decisions",
+            {},
+        )
+        if saved_double_support_decisions:
+            decision_result = replace(
+                staged,
+                double_support_candidates=candidates,
+            )
+            candidates = apply_double_support_decisions(
+                decision_result,
+                saved_double_support_decisions,
+            )
+        if candidates != staged.double_support_candidates:
+            staged = rebuild_component_associations(
+                replace(
+                    staged,
+                    double_support_candidates=candidates,
+                ),
+                self.importer.tolerances,
+            )
+        return staged, replay_report
+
     def _perform_conversion(self) -> None:
         from tkinter import messagebox
 
         try:
-            layer_roles: dict[str, str] = {}
-            for layer, variable in self.layer_use_vars.items():
-                selected_use = variable.get()
-                role = self.USE_TO_ROLE.get(selected_use)
-                if role is None:
-                    raise DXFImportError(
-                        f"圖層「{layer}」使用了不支援的用途：{selected_use or '空白'}"
-                    )
-                layer_roles[layer] = role
-            self.world_result = self.importer.convert(
-                layer_roles=layer_roles,
-                coordinate_system=CoordinateSystem(),
+            if self.world_result is not None:
+                overrides = capture_manual_overrides(self.world_result)
+            elif review_state_matches_source(
+                self.initial_state,
+                self.importer.source_fingerprint,
+                self.file_path,
+            ):
+                overrides = manual_overrides_from_review_state(self.initial_state)
+            else:
+                overrides = ()
+            staged, replay_report = self._recognize_staged_result(
+                self.excluded_sources,
+                overrides,
             )
+            self.world_result = staged
+            self.excluded_sources = staged.excluded_sources
+            self.last_manual_replay_report = replay_report
             self._apply_coordinate_settings(show_error=False)
         except Exception as exc:
             if isinstance(exc, DXFImportError):
@@ -1347,14 +1885,32 @@ class DXFImportDialog:
     ) -> None:
         if self.result is None:
             return
+        previous_review_key = self.selected_review_item_key
         self.candidate_point_store.rebuild(self._all_members())
         if self.selected_member_id and self._selected_member() is None:
             self.selection_state = SelectionState()
             self.selection_controller.state = self.selection_state
         self.problem_records = build_problem_records(self.result)
+        self.review_items = build_review_items(self.result, self.problem_records)
+        self.review_item_by_key = {item.key: item for item in self.review_items}
+        selected_member_item = self._review_item_for_member_id(
+            self.selected_member_id
+        )
+        if selected_member_item is not None:
+            self.selected_review_item_key = selected_member_item.key
+        elif previous_review_key in self.review_item_by_key:
+            self.selected_review_item_key = previous_review_key
+        else:
+            self.selected_review_item_key = ""
         self.selected_problem = None
         self.focus_member_ids.clear()
         self.focus_handles.clear()
+        selected_review_item = self._selected_review_item()
+        if (
+            selected_review_item is not None
+            and selected_review_item.status in {"unresolved", "excluded"}
+        ):
+            self.focus_handles.update(selected_review_item.source_handles)
         self._update_summary()
         self._update_validation_overview()
         self._refresh_problem_tree()
@@ -1512,17 +2068,42 @@ class DXFImportDialog:
             candidate_id,
             not candidate.accepted,
         )
-        self.result = replace(
-            self.result,
-            double_support_candidates=updated,
-        )
+        identity_result = self.world_result or self.result
+        if not hasattr(self, "double_support_decisions"):
+            self.double_support_decisions = {}
+        previous_by_id = {
+            item.id: item for item in self.result.double_support_candidates
+        }
+        for item in updated:
+            previous = previous_by_id.get(item.id)
+            if previous is None or previous.accepted == item.accepted:
+                continue
+            identity = double_support_candidate_identity(identity_result, item)
+            if identity is not None:
+                self.double_support_decisions[identity] = item.accepted
         if self.world_result is not None:
-            self.world_result = replace(
+            coordinate_system = self.result.coordinate_system
+            self.world_result = rebuild_component_associations(
+                replace(
+                    self.world_result,
+                    double_support_candidates=updated,
+                ),
+                self.importer.tolerances,
+            )
+            self.result = apply_coordinate_system(
                 self.world_result,
-                double_support_candidates=updated,
+                coordinate_system,
+            )
+        else:
+            self.result = rebuild_component_associations(
+                replace(
+                    self.result,
+                    double_support_candidates=updated,
+                ),
+                self.importer.tolerances,
             )
         self._refresh_result_views(
-            preview_dirty=RenderDirty.NONE,
+            preview_dirty=RenderDirty.FULL_SCENE,
             rebuild_candidate_tree=False,
         )
         if self.double_support_tree.exists(candidate_id):
@@ -1596,20 +2177,39 @@ class DXFImportDialog:
         record = self.problem_record_by_iid.get(selection[0])
         if record is None:
             return
+        self._focus_problem_record(record)
+        if self.selected_only_var.get():
+            self._refresh_problem_tree()
+
+    def _on_detail_problem_activated(self, _event: Any = None) -> None:
+        selection = self.detail_problem_tree.selection()
+        if not selection:
+            return
+        record = self.detail_problem_record_by_iid.get(selection[0])
+        if record is not None:
+            self._focus_problem_record(record)
+
+    def _focus_problem_record(self, record: ProblemRecord) -> None:
+        """Apply the shared STEP4/STEP7 preview-focus behavior."""
+
         self.selected_problem = record
         self.focus_member_ids = set(record.member_ids)
         self.focus_handles = set(record.source_handles)
         if record.member_ids:
+            selected_member_id = self.selected_member_id
+            target_member_id = (
+                selected_member_id
+                if selected_member_id in record.member_ids
+                else record.member_ids[0]
+            )
             self._select_member(
-                record.member_ids[0],
+                target_member_id,
                 refit=True,
                 clear_problem=False,
                 source="error_list",
             )
         self.preview_view_bounds = None
         self.preview_fit_all = False
-        if self.selected_only_var.get():
-            self._refresh_problem_tree()
         self._open_preview_window()
         self.render_scheduler.request(RenderDirty.FULL_SCENE)
 
@@ -1628,10 +2228,10 @@ class DXFImportDialog:
             self.apply_button.configure(state="disabled", text="不可匯入")
             self.status_var.set(f"✗ 發現 {error_count} 項阻擋錯誤，請先修正問題列表中的 Error／Critical。")
         elif counts["warning"]:
-            self.apply_button.configure(state="normal", text="仍要匯入")
+            self.apply_button.configure(state="normal", text="仍要完成匯入")
             self.status_var.set(f"⚠ 目前有 {counts['warning']} 項警告；建議先修正警告後再匯入。")
         else:
-            self.apply_button.configure(state="normal", text="匯入工程模型")
+            self.apply_button.configure(state="normal", text="完成匯入")
             self.status_var.set("✓ 圖層與工程模型檢核通過，可以匯入 Solver。")
 
     def _toggle_developer_mode(self) -> None:
@@ -1661,6 +2261,264 @@ class DXFImportDialog:
         self,
     ) -> Waler | Strut | Brace | AuxiliaryComponent | None:
         return self._member_by_id(self.selected_member_id)
+
+    def _review_item_for_member_id(self, member_id: str) -> ReviewItem | None:
+        if not member_id:
+            return None
+        return next(
+            (
+                item
+                for item in getattr(self, "review_items", ())
+                if item.member_id == member_id
+            ),
+            None,
+        )
+
+    def _selected_review_item(self) -> ReviewItem | None:
+        item = getattr(self, "review_item_by_key", {}).get(
+            getattr(self, "selected_review_item_key", "")
+        )
+        if item is not None:
+            return item
+        return self._review_item_for_member_id(self.selected_member_id)
+
+    def _excluded_source_for_review_item(
+        self,
+        item: ReviewItem,
+    ) -> ExcludedSource | None:
+        identity = canonical_source_identity(item.role, item.source_handles)
+        return next(
+            (
+                source
+                for source in self.excluded_sources
+                if source.identity == identity
+            ),
+            None,
+        )
+
+    def _source_exclusion_disabled_reason(self, item: ReviewItem | None) -> str:
+        if item is None:
+            return "請先選取 Formal、待修或已排除來源。"
+        if not item.role or not normalize_source_handles(item.source_handles):
+            return "此項目沒有可安全識別的 DXF 來源，無法使用來源排除。"
+        if item.status == "excluded":
+            return ""
+        conflicts = shared_handle_conflicts(item, self.review_items)
+        if not conflicts:
+            return ""
+        details = "；".join(
+            f"Handle {conflict.handle} 同時由 {', '.join(conflict.owner_labels)} 使用"
+            for conflict in conflicts
+        )
+        return f"此來源有共用 Handle，不能安全單獨排除：{details}。"
+
+    @staticmethod
+    def _source_geometry_signature(result: DXFImportResult) -> tuple[Any, ...]:
+        return tuple(
+            (
+                geometry.role,
+                geometry.source_handle,
+                geometry.points,
+                geometry.closed,
+                geometry.source_layer,
+                geometry.source_entity_type,
+            )
+            for geometry in result.source_geometry
+        )
+
+    def _stage_source_exclusion_change(
+        self,
+        candidate_exclusions: Sequence[ExcludedSource],
+    ) -> dict[str, Any]:
+        if self.world_result is None or self.result is None:
+            raise DXFImportError("請先完成 DXF 辨識。")
+        normalized = normalize_excluded_sources(candidate_exclusions)
+        overrides = [*capture_manual_overrides(self.world_result)]
+        overrides.extend(
+            source.manual_override
+            for source in self.excluded_sources
+            if source.manual_override is not None
+        )
+        overrides.extend(
+            source.manual_override
+            for source in normalized
+            if source.manual_override is not None
+        )
+        staged_world, replay_report = self._recognize_staged_result(
+            normalized,
+            overrides,
+            layer_roles=self.world_result.layer_classification,
+        )
+        if staged_world.source_fingerprint != self.world_result.source_fingerprint:
+            raise DXFImportError("Staging 的 DXF source fingerprint 不一致。")
+        if self._source_geometry_signature(staged_world) != self._source_geometry_signature(
+            self.world_result
+        ):
+            raise DXFImportError("Staging 未完整保留原始 DXF source geometry。")
+        staged_result = apply_coordinate_system(
+            staged_world,
+            self.result.coordinate_system,
+        )
+        staged_records = build_problem_records(staged_result)
+        staged_review_items = build_review_items(staged_result, staged_records)
+        return {
+            "excluded_sources": normalized,
+            "world_result": staged_world,
+            "result": staged_result,
+            "problem_records": staged_records,
+            "review_items": staged_review_items,
+            "manual_replay": replay_report,
+        }
+
+    @staticmethod
+    def _review_item_identity(item: ReviewItem) -> str:
+        return canonical_source_identity(item.role, item.source_handles)
+
+    def _stage_review_item_for_identity(
+        self,
+        stage: Mapping[str, Any],
+        identity: str,
+        *,
+        excluded: bool,
+    ) -> ReviewItem | None:
+        return next(
+            (
+                item
+                for item in stage.get("review_items", ())
+                if self._review_item_identity(item) == identity
+                and (item.status == "excluded") == excluded
+            ),
+            None,
+        )
+
+    def _format_source_exclusion_impact(
+        self,
+        item: ReviewItem,
+        stage: Mapping[str, Any],
+        *,
+        restoring: bool,
+    ) -> str:
+        assert self.result is not None
+        staged_result = stage["result"]
+        before_members = sum(result_member_counts(self.result).values())
+        after_members = sum(result_member_counts(staged_result).values())
+        before_severity = result_severity_counts(self.result)
+        after_severity = result_severity_counts(staged_result)
+        warning_delta = after_severity.get("warning", 0) - before_severity.get(
+            "warning", 0
+        )
+        error_delta = (
+            after_severity.get("error", 0)
+            + after_severity.get("critical", 0)
+            - before_severity.get("error", 0)
+            - before_severity.get("critical", 0)
+        )
+        replay: ManualReplayReport = stage["manual_replay"]
+        verb = "復原" if restoring else "排除"
+        lines = [
+            f"將{verb}：{item.display_id}",
+            "來源 Handle：" + ", ".join(normalize_source_handles(item.source_handles)),
+            "",
+            "此操作不會修改或刪除原始 DXF entity。",
+            "",
+            "重新計算後：",
+            f"• 正式構件 {before_members} → {after_members}（{after_members - before_members:+d}）",
+            f"• Warning 變化：{warning_delta:+d}",
+            f"• Error／Critical 變化：{error_delta:+d}",
+            f"• 人工輸入成功保留：{len(replay.preserved)}",
+            f"• 人工輸入需要重新確認：{len(replay.needs_review)}",
+            f"• 因來源仍被排除而停用：{len(replay.disabled)}",
+        ]
+        if replay.needs_review:
+            lines.extend(("", "需要重新確認：", *(
+                f"• {label}" for label in replay.needs_review
+            )))
+        if replay.disabled:
+            lines.extend(("", "目前停用但已保留快照：", *(
+                f"• {label}" for label in replay.disabled
+            )))
+        return "\n".join(lines)
+
+    def _commit_source_exclusion_stage(
+        self,
+        stage: Mapping[str, Any],
+        selected_key: str,
+    ) -> None:
+        self._clear_waler_adjustment_preview()
+        self.excluded_sources = tuple(stage["excluded_sources"])
+        self.world_result = stage["world_result"]
+        self.result = stage["result"]
+        self.selected_review_item_key = selected_key
+        self.selection_state = SelectionState(selection_source="component_tree")
+        self.selection_controller.state = self.selection_state
+        self.preview_view_bounds = None
+        self.preview_fit_all = False
+        self._refresh_result_views()
+
+    def _on_source_exclusion_action(self) -> None:
+        from tkinter import messagebox
+
+        item = self._selected_review_item()
+        disabled_reason = self._source_exclusion_disabled_reason(item)
+        if item is None or disabled_reason:
+            if disabled_reason:
+                messagebox.showwarning(
+                    "DXF 來源排除",
+                    disabled_reason,
+                    parent=self.window,
+                )
+            return
+        identity = self._review_item_identity(item)
+        restoring = item.status == "excluded"
+        try:
+            if restoring:
+                candidate_exclusions = tuple(
+                    source
+                    for source in self.excluded_sources
+                    if source.identity != identity
+                )
+            else:
+                candidate_exclusions = (
+                    *self.excluded_sources,
+                    excluded_source_from_review_item(item, self.world_result),
+                )
+            stage = self._stage_source_exclusion_change(candidate_exclusions)
+        except Exception as exc:
+            error_text = (
+                str(exc)
+                if isinstance(exc, DXFImportError)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            messagebox.showerror(
+                "DXF 來源排除 staging 失敗",
+                f"目前辨識結果完全未變更。\n\n{error_text}",
+                parent=self.window,
+            )
+            return
+        title = "確認復原 DXF 來源" if restoring else "確認排除 DXF 來源"
+        if not messagebox.askyesno(
+            title,
+            self._format_source_exclusion_impact(
+                item,
+                stage,
+                restoring=restoring,
+            ),
+            parent=self.window,
+        ):
+            return
+        selected = self._stage_review_item_for_identity(
+            stage,
+            identity,
+            excluded=not restoring,
+        )
+        self._commit_source_exclusion_stage(
+            stage,
+            selected.key if selected is not None else "",
+        )
+        action = "復原" if restoring else "排除"
+        self.source_exclusion_status_var.set(
+            f"已{action} {item.display_id}；工程關聯與 Validation 已重新計算。"
+        )
 
     def _member_by_id(
         self,
@@ -1728,42 +2586,122 @@ class DXFImportDialog:
         try:
             self.member_tree.delete(*self.member_tree.get_children())
             self.member_by_tree_iid.clear()
+            if not hasattr(self, "member_tree_iid_by_member_id"):
+                self.member_tree_iid_by_member_id = {}
+            self.member_tree_iid_by_member_id.clear()
+            if not hasattr(self, "review_item_by_tree_iid"):
+                self.review_item_by_tree_iid = {}
+            self.review_item_by_tree_iid.clear()
             if self.result is None:
                 return
             groups = (
-                ("waler", "圍令", self.result.walers),
-                ("strut", "支撐", self.result.struts),
-                ("brace", "斜撐", self.result.braces),
-                ("column", "中間柱", self.result.columns),
-                ("beam", "托梁", self.result.beams),
-                ("corner_brace", "角撐", self.result.corner_braces),
+                ("waler", "圍令"),
+                ("strut", "支撐"),
+                ("brace", "斜撐"),
+                ("column", "中間柱"),
+                ("beam", "托梁"),
+                ("corner_brace", "角撐"),
+                ("unknown", "未分類來源"),
             )
             selected_iid = ""
-            for role, label, members in groups:
+            for role, label in groups:
+                review_items = tuple(
+                    item
+                    for item in self.review_items
+                    if item.role == role and item.status != "excluded"
+                )
+                if not review_items:
+                    continue
                 group_iid = f"group_{role}"
                 self.member_tree.insert(
                     "",
                     "end",
                     iid=group_iid,
-                    text=f"{label}（{len(members)}）",
+                    text=self._review_group_text(label, review_items),
                     open=True,
                 )
-                for member in members:
-                    iid = f"member_{member.id}"
-                    suffix = " ＊" if member.selection_source != "auto" else ""
+                for index, item in enumerate(review_items):
+                    iid = f"review_{role}_{index}"
+                    tags = (
+                        (item.highest_severity,)
+                        if item.highest_severity != "success"
+                        else ()
+                    )
                     self.member_tree.insert(
                         group_iid,
                         "end",
                         iid=iid,
-                        text=f"{member.id}{suffix}",
+                        text=self._review_item_text(item),
+                        tags=tags,
                     )
-                    self.member_by_tree_iid[iid] = member.id
-                    if member.id == self.selected_member_id:
+                    self.review_item_by_tree_iid[iid] = item.key
+                    if item.member_id:
+                        self.member_by_tree_iid[iid] = item.member_id
+                        self.member_tree_iid_by_member_id[item.member_id] = iid
+                    if item.key == self.selected_review_item_key:
+                        selected_iid = iid
+            excluded_items = tuple(
+                item for item in self.review_items if item.status == "excluded"
+            )
+            if excluded_items:
+                group_iid = "group_excluded"
+                self.member_tree.insert(
+                    "",
+                    "end",
+                    iid=group_iid,
+                    text=f"已排除來源（{len(excluded_items)}）",
+                    open=True,
+                    tags=("excluded",),
+                )
+                for index, item in enumerate(excluded_items):
+                    iid = f"review_excluded_{index}"
+                    self.member_tree.insert(
+                        group_iid,
+                        "end",
+                        iid=iid,
+                        text=self._review_item_text(item),
+                        tags=("excluded",),
+                    )
+                    self.review_item_by_tree_iid[iid] = item.key
+                    if item.key == self.selected_review_item_key:
                         selected_iid = iid
             if selected_iid:
                 self.member_tree_selection.select(selected_iid)
         finally:
             self._updating_member_tree = False
+
+    @classmethod
+    def _review_item_text(cls, item: ReviewItem) -> str:
+        if item.status == "excluded":
+            return f"✕ {item.display_id}"
+        icon = (
+            cls.LEVEL_ICONS.get(item.highest_severity, "")
+            if item.highest_severity != "success"
+            else ""
+        )
+        manual = " ＊" if item.member_id and item.selection_source != "auto" else ""
+        problem_count = f" ({item.problem_count})" if item.problem_count else ""
+        prefix = f"{icon} " if icon else ""
+        return f"{prefix}{item.display_id}{manual}{problem_count}"
+
+    @staticmethod
+    def _review_group_text(
+        label: str,
+        items: Sequence[ReviewItem],
+    ) -> str:
+        error_count = sum(
+            item.highest_severity in ERROR_SEVERITIES for item in items
+        )
+        warning_count = sum(
+            item.highest_severity == "warning" for item in items
+        )
+        summary = []
+        if error_count:
+            summary.append(f"✗{error_count}")
+        if warning_count:
+            summary.append(f"⚠{warning_count}")
+        suffix = f"｜{' '.join(summary)}" if summary else ""
+        return f"{label}（{len(items)}）{suffix}"
 
     def _candidate_filter_accepts(self, candidate: CandidatePoint) -> bool:
         member = self._selected_member()
@@ -1861,13 +2799,23 @@ class DXFImportDialog:
         if not hasattr(self, "candidate_tree"):
             return
         member = self._selected_member()
+        review_item = self._selected_review_item()
         if member is None:
-            self.preview_selected_member_var.set("目前構件：—")
-            for variable in self.member_info_vars.values():
-                variable.set("—")
+            if (
+                review_item is not None
+                and review_item.status in {"unresolved", "excluded"}
+            ):
+                self._update_unresolved_source_panel(review_item)
+            else:
+                self.preview_selected_member_var.set("目前構件：—")
+                for variable in self.member_info_vars.values():
+                    variable.set("—")
             self.candidate_detail_var.set("候選點：—")
+            self._update_material_spec_panel(None)
+            self._update_waler_contact_panel(None)
             if rebuild_candidates:
                 self._rebuild_candidate_tree()
+            self._update_review_issue_panel(review_item)
             return
         _role, role_label = self._member_role(member)
         self.preview_selected_member_var.set(
@@ -1875,6 +2823,7 @@ class DXFImportDialog:
         )
         values = {
             "id": member.id,
+            "status": "正式構件",
             "role": role_label,
             "layer": member.source_layer,
             "entities": (
@@ -1885,6 +2834,12 @@ class DXFImportDialog:
                 f"{member.recognition_method}｜"
                 f"{self._selection_source_label(member.selection_source)}"
             ),
+            "reason": "—",
+            "source_width": (
+                f"{member.source_width:.3f}"
+                if member.source_width > 0.0
+                else "—"
+            ),
             "start_x": f"{member.start[0]:.3f}",
             "start_y": f"{member.start[1]:.3f}",
             "end_x": f"{member.end[0]:.3f}",
@@ -1892,11 +2847,331 @@ class DXFImportDialog:
         }
         for key, value in values.items():
             self.member_info_vars[key].set(value)
+        self._update_material_spec_panel(member)
+        self._update_waler_contact_panel(member)
         if rebuild_candidates:
             self._rebuild_candidate_tree()
         else:
             self._update_candidate_tree_rows()
         self._update_candidate_detail_panel()
+        self._update_review_issue_panel(review_item)
+
+    def _update_unresolved_source_panel(self, item: ReviewItem) -> None:
+        role_labels = {
+            "waler": "圍令",
+            "strut": "支撐",
+            "brace": "斜撐",
+            "column": "中間柱",
+            "beam": "托梁",
+            "corner_brace": "角撐",
+            "unknown": "未分類來源",
+        }
+        layer_text = "、".join(item.source_layers) or "—"
+        entity_text = "、".join(item.source_entity_types) or "—"
+        handle_text = ", ".join(item.source_handles) or "—"
+        self.preview_selected_member_var.set(
+            f"目前來源：{item.display_id}｜{role_labels.get(item.role, item.role or '未分類')}"
+        )
+        excluded = item.status == "excluded"
+        values = {
+            "id": item.display_id_before_exclusion or item.display_id,
+            "status": "已排除" if excluded else "待修來源",
+            "role": role_labels.get(item.role, item.role or "未分類來源"),
+            "layer": layer_text,
+            "entities": f"{entity_text}\nHandle: {handle_text}",
+            "method": (
+                "已停止參與工程辨識"
+                if excluded
+                else "尚未形成正式工程構件"
+            ),
+            "reason": item.exclusion_reason or "—",
+            "source_width": "—",
+            "start_x": "—（無 active 正式工程幾何）",
+            "start_y": "—（無 active 正式工程幾何）",
+            "end_x": "—（無 active 正式工程幾何）",
+            "end_y": "—（無 active 正式工程幾何）",
+        }
+        for key, value in values.items():
+            self.member_info_vars[key].set(value)
+
+    def _update_review_issue_panel(self, item: ReviewItem | None) -> None:
+        if not hasattr(self, "detail_problem_tree"):
+            return
+        self.detail_problem_tree.delete(
+            *self.detail_problem_tree.get_children()
+        )
+        self.detail_problem_record_by_iid.clear()
+        if item is None:
+            self.detail_problem_empty_var.set("請先選取檢核項目。")
+            self.detail_guidance_var.set("")
+            self._update_source_exclusion_action_state(None)
+            return
+        for index, record in enumerate(item.problems):
+            iid = f"detail_problem_{index}"
+            self.detail_problem_record_by_iid[iid] = record
+            self.detail_problem_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    record.severity.upper(),
+                    record.code,
+                    record.description,
+                ),
+                tags=(record.severity,),
+            )
+        if item.problems:
+            self.detail_problem_empty_var.set(
+                f"共 {item.problem_count} 項；雙擊問題或按 Enter 可在預覽中定位。"
+            )
+        else:
+            self.detail_problem_empty_var.set("✓ 此構件目前沒有檢核問題")
+        guidance = review_item_guidance(item)
+        self.detail_guidance_var.set(
+            "\n".join(f"• {text}" for text in guidance)
+            if guidance
+            else "目前不需要額外處理。"
+        )
+        self._update_source_exclusion_action_state(item)
+
+    def _update_source_exclusion_action_state(
+        self,
+        item: ReviewItem | None,
+    ) -> None:
+        button = getattr(self, "source_exclusion_button", None)
+        status_var = getattr(self, "source_exclusion_status_var", None)
+        if button is None or status_var is None:
+            return
+        reason = self._source_exclusion_disabled_reason(item)
+        restoring = item is not None and item.status == "excluded"
+        button.configure(
+            text="復原此來源" if restoring else "排除此 DXF 來源",
+            state="disabled" if reason else "normal",
+        )
+        status_var.set(reason)
+
+    @staticmethod
+    def _dimension_text(value: float | None) -> str:
+        return "" if value is None else f"{value:g}"
+
+    def _update_material_spec_panel(
+        self,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        if not hasattr(self, "material_spec_frame"):
+            return
+        if not isinstance(member, (Waler, Strut)):
+            self.material_spec_frame.grid_remove()
+            return
+        self.material_spec_frame.grid()
+        usage = "圍令" if isinstance(member, Waler) else "支撐"
+        options = material_spec_options(self.material_specs, usage)
+        self.material_spec_combo.configure(values=("", *options))
+        self.material_spec_var.set(member.material_spec)
+        if member.material_spec_source == "auto_width":
+            self.material_spec_status_var.set(
+                f"已依圖面寬度 {member.source_width:g} mm 自動辨認；可人工改選。"
+            )
+        elif member.material_spec_source == "manual":
+            self.material_spec_status_var.set("已採用 STEP4 人工選擇。")
+        elif member.source_width <= 0.0:
+            self.material_spec_status_var.set("圖面沒有可靠寬度，請人工選擇。")
+        else:
+            self.material_spec_status_var.set(
+                f"圖面寬度 {member.source_width:g} mm 無法唯一對應材料規格，請人工選擇。"
+            )
+
+    def _on_material_spec_selected(self, _event: Any = None) -> None:
+        member = self._selected_member()
+        if not isinstance(member, (Waler, Strut)) or self.world_result is None:
+            return
+        try:
+            self.world_result = self.import_model_controller.apply_material_spec(
+                self.world_result,
+                member.id,
+                self.material_spec_var.get(),
+            )
+        except DXFImportError as exc:
+            self.material_spec_status_var.set(str(exc))
+            return
+        self._apply_coordinate_settings(
+            show_error=False,
+            preview_dirty=RenderDirty.DETAIL_PANEL,
+            rebuild_candidate_tree=False,
+        )
+
+    def _update_waler_contact_panel(
+        self,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        if not hasattr(self, "waler_contact_frame"):
+            return
+        if not isinstance(member, Waler) or self.world_result is None:
+            self.waler_contact_frame.grid_remove()
+            self._contact_panel_waler_id = ""
+            self._clear_waler_adjustment_preview()
+            return
+        self.waler_contact_frame.grid()
+        self.waler_contact_title_var.set(f"{member.id}｜接觸位置調整")
+        if self._contact_panel_waler_id == member.id:
+            return
+        review = next(
+            (
+                item
+                for item in self.world_result.waler_contact_reviews
+                if item.waler_id == member.id
+            ),
+            None,
+        )
+        self._contact_panel_waler_id = member.id
+        self._clear_waler_adjustment_preview()
+        if review is None:
+            self.waler_contact_status_var.set("缺少 Waler contact review state。")
+            return
+        for key, variable in self.waler_contact_value_vars.items():
+            variable.set(self._dimension_text(getattr(review, key)))
+        if review.support_normal_world is None:
+            self.waler_contact_status_var.set(
+                "無可靠支撐側證據；可預覽問題，但不能套用。"
+            )
+        elif review.backfill_recognition_method:
+            self.waler_contact_status_var.set(
+                "背填圖面值已由連續壁內側線至圍令外側線量得"
+                f"（Handle: {review.continuous_wall_source_handle}）。"
+            )
+        else:
+            self.waler_contact_status_var.set(
+                "未找到可唯一量測的連續壁內側線／圍令外側線，請人工輸入背填厚度。"
+            )
+
+    def _on_waler_contact_value_changed(self, _event: Any = None) -> None:
+        self._clear_waler_adjustment_preview()
+        self.waler_contact_status_var.set("數值已變更，請重新預覽。")
+
+    def _clear_waler_adjustment_preview(self) -> None:
+        self.waler_adjustment_preview_plan = None
+        if hasattr(self, "waler_contact_apply_button"):
+            self.waler_contact_apply_button.configure(state="disabled")
+        if hasattr(self, "waler_contact_displacement_var"):
+            self.waler_contact_displacement_var.set("接觸位置調整：—")
+            self.waler_contact_impact_var.set("影響：—")
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            stale = set(self._waler_adjustment_overlay_items)
+            for item_id in self._waler_adjustment_overlay_items:
+                try:
+                    canvas.delete(item_id)
+                except self.tk.TclError:
+                    pass
+            if hasattr(self, "preview_scene"):
+                self.preview_scene.temporary_line_items[:] = [
+                    item_id
+                    for item_id in self.preview_scene.temporary_line_items
+                    if item_id not in stale
+                ]
+        self._waler_adjustment_overlay_items.clear()
+
+    def _waler_contact_dimensions(self) -> dict[str, str]:
+        return {
+            key: variable.get().strip()
+            for key, variable in self.waler_contact_value_vars.items()
+        }
+
+    def _preview_waler_contact_adjustment(self) -> None:
+        from tkinter import messagebox
+
+        member = self._selected_member()
+        if not isinstance(member, Waler) or self.world_result is None:
+            return
+        try:
+            plan = self.import_model_controller.preview_waler_contact_adjustment(
+                self.world_result,
+                member.id,
+                **self._waler_contact_dimensions(),
+            )
+        except DXFImportError as exc:
+            self._clear_waler_adjustment_preview()
+            self.waler_contact_status_var.set(str(exc))
+            messagebox.showerror("Waler 接觸位置調整", str(exc), parent=self.window)
+            return
+        self.waler_adjustment_preview_plan = plan
+        self.waler_contact_displacement_var.set(
+            f"接觸位置調整：{plan.contact_displacement:+.3f} mm"
+        )
+        self.waler_contact_impact_var.set(
+            "影響：Strut {0} 支、Brace {1} 支、CornerBrace {2} 支、"
+            "Column {3} 支、Beam {4} 支".format(
+                len(plan.strut_changes),
+                len(plan.brace_changes),
+                len(plan.corner_brace_changes),
+                len(plan.changed_column_ids),
+                len(plan.changed_beam_ids),
+            )
+        )
+        errors = [
+            item.message
+            for item in plan.messages
+            if item.severity in ERROR_SEVERITIES
+        ]
+        self.waler_contact_status_var.set(
+            errors[0]
+            if errors
+            else (
+                "預覽完成；套用時會從最新正式資料重新計算。"
+                if plan.can_apply
+                else "目前 DXF 結果仍有 blocking error，不能套用。"
+            )
+        )
+        self.waler_contact_apply_button.configure(
+            state="normal" if plan.can_apply else "disabled"
+        )
+        self._draw_waler_adjustment_overlay()
+        self._show_waler_adjustment_plan(plan)
+
+    def _show_waler_adjustment_plan(
+        self, plan: WalerContactAdjustmentPlan
+    ) -> None:
+        from tkinter import scrolledtext
+
+        preview = self.tk.Toplevel(self.window)
+        preview.title(f"{plan.waler_id} 接觸位置調整預覽")
+        preview.geometry("760x620")
+        text_widget = scrolledtext.ScrolledText(
+            preview, wrap="word", font=("Microsoft JhengHei", 10)
+        )
+        text_widget.pack(fill="both", expand=True, padx=8, pady=8)
+        text_widget.insert("1.0", format_adjustment_plan(plan))
+        text_widget.configure(state="disabled")
+        self.ttk.Button(preview, text="關閉", command=preview.destroy).pack(
+            pady=(0, 8)
+        )
+
+    def _apply_waler_contact_adjustment(self) -> None:
+        from tkinter import messagebox
+
+        member = self._selected_member()
+        if not isinstance(member, Waler) or self.world_result is None:
+            return
+        try:
+            # Deliberately ignore preview coordinates: the controller builds a
+            # fresh plan from the current formal world_result before commit.
+            self.world_result = (
+                self.import_model_controller.apply_waler_contact_adjustment(
+                    self.world_result,
+                    member.id,
+                    **self._waler_contact_dimensions(),
+                )
+            )
+        except DXFImportError as exc:
+            self.waler_contact_status_var.set(str(exc))
+            self.waler_contact_apply_button.configure(state="disabled")
+            messagebox.showerror("Waler 接觸位置調整", str(exc), parent=self.window)
+            return
+        self._clear_waler_adjustment_preview()
+        self._contact_panel_waler_id = ""
+        self._apply_coordinate_settings(show_error=False)
+        self.selection_controller.synchronize_formal_member()
+        self.waler_contact_status_var.set("已一次套用全部連動幾何與衍生資料。")
 
     def _update_candidate_detail_panel(self) -> None:
         state = self.selection_state
@@ -1928,7 +3203,22 @@ class DXFImportDialog:
         selection = self.member_tree.selection()
         if not selection:
             return
-        member_id = self.member_by_tree_iid.get(selection[0], "")
+        review_key = getattr(self, "review_item_by_tree_iid", {}).get(
+            selection[0],
+            "",
+        )
+        review_item = getattr(self, "review_item_by_key", {}).get(review_key)
+        if (
+            review_item is not None
+            and review_item.status in {"unresolved", "excluded"}
+        ):
+            self._select_unresolved_review_item(review_item)
+            return
+        member_id = (
+            review_item.member_id
+            if review_item is not None
+            else self.member_by_tree_iid.get(selection[0], "")
+        )
         if not member_id:
             return
         self._select_member(
@@ -1937,6 +3227,34 @@ class DXFImportDialog:
             clear_problem=True,
             source="component_tree",
         )
+
+    def _select_unresolved_review_item(self, item: ReviewItem) -> None:
+        self.selected_problem = None
+        self.selected_review_item_key = item.key
+        self.focus_member_ids.clear()
+        self.focus_handles = set(item.source_handles)
+        revision = getattr(self.selection_state, "revision", 0) + 1
+        self.selection_state = SelectionState(
+            selection_source="component_tree",
+            revision=revision,
+        )
+        self.selection_controller.state = self.selection_state
+        if self.selected_only_var.get():
+            self.selected_only_var.set(False)
+            self._refresh_problem_tree()
+        if hasattr(self, "candidate_action_status_var"):
+            self.candidate_action_status_var.set(
+                (
+                    "此來源已排除；可於 STEP4 使用「復原此來源」。"
+                    if item.status == "excluded"
+                    else "此來源尚未形成正式構件；STEP5、STEP6 目前不適用。"
+                )
+            )
+        self._update_selected_member_panel()
+        self.preview_view_bounds = None
+        self.preview_fit_all = False
+        self._open_preview_window()
+        self.render_scheduler.request(RenderDirty.FULL_SCENE)
 
     def _select_member(
         self,
@@ -1953,12 +3271,26 @@ class DXFImportDialog:
             if self.selected_only_var.get():
                 self.selected_only_var.set(False)
                 self._refresh_problem_tree()
+        review_item = self._review_item_for_member_id(member_id)
+        review_changed = bool(
+            review_item is not None
+            and review_item.key
+            != getattr(self, "selected_review_item_key", "")
+        )
+        if review_item is not None:
+            self.selected_review_item_key = review_item.key
         changed = self.selection_controller.select_component(member_id, source)
         if changed and hasattr(self, "candidate_action_status_var"):
             self.candidate_action_status_var.set(
                 "單擊候選點只會預覽；請先選擇要修改起點或終點。"
             )
-        if refit and changed:
+        if changed or review_changed:
+            # Keep STEP4/STEP5 responsive even when refitting a large DXF such as
+            # Y29.  The scheduled render still updates the preview overlays, but
+            # the form must not wait for a full-scene redraw before reflecting
+            # the component selected in STEP3.
+            self._update_selected_member_panel()
+        if refit and (changed or review_changed):
             self.preview_view_bounds = None
             self.preview_fit_all = False
             self.render_scheduler.request(RenderDirty.FULL_SCENE)
@@ -1974,6 +3306,7 @@ class DXFImportDialog:
             "auto": "自動辨識",
             "manual_candidate_points": "人工候選點",
             "cad_manual": "CAD 人工指定",
+            "waler_contact_adjustment": "Waler 接觸位置調整",
         }.get(source, source or "自動辨識")
 
     def _candidate_detail_text(self, candidate: CandidatePoint) -> str:
@@ -2135,6 +3468,7 @@ class DXFImportDialog:
         ):
             return
         try:
+            self._clear_waler_adjustment_preview()
             self.world_result = self.import_model_controller.apply_pending(
                 self.world_result,
                 state,
@@ -2184,8 +3518,19 @@ class DXFImportDialog:
                 return
             operation = str(event.get("operation", "") or "").strip().lower()
             if operation == "update":
+                command_name = {
+                    "waler": "UPDWALER",
+                    "walers": "UPDWALER",
+                    "strut": "UPDSTRUT",
+                    "struts": "UPDSTRUT",
+                    "support": "UPDSTRUT",
+                    "supports": "UPDSTRUT",
+                    "brace": "UPDBRACE",
+                    "braces": "UPDBRACE",
+                }.get(str(event.get("type", "") or "").strip().lower(), "CAD update")
                 self.cad_temp_status_var.set(
-                    "UPDSTRUT 事件已保留；請關閉 DXF 匯入視窗後由 Main 套用。"
+                    f"{command_name} 事件已保留；"
+                    "請關閉 DXF 匯入視窗後由 Main 套用。"
                 )
                 return
             if operation == "cancel":
@@ -2509,6 +3854,7 @@ class DXFImportDialog:
             self.preview_renderer = PreviewRenderer(canvas, self.preview_scene)
         renderer = self.preview_renderer
         renderer.clear()
+        self._waler_adjustment_overlay_items.clear()
         self.canvas_member_hit_lines = []
         self.canvas_candidate_hit_points = []
         self.preview_transform = None
@@ -2618,6 +3964,7 @@ class DXFImportDialog:
         self._ensure_preview_overlay_items()
         self._update_preview_selection_overlay(update_associations=True)
         self._update_temporary_line_overlay()
+        self._draw_waler_adjustment_overlay()
         self._draw_coordinate_axis_layer()
         self._update_source_layer_visibility()
         for layer in PreviewRenderer.LAYERS:
@@ -2665,6 +4012,12 @@ class DXFImportDialog:
             return
         renderer = self.preview_renderer
         coordinate_system = self.result.coordinate_system
+        source_issue_levels = self._unresolved_source_issue_levels()
+        excluded_source_keys = {
+            (source.role, handle)
+            for source in self.result.excluded_sources
+            for handle in source.source_handles
+        }
         for geometry in geometries:
             displayed_points = [
                 coordinate_system.transform(point) for point in geometry.points
@@ -2679,15 +4032,48 @@ class DXFImportDialog:
             if len(projected) < 4:
                 continue
             is_auxiliary = geometry.role == "auxiliary"
+            normalized_geometry_handles = normalize_source_handles(
+                (geometry.source_handle,)
+            )
+            is_excluded = bool(
+                normalized_geometry_handles
+                and (geometry.role, normalized_geometry_handles[0])
+                in excluded_source_keys
+            )
             layer = "auxiliary_geometry" if is_auxiliary else "source_geometry"
-            color = "#d7dde1" if is_auxiliary else "#b0bec5"
-            line_width = 1
-            dash = None if is_auxiliary else (4, 3)
+            color = (
+                "#78909c"
+                if is_excluded
+                else "#d7dde1"
+                if is_auxiliary
+                else "#b0bec5"
+            )
+            line_width = 2 if is_excluded else 1
+            dash = (2, 5) if is_excluded else None if is_auxiliary else (4, 3)
             if not is_auxiliary and geometry.source_handle in self.focus_handles:
                 color, line_width = "#1565c0", 4
             options: dict[str, Any] = {"fill": color, "width": line_width}
             if dash is not None:
                 options["dash"] = dash
+            issue_level = source_issue_levels.get(geometry.source_handle)
+            issue_options: dict[str, Any] | None = None
+            if issue_level:
+                issue_options = {
+                    "fill": (
+                        "#d32f2f"
+                        if issue_level in ERROR_SEVERITIES
+                        else "#f9a825"
+                    ),
+                    "width": 7,
+                }
+                if dash is not None:
+                    issue_options["dash"] = dash
+                renderer.create_line(
+                    layer,
+                    *projected,
+                    source_handle=geometry.source_handle,
+                    **issue_options,
+                )
             renderer.create_line(
                 layer,
                 *projected,
@@ -2695,10 +4081,20 @@ class DXFImportDialog:
                 **options,
             )
             if geometry.closed and len(displayed_points) > 2:
-                renderer.create_line(
-                    layer,
+                closing_coordinates = (
                     *self._project_preview_point(displayed_points[-1]),
                     *self._project_preview_point(displayed_points[0]),
+                )
+                if issue_options is not None:
+                    renderer.create_line(
+                        layer,
+                        *closing_coordinates,
+                        source_handle=geometry.source_handle,
+                        **issue_options,
+                    )
+                renderer.create_line(
+                    layer,
+                    *closing_coordinates,
                     source_handle=geometry.source_handle,
                     **options,
                 )
@@ -2749,6 +4145,21 @@ class DXFImportDialog:
                 ):
                     member_levels[member_id] = record.severity
         return member_levels
+
+    def _unresolved_source_issue_levels(self) -> dict[str, str]:
+        levels: dict[str, str] = {}
+        for item in getattr(self, "review_items", ()):
+            if (
+                item.status != "unresolved"
+                or item.highest_severity not in {"warning", "error", "critical"}
+            ):
+                continue
+            for handle in item.source_handles:
+                if problem_severity_rank(item.highest_severity) > problem_severity_rank(
+                    levels.get(handle, "")
+                ):
+                    levels[handle] = item.highest_severity
+        return levels
 
     def _draw_engineering_members(self) -> None:
         if self.preview_renderer is None:
@@ -2854,20 +4265,14 @@ class DXFImportDialog:
                 (member.id, (x - 8, y), (x + 8, y))
             )
             level = member_levels.get(member.id)
-            color = "#1565c0" if member.id in self.focus_member_ids else "#2e7d32"
-            if level:
-                issue_color = "#d32f2f" if level in ERROR_SEVERITIES else "#f9a825"
-                renderer.create_oval(
-                    "engineering_members",
-                    x - 9,
-                    y - 9,
-                    x + 9,
-                    y + 9,
-                    component_id=member.id,
-                    fill="",
-                    outline=issue_color,
-                    width=4,
-                )
+            if member.id in self.focus_member_ids:
+                color = "#1565c0"
+            elif level in ERROR_SEVERITIES:
+                color = "#d32f2f"
+            elif level:
+                color = "#f9a825"
+            else:
+                color = "#2e7d32"
             renderer.create_line(
                 "engineering_members",
                 x - 6,
@@ -3262,6 +4667,70 @@ class DXFImportDialog:
         self.performance_diagnostics.temporary_overlay_updates += 1
         self.performance_diagnostics.record("temporary_overlay", started_at)
 
+    def _draw_waler_adjustment_overlay(self) -> None:
+        """Draw proposed affected geometry without replacing the formal result."""
+
+        if (
+            self.preview_renderer is None
+            or self.preview_transform is None
+            or self.result is None
+        ):
+            return
+        for item_id in self._waler_adjustment_overlay_items:
+            try:
+                self.canvas.delete(item_id)
+            except self.tk.TclError:
+                pass
+        stale = set(self._waler_adjustment_overlay_items)
+        self.preview_scene.temporary_line_items[:] = [
+            item_id
+            for item_id in self.preview_scene.temporary_line_items
+            if item_id not in stale
+        ]
+        self._waler_adjustment_overlay_items.clear()
+        plan = self.waler_adjustment_preview_plan
+        if plan is None:
+            return
+        coordinate_system = self.result.coordinate_system
+        proposed_members = (
+            plan.new_waler,
+            *(item.new_member for item in plan.strut_changes),
+            *(item.new_member for item in plan.brace_changes),
+            *(item.new_member for item in plan.corner_brace_changes),
+        )
+        for member in proposed_members:
+            world_start = member.world_start or member.start
+            world_end = member.world_end or member.end
+            displayed = (
+                coordinate_system.transform(world_start),
+                coordinate_system.transform(world_end),
+            )
+            item_id = self.preview_renderer.create_line(
+                "temporary_overlay",
+                *self._project_preview_point(displayed[0]),
+                *self._project_preview_point(displayed[1]),
+                fill="#ef6c00",
+                width=4,
+                dash=(8, 4),
+            )
+            self._waler_adjustment_overlay_items.append(item_id)
+        self.canvas.tag_raise("temporary_overlay")
+
+    def _show_exclusion_fingerprint_notice(self) -> None:
+        if (
+            not self.exclusion_fingerprint_mismatch
+            or self._exclusion_fingerprint_notice_shown
+        ):
+            return
+        from tkinter import messagebox
+
+        self._exclusion_fingerprint_notice_shown = True
+        messagebox.showwarning(
+            "DXF 來源排除需要重新確認",
+            "目前 DXF 內容已變更，先前的來源排除設定未自動套用，請重新確認。",
+            parent=self.window,
+        )
+
     def _draw_coordinate_axis_layer(self) -> None:
         if (
             self.result is None
@@ -3364,7 +4833,12 @@ class DXFImportDialog:
     def _sync_tree_selections_from_state(self) -> None:
         member_id = self.selection_state.selected_component_id
         if member_id:
-            self.member_tree_selection.select(f"member_{member_id}")
+            iid = getattr(self, "member_tree_iid_by_member_id", {}).get(
+                member_id,
+                "",
+            )
+            if iid:
+                self.member_tree_selection.select(iid)
         if hasattr(self, "candidate_tree_adapter"):
             self.candidate_tree_adapter.sync_selection(
                 self.selection_state.selected_candidate_point_id
@@ -3400,6 +4874,70 @@ class DXFImportDialog:
             )
         )
 
+    def _current_review_coordinate_system(self) -> CoordinateSystem:
+        mode = str(self.coordinate_mode_var.get() or "world").strip().lower()
+        if mode == "local" and self.selected_origin_world is not None:
+            return CoordinateSystem(
+                "local",
+                float(self.selected_origin_world[0]),
+                float(self.selected_origin_world[1]),
+                "selected_candidate_point",
+            )
+        return CoordinateSystem()
+
+    def _build_review_state(self) -> dict[str, Any]:
+        """Capture JSON-safe review inputs plus an optional diagnostics snapshot."""
+
+        if self.result is not None:
+            state = self.result.to_debug_dict()
+        elif self._initial_state_matches_source:
+            state = copy.deepcopy(self.initial_state)
+        else:
+            state = {}
+
+        layer_roles = self._current_layer_roles()
+        coordinate_system = self._current_review_coordinate_system()
+        import_mode = str(self.mode_var.get() or "replace").strip().lower()
+        if import_mode not in {"replace", "append"}:
+            import_mode = "replace"
+
+        replay_source = self.world_result or self.result
+        manual_overrides = (
+            capture_manual_overrides(replay_source)
+            if replay_source is not None
+            else manual_overrides_from_review_state(self.initial_state)
+        )
+        state.update(
+            {
+                "review_state_version": 1,
+                "source_path": str(self.file_path.resolve()),
+                "source_fingerprint": self.importer.source_fingerprint,
+                "layer_names": list(self.importer.layer_names),
+                "layer_classification": dict(layer_roles),
+                "layer_assignments": [
+                    {
+                        "layer_name": layer_name,
+                        "layer_type": layer_type,
+                    }
+                    for layer_name, layer_type in layer_roles.items()
+                ],
+                "coordinate_system": asdict(coordinate_system),
+                "import_mode": import_mode,
+                "excluded_sources": [
+                    asdict(source) for source in self.excluded_sources
+                ],
+                "manual_overrides": [
+                    asdict(override) for override in manual_overrides
+                ],
+                "double_support_decisions": (
+                    serialize_double_support_decisions(
+                        self.double_support_decisions
+                    )
+                ),
+            }
+        )
+        return state
+
     def _apply(self) -> None:
         from tkinter import messagebox
 
@@ -3428,10 +4966,30 @@ class DXFImportDialog:
         ):
             return
         self.import_mode = self.mode_var.get()
+        self.review_state = self._build_review_state()
+        self.dialog_action = "complete"
         self._save_ui_state()
         self.window.destroy()
 
+    def _pause(self) -> None:
+        """Return to Main without validation or ProjectDataModel mutation."""
+
+        self.import_mode = self.mode_var.get()
+        self.review_state = self._build_review_state()
+        self.dialog_action = "pause"
+        self._save_ui_state()
+        self.window.destroy()
+
+    def _close_dialog(self) -> None:
+        if self.allow_pause:
+            self._pause()
+        else:
+            self._cancel()
+
     def _cancel(self) -> None:
+        self.dialog_action = "cancel"
         self.result = None
+        self.world_result = None
+        self.review_state = {}
         self._save_ui_state()
         self.window.destroy()

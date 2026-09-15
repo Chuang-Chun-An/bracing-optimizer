@@ -11,6 +11,19 @@
       "EndY": 2000
     }
   },
+  "UPDWALER": {
+    "event_id": "example-waler-update-001",
+    "type": "waler",
+    "operation": "update",
+    "coordinate_space": "WCS",
+    "target_id": "W3",
+    "data": {
+      "StartX": 1000,
+      "StartY": 2000,
+      "EndX": 13000,
+      "EndY": 2000
+    }
+  },
   "ADDSTRUT": {
     "event_id": "example-strut-001",
     "type": "strut",
@@ -46,6 +59,19 @@
     "type": "brace",
     "operation": "add",
     "coordinate_space": "WCS",
+    "data": {
+      "StartX": 2500,
+      "StartY": 1000,
+      "EndX": 6500,
+      "EndY": 4500
+    }
+  },
+  "UPDBRACE": {
+    "event_id": "example-brace-update-001",
+    "type": "brace",
+    "operation": "update",
+    "coordinate_space": "WCS",
+    "target_id": "B2",
     "data": {
       "StartX": 2500,
       "StartY": 1000,

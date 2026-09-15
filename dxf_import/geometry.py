@@ -149,6 +149,58 @@ def _line_segment_intersection_point(
     return p[0] + line_ratio * r[0], p[1] + line_ratio * r[1]
 
 
+def circle_segment_intersection_points(
+    center: Point,
+    radius: float,
+    segment_start: Point,
+    segment_end: Point,
+    tolerance: float = 1e-6,
+) -> tuple[Point, ...]:
+    """Return deterministic intersections of a circle and a finite segment."""
+
+    values = (*center, radius, *segment_start, *segment_end, tolerance)
+    if not all(math.isfinite(float(value)) for value in values):
+        return ()
+    radius = float(radius)
+    tolerance = max(0.0, float(tolerance))
+    if radius <= tolerance:
+        return ()
+    direction = _vector(segment_start, segment_end)
+    length_sq = _dot(direction, direction)
+    if length_sq <= tolerance * tolerance:
+        return ()
+
+    relative = _vector(center, segment_start)
+    a = length_sq
+    b = 2.0 * _dot(relative, direction)
+    c = _dot(relative, relative) - radius * radius
+    discriminant = b * b - 4.0 * a * c
+    discriminant_tolerance = tolerance * max(a, radius * radius, 1.0)
+    if discriminant < -discriminant_tolerance:
+        return ()
+
+    if abs(discriminant) <= discriminant_tolerance:
+        ratios = (-b / (2.0 * a),)
+    else:
+        root = math.sqrt(max(0.0, discriminant))
+        ratios = ((-b - root) / (2.0 * a), (-b + root) / (2.0 * a))
+
+    margin = tolerance / max(math.sqrt(length_sq), 1e-12)
+    intersections: list[tuple[float, Point]] = []
+    for ratio in ratios:
+        if not (-margin <= ratio <= 1.0 + margin):
+            continue
+        clamped = min(1.0, max(0.0, ratio))
+        point = (
+            segment_start[0] + clamped * direction[0],
+            segment_start[1] + clamped * direction[1],
+        )
+        if not any(_same_point(point, existing, tolerance) for _, existing in intersections):
+            intersections.append((clamped, point))
+    intersections.sort(key=lambda item: item[0])
+    return tuple(point for _, point in intersections)
+
+
 def _line_distance(point: Point, start: Point, end: Point) -> float:
     """Perpendicular distance to an unbounded line."""
 

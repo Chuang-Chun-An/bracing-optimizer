@@ -10,10 +10,13 @@ from bracing_optimizer.presentation.cad_view_interaction import CADViewport
 
 from dxf_import import (
     CandidatePoint,
+    CandidatePointBuilder,
     CandidatePointStore,
     CandidateTreeAdapter,
     CoordinateSystem,
     DEFAULT_LAYER_MAPPING,
+    Y1A_LAYER_MAPPING,
+    Y29_LAYER_MAPPING,
     DXFImportDialog,
     DXFImportError,
     GeometryTolerances,
@@ -23,8 +26,10 @@ from dxf_import import (
     RenderScheduler,
     SelectionController,
     SelectionState,
+    SourceGeometry,
     SourceText,
     Strut,
+    Waler,
     Column,
     add_cad_candidate_points,
     associate_components_to_struts,
@@ -33,6 +38,7 @@ from dxf_import import (
     build_problem_records,
     build_validation_overview,
     coordinate_system_from_candidate,
+    default_layer_mapping_for_file,
     fit_window_geometry_to_work_areas,
     import_dxf,
     normalize_project_coordinate,
@@ -62,7 +68,7 @@ class DXFInputRecognitionTests(unittest.TestCase):
             doc.layers.add(layer)
         return doc
 
-    def test_test_layer_defaults_are_exact_and_saved_selection_wins(self):
+    def test_layer_defaults_are_scoped_by_filename_and_saved_selection_wins(self):
         self.assertEqual(
             DXFImportDialog.LAYER_USE_OPTIONS,
             (
@@ -85,10 +91,51 @@ class DXFInputRecognitionTests(unittest.TestCase):
             "!T1 (站體)_角撐": "角撐",
             "ES-中間樁NO": "中間柱",
             "ES-C250x90": "托梁",
+            "DIM-軸線U": "輔助線",
+            "DIM-軸線X": "輔助線",
         }
-        self.assertTrue(expected_defaults.items() <= DEFAULT_LAYER_MAPPING.items())
+        expected_y29_defaults = {
+            "圍令": "圍令",
+            "支撐": "支撐",
+            "斜撐": "斜撐",
+            "細線": "連續壁",
+            "s": "中間柱",
+            "S-GRID": "輔助線",
+            "S-GRID-IDEN": "輔助線",
+            "壓梁": "托梁",
+            "壓樑": "托梁",
+            "角撐": "角撐",
+        }
+        self.assertEqual(DEFAULT_LAYER_MAPPING, expected_defaults)
+        self.assertEqual(Y1A_LAYER_MAPPING, expected_defaults)
+        self.assertEqual(Y29_LAYER_MAPPING, expected_y29_defaults)
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("L-SITE-WALL", {}),
+            default_layer_mapping_for_file("C:/drawings/Y1A擋土支撐簡化版.dxf"),
+            expected_defaults,
+        )
+        self.assertEqual(
+            default_layer_mapping_for_file("C:/drawings/Y29_TEST.DXF"),
+            expected_y29_defaults,
+        )
+        self.assertEqual(default_layer_mapping_for_file("other.dxf"), {})
+        self.assertNotIn("圍令", Y1A_LAYER_MAPPING)
+        self.assertNotIn("L-SITE-WALL", Y29_LAYER_MAPPING)
+        self.assertTrue(
+            DXFImportDialog._saved_classification_matches_file(
+                "C:/new/Y29_test.dxf",
+                {"source_path": "D:/old/Y29_TEST.DXF"},
+            )
+        )
+        self.assertFalse(
+            DXFImportDialog._saved_classification_matches_file(
+                "Y1A擋土支撐簡化版.dxf",
+                {"source_path": "Y29_test.dxf"},
+            )
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use(
+                "L-SITE-WALL", {}, Y1A_LAYER_MAPPING
+            ),
             "連續壁",
         )
         self.assertEqual(
@@ -106,11 +153,15 @@ class DXFInputRecognitionTests(unittest.TestCase):
             "連續壁",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("PROJECT-WALL", {}),
+            DXFImportDialog._initial_layer_use(
+                "PROJECT-WALL", {}, Y1A_LAYER_MAPPING
+            ),
             "忽略",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("ES-LH350x350", {}),
+            DXFImportDialog._initial_layer_use(
+                "ES-LH350x350", {}, Y1A_LAYER_MAPPING
+            ),
             "支撐",
         )
         self.assertEqual(
@@ -121,20 +172,40 @@ class DXFInputRecognitionTests(unittest.TestCase):
             "忽略",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("ES-LH350x350-extra", {}),
+            DXFImportDialog._initial_layer_use(
+                "ES-LH350x350-extra", {}, Y1A_LAYER_MAPPING
+            ),
             "忽略",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("ES-中間樁NO", {}),
+            DXFImportDialog._initial_layer_use(
+                "ES-中間樁NO", {}, Y1A_LAYER_MAPPING
+            ),
             "中間柱",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("!T1 (站體)_角撐", {}),
+            DXFImportDialog._initial_layer_use(
+                "!T1 (站體)_角撐", {}, Y1A_LAYER_MAPPING
+            ),
             "角撐",
         )
         self.assertEqual(
-            DXFImportDialog._initial_layer_use("ES-C250x90", {}),
+            DXFImportDialog._initial_layer_use(
+                "ES-C250x90", {}, Y1A_LAYER_MAPPING
+            ),
             "托梁",
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use(
+                "細線", {}, Y29_LAYER_MAPPING
+            ),
+            "連續壁",
+        )
+        self.assertEqual(
+            DXFImportDialog._initial_layer_use(
+                "細線", {}, Y1A_LAYER_MAPPING
+            ),
+            "忽略",
         )
         self.assertEqual(
             DXFImportDialog._initial_layer_use(
@@ -223,6 +294,68 @@ class DXFInputRecognitionTests(unittest.TestCase):
             debug["layer_assignments"],
         )
         self.assertEqual(debug["summary"]["continuous_wall_geometry"], 1)
+
+    def test_import_recognizes_material_width_and_face_to_face_backfill(self):
+        doc = self.new_doc()
+        doc.layers.add("L-SITE-WALL")
+        model = doc.modelspace()
+        model.add_lwpolyline(
+            [(0, -350), (2000, -350), (2000, 0), (0, 0)],
+            close=True,
+            dxfattribs={"layer": "WALER"},
+        )
+        model.add_lwpolyline(
+            [(0, 2000), (2000, 2000), (2000, 2350), (0, 2350)],
+            close=True,
+            dxfattribs={"layer": "WALER"},
+        )
+        model.add_lwpolyline(
+            [(825, 0), (1175, 0), (1175, 2000), (825, 2000)],
+            close=True,
+            dxfattribs={"layer": "STRUT"},
+        )
+        model.add_line(
+            (-250, -450), (2250, -450),
+            dxfattribs={"layer": "L-SITE-WALL"},
+        )
+        model.add_line(
+            (-250, 2450), (2250, 2450),
+            dxfattribs={"layer": "L-SITE-WALL"},
+        )
+        self.counter += 1
+        path = Path(self.temp_dir.name) / f"width_backfill_{self.counter}.dxf"
+        doc.saveas(path)
+
+        material_specs = (
+            {"Usage": "圍令", "Spec": "H350x350"},
+            {"Usage": "支撐", "Spec": "H350x350"},
+        )
+        result = import_dxf(
+            path,
+            layer_roles={
+                "WALER": "waler",
+                "STRUT": "strut",
+                "L-SITE-WALL": "continuous_wall",
+            },
+            material_specs=material_specs,
+        )
+
+        self.assertTrue(result.can_import, result.messages)
+        self.assertEqual(
+            {member.material_spec for member in result.walers},
+            {"H350x350"},
+        )
+        self.assertEqual(result.struts[0].material_spec, "H350x350")
+        self.assertEqual(
+            sorted(
+                review.original_backfill_mm
+                for review in result.waler_contact_reviews
+            ),
+            [100.0, 100.0],
+        )
+        project_rows = result.to_project_rows()
+        self.assertEqual(project_rows["walers"][0]["material_spec"], "H350x350")
+        self.assertEqual(project_rows["struts"][0]["material_spec"], "H350x350")
 
     def convert(self, doc, *, tolerances=None):
         self.counter += 1
@@ -679,6 +812,65 @@ class DXFInputRecognitionTests(unittest.TestCase):
                 for point in member.candidate_points
                 if "end" in point.valid_for
             },
+        )
+
+    def test_waler_candidates_include_all_source_vertices_split_by_midpoint(self):
+        world_start = (222483.0000000001, -438778.989920837)
+        world_end = (226024.05567242217, -443090.0831589252)
+        source_vertices = (
+            (222283.0, -438778.989920837),
+            (222283.0, -439860.0002),
+            (225833.0, -443149.2248),
+            (226215.1113, -443030.9415),
+            (226104.8601, -442855.8093),
+            (222683.0, -439685.3126),
+            (222683.0, -438778.989920837),
+        )
+        source_geometry = SourceGeometry(
+            role="waler",
+            source_handle="58D",
+            points=source_vertices,
+            closed=True,
+            source_layer="圍令",
+            source_entity_type="LWPOLYLINE",
+        )
+        waler = Waler(
+            id="W14",
+            start=world_start,
+            end=world_end,
+            source_layer="圍令",
+            source_handles=("58D",),
+            source_entity_types=("LWPOLYLINE",),
+            recognition_method="existing_inner_line",
+            centerline_computed=False,
+            source_width=400.0,
+            confidence=1.0,
+        )
+
+        built = CandidatePointBuilder(
+            (source_geometry,),
+            (waler,),
+            GeometryTolerances(),
+        ).build(waler)
+
+        source_candidates = {
+            point.world_point: point
+            for point in built.candidate_points
+            if "source_geometry_vertex" in point.point_types
+        }
+        self.assertEqual(set(source_candidates), set(source_vertices))
+        self.assertEqual(len(source_candidates), len(source_vertices))
+        self.assertEqual(
+            source_candidates[(222283.0, -439860.0002)].valid_for,
+            ("start",),
+        )
+        self.assertEqual(
+            source_candidates[(222683.0, -439685.3126)].valid_for,
+            ("start",),
+        )
+        self.assertEqual(
+            source_candidates[(226215.1113, -443030.9415)].valid_for,
+            ("end",),
         )
 
     def test_candidate_local_coordinates_recalculate_from_world_without_double_origin(self):
@@ -1658,6 +1850,136 @@ class _FakeCanvas:
 
 
 class DXFSelectionArchitectureTests(unittest.TestCase):
+    def test_error_column_uses_red_cross_and_label_without_status_ring(self):
+        class StrictCanvas(_FakeCanvas):
+            def create_oval(self, *coordinates, **options):
+                self.assert_no_internal_options(options)
+                return super().create_oval(*coordinates, **options)
+
+            @staticmethod
+            def assert_no_internal_options(options):
+                if "component_id" in options:
+                    raise AssertionError(
+                        "component_id must not be forwarded as a Tk oval option"
+                    )
+
+        column = Column(
+            id="C30",
+            start=(-10.0, 0.0),
+            end=(10.0, 0.0),
+            source_layer="s",
+            source_handles=("HANDLE_C30",),
+            source_entity_types=("INSERT",),
+            recognition_method="block_reference",
+            centerline_computed=True,
+            source_width=20.0,
+            confidence=1.0,
+        )
+        canvas = StrictCanvas()
+        scene = PreviewScene()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.result = SimpleNamespace(
+            walers=(),
+            struts=(),
+            braces=(),
+            columns=(column,),
+            beams=(),
+            corner_braces=(),
+        )
+        dialog.problem_records = (
+            SimpleNamespace(severity="error", member_ids=(column.id,)),
+        )
+        dialog.focus_member_ids = set()
+        dialog.canvas_member_hit_lines = []
+        dialog.preview_viewport = CADViewport(
+            view_bounds=(-50.0, 50.0, -50.0, 50.0),
+            canvas_width=200.0,
+            canvas_height=200.0,
+        )
+        dialog.preview_renderer = PreviewRenderer(canvas, scene)
+
+        dialog._draw_engineering_members()
+
+        labels = {
+            item.get("text")
+            for item in canvas.items.values()
+            if item["kind"] == "text"
+        }
+        self.assertIn(column.id, labels)
+        column_items = [
+            canvas.items[item_id]
+            for item_id in scene.component_items[column.id]
+        ]
+        self.assertEqual(len(column_items), 3)
+        self.assertNotIn("oval", {item["kind"] for item in column_items})
+        self.assertEqual(
+            {item.get("fill") for item in column_items},
+            {"#d32f2f"},
+        )
+        self.assertEqual(
+            dialog.canvas_member_hit_lines,
+            [(column.id, (92.0, 100.0), (108.0, 100.0))],
+        )
+
+    def test_step3_selection_updates_step4_immediately_for_every_member_group(self):
+        class Variable:
+            def __init__(self, value=False):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class Controller:
+            def __init__(self):
+                self.selected_ids = []
+
+            def select_component(self, member_id, source):
+                self.selected_ids.append((member_id, source))
+                return True
+
+        member_ids = ("W1", "S1", "B1", "C1", "BM1", "CB1")
+        tree = _FakeTree()
+        controller = Controller()
+        panel_updates = []
+        render_requests = []
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog._updating_member_tree = False
+        dialog.member_tree = tree
+        dialog.member_tree_selection = SimpleNamespace(syncing=False)
+        dialog.member_by_tree_iid = {
+            f"member_{member_id}": member_id for member_id in member_ids
+        }
+        dialog.selected_problem = None
+        dialog.focus_member_ids = set()
+        dialog.focus_handles = set()
+        dialog.selected_only_var = Variable(False)
+        dialog.selection_controller = controller
+        dialog.candidate_action_status_var = Variable("")
+        dialog.preview_viewport = CADViewport()
+        dialog.preview_fit_all = True
+        dialog.render_scheduler = SimpleNamespace(request=render_requests.append)
+        dialog._update_selected_member_panel = lambda: panel_updates.append(
+            controller.selected_ids[-1][0]
+        )
+        dialog._update_set_origin_button_state = lambda: None
+
+        for member_id in member_ids:
+            tree._selection = (f"member_{member_id}",)
+            dialog._on_member_selected()
+
+        self.assertEqual(
+            controller.selected_ids,
+            [(member_id, "component_tree") for member_id in member_ids],
+        )
+        self.assertEqual(panel_updates, list(member_ids))
+        self.assertEqual(
+            render_requests,
+            [RenderDirty.FULL_SCENE] * len(member_ids),
+        )
+
     def test_source_text_uses_local_origin_and_auxiliary_visibility_layer(self):
         canvas = _FakeCanvas()
         scene = PreviewScene()

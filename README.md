@@ -690,14 +690,16 @@ Matplotlib 自訂工具列，只保留：
 | `DxfCompatibilityChecker.compare()` | 保存 state、候選 state、Solver rows | 相容性報告 | handle＋工程線、圖層＋工程線、跨圖層工程線比對 |
 | `merge_source_references()` | 兩份 state、match report | 新 state | 只更新來源參照，保留 ID、工程線與人工修正 |
 
-`DxfStatus` 包含 `READY`、`SOURCE_MODIFIED`、`MISSING`、`RELINK_REQUIRED`、`BINDING_REQUIRED`、`LEGACY_NO_STATE` 與 `INCOMPATIBLE`，並另有 runtime／待儲存／管理副本異常等細分狀態。這些狀態仍用於專案保存、來源追蹤與重新連結；正式成果匯出只依賴專案內已確認的 `dxf_import_state`，不讀取或重新儲存來源檔。
+`DxfStatus` 包含 `READY`、`SOURCE_MODIFIED`、`MISSING`、`RELINK_REQUIRED`、`BINDING_REQUIRED`、`LEGACY_NO_STATE` 與 `INCOMPATIBLE`，並另有 runtime／待儲存／管理副本異常等細分狀態。這些狀態仍用於專案保存、來源追蹤與重新連結；正式成果匯出不使用 `can_export` 或 stale binding 作為阻擋條件，也不讀取或重新儲存來源檔。
 
 ### 6.2.1 `bracing_optimizer/infrastructure/dxf_result_export.py`
 
 | 函數 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
-| `build_member_bindings()` | import state、Solver 圍令／支撐列 | world-coordinate bindings | 以最終確認工程線將結果綁到世界座標 |
-| `export_results_to_dxf()` | import state、可見方案、bindings、輸出路徑 | `DXFExportReport` | 新建 R2018 clean document、重建背景、加入成果、暫存驗證後交易式交付 |
+| `export_coordinate_system_from_import_state()` | import state 的 coordinate metadata | `ExportCoordinateSystem` | 在 Main orchestration boundary 建立窄的 Project → WCS 契約 |
+| `build_project_member_bindings()` | Current Project 圍令／支撐列、座標契約 | world-coordinate bindings | 直接從目前 Project geometry 建立 Solver placement line，不讀 converted |
+| `build_project_geometry_segments()` | Current Project 圍令／支撐／斜撐列、座標契約 | formal WCS lines | 建立 `SD_PROJECT_WALER/STRUT/BRACE` 正式工程線 |
+| `export_results_to_dxf()` | 輸出路徑、可見方案、Current Project rows、座標契約、optional background | `DXFExportReport` | 新建 R2018 clean document、加入目前工程線、背景與成果，暫存驗證後交易式交付 |
 
 正式輸出只在新文件上執行一次 `saveas()` 到同資料夾唯一暫存檔，重新讀取後要求 Audit 為 0 errors／0 fixes，並驗證背景及成果世界座標、圖層、Dimension、Jack Block、重複 Layer、XRecord 與懸空 Handle。全部通過後才以 `os.replace()` 取代正式檔。
 
@@ -1898,9 +1900,9 @@ Beam 與 Column 點先收集，再各自呼叫一次 `scatter()` 批次繪製。
 
 結果頁的「匯出支撐配置成果DXF」會：
 
-1. 從專案已保存的 `dxf_import_state` 取得座標系統、來源工程圖層、必要底圖線段及人工確認後的正式構件幾何；不開啟原始 DXF。
-2. 新建 R2018／毫米的 clean document，以原始世界座標重建圍令、支撐、斜撐、角撐、中間柱、托梁與輔助線。合法的來源圖層名稱會沿用；非法、空白或與成果層衝突時，集中改用 `SD_BASE_*` fallback 並在摘要列出。
-3. 將圍令標註放在 `SD_RESULT_WALER`；支撐標註、千斤頂及相關配置成果放在 `SD_RESULT_SUPPORT`。鋼材用一般對齊尺寸、調整塊用「調整塊」尺寸、尾端現場處理長度用「餘量」尺寸。
+1. Main 從 `dxf_import_state.coordinate_system` 只提取 Project → WCS 座標 metadata；不開啟原始 DXF，也不使用 converted Waler／Strut／Brace 配對成果。
+2. 新建 R2018／毫米的 clean document，將目前 `ProjectDataModel` 的圍令、支撐、斜撐畫在 `SD_PROJECT_WALER`、`SD_PROJECT_STRUT`、`SD_PROJECT_BRACE`。原圖連續壁、角撐、中間柱、托梁與輔助線是 optional background；合法來源圖層會沿用，非法、空白或與正式層衝突時改用 `SD_BASE_*` fallback。
+3. 直接以目前 Project world line 放置 Solver 結果。圍令標註位於 `SD_RESULT_WALER`；支撐標註與千斤頂位於 `SD_RESULT_SUPPORT`。鋼材用一般對齊尺寸、調整塊用「調整塊」尺寸、尾端現場處理長度用「餘量」尺寸。
 4. 千斤頂只從 `assets/dxf/jack_symbol.dxf` 複製允許的 `LINE`／`CIRCLE` 幾何建立 `SUPPORT_JACK`，Block 內圖元位於 `0` 層，INSERT 位於支撐成果層，且不另加尺寸標註。
 5. 先寫入輸出資料夾內唯一暫存檔，再從磁碟重新讀取，執行 Audit、世界座標、成果數量、圖層、Block definition、重複 Layer、XRecord 與裸 Handle reference 驗證；只有全部通過才交易式替換正式檔。
 
@@ -1908,7 +1910,7 @@ Dimension 不直接在大世界座標下 render。每支構件先以自身起點
 
 只匯出結果樹目前勾選為可見的方案。同一構件若同時勾選兩個方案，匯出會停止並要求只保留一個可見方案。
 
-原始 DXF 或專案管理副本遺失時，只要專案仍保存完整且已確認的 `dxf_import_state`，成果匯出仍可執行。舊專案若完全沒有工程模型，或仍有 error／critical 等級的人工確認問題，則會停止並說明原因。成果檔採原始世界座標與毫米單位；合併回原始 DWG 時，先確認目標單位為毫米，再使用 Insert、Xref 或貼到原始座標，避免額外縮放、旋轉或位移。
+原始 DXF 或專案管理副本遺失、converted binding stale、或舊 DXF Review 留有 error／critical 訊息，都不會否定合法的 Current Project + Solver Result。背景不完整時只略過有問題的背景項目並在報告列出 warning。schema 3 若完全缺少可證明的 Project → World 座標資訊，Main 會明確停止；底層 exporter 則可由呼叫端明確傳入 world context，在沒有任何 background state 時輸出 Project + Solver。成果檔採世界座標與毫米單位；合併回原始 DWG 時，先確認目標單位為毫米，再使用 Insert、Xref 或貼到原始座標，避免額外縮放、旋轉或位移。
 
 ---
 

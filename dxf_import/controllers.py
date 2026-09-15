@@ -5,6 +5,12 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .candidate_points import CandidatePointStore, apply_candidate_point_selection
+from .waler_contact_adjustment import (
+    WalerContactAdjustmentPlan,
+    apply_waler_contact_adjustment,
+    plan_waler_contact_adjustment,
+)
+from .material_recognition import set_member_material_spec
 from .models import (
     CandidatePoint,
     DXFImportError,
@@ -372,3 +378,37 @@ class ImportModelController:
             self.tolerances,
             selection_source=state.pending_selection_source,
         )
+
+    def preview_waler_contact_adjustment(
+        self,
+        result: DXFImportResult,
+        waler_id: str,
+        **dimensions,
+    ) -> WalerContactAdjustmentPlan:
+        return plan_waler_contact_adjustment(
+            result,
+            waler_id,
+            tolerances=self.tolerances,
+            **dimensions,
+        )
+
+    def apply_waler_contact_adjustment(
+        self,
+        result: DXFImportResult,
+        waler_id: str,
+        **dimensions,
+    ) -> DXFImportResult:
+        return apply_waler_contact_adjustment(
+            result,
+            waler_id,
+            tolerances=self.tolerances,
+            **dimensions,
+        )
+
+    def apply_material_spec(
+        self,
+        result: DXFImportResult,
+        member_id: str,
+        material_spec: str,
+    ) -> DXFImportResult:
+        return set_member_material_spec(result, member_id, material_spec)

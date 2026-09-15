@@ -67,6 +67,31 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         }
 
     @staticmethod
+    def linear_update_event(
+        member_type,
+        target_id,
+        *,
+        event_id=None,
+        start=(100, 0),
+        end=(1900, 0),
+        **extra_data,
+    ):
+        return {
+            "event_id": event_id or f"update-{member_type}-{target_id}",
+            "type": member_type,
+            "operation": "update",
+            "coordinate_space": "WCS",
+            "target_id": target_id,
+            "data": {
+                "StartX": start[0],
+                "StartY": start[1],
+                "EndX": end[0],
+                "EndY": end[1],
+                **extra_data,
+            },
+        }
+
+    @staticmethod
     def project_geometry():
         walers = [
             {
@@ -108,7 +133,26 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         return walers, strut
 
     @staticmethod
-    def dxf_state(*, duplicate=False, local=False):
+    def brace_row():
+        return {
+            "BraceID": "B2",
+            "FromWaler": "W1",
+            "ToWaler": "W2",
+            "StartX": 200,
+            "StartY": 0,
+            "EndX": 300,
+            "EndY": 1000,
+        }
+
+    @staticmethod
+    def dxf_state(
+        *,
+        duplicate=False,
+        local=False,
+        include_strut=True,
+        brace=None,
+        duplicate_brace=False,
+    ):
         strut = {
             "id": "DXF-S1",
             "start": [100, 0],
@@ -126,11 +170,41 @@ class CADBuilderIntegrationTests(unittest.TestCase):
             "associated_beams": ["BM1"],
             "selection_source": "auto",
         }
-        struts = [strut]
+        struts = [strut] if include_strut else []
         if duplicate:
             duplicate_strut = copy.deepcopy(strut)
             duplicate_strut["id"] = "DXF-S2"
             struts.append(duplicate_strut)
+        braces = []
+        if brace is not None:
+            brace_binding = {
+                "id": "DXF-B2",
+                "start": [brace["StartX"], brace["StartY"]],
+                "end": [brace["EndX"], brace["EndY"]],
+                "local_start": [brace["StartX"], brace["StartY"]],
+                "local_end": [brace["EndX"], brace["EndY"]],
+                "world_start": (
+                    [brace["StartX"] + 10000, brace["StartY"] + 20000]
+                    if local
+                    else [brace["StartX"], brace["StartY"]]
+                ),
+                "world_end": (
+                    [brace["EndX"] + 10000, brace["EndY"] + 20000]
+                    if local
+                    else [brace["EndX"], brace["EndY"]]
+                ),
+                "from_waler": brace["FromWaler"],
+                "to_waler": brace["ToWaler"],
+                "source_layer": "BRACE_LAYER",
+                "source_handles": ["B1", "B2"],
+                "recognition_method": "outline_centerline",
+                "selection_source": "auto",
+            }
+            braces.append(brace_binding)
+            if duplicate_brace:
+                duplicate_binding = copy.deepcopy(brace_binding)
+                duplicate_binding["id"] = "DXF-B3"
+                braces.append(duplicate_binding)
         return {
             "coordinate_system": {
                 "mode": "local" if local else "world",
@@ -141,7 +215,7 @@ class CADBuilderIntegrationTests(unittest.TestCase):
             "converted": {
                 "walers": [],
                 "struts": struts,
-                "braces": [],
+                "braces": braces,
                 "columns": [],
                 "beams": [],
                 "corner_braces": [],
@@ -303,9 +377,11 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertIn(f'"{EVENT_FILE_NAME}"', lisp_source)
         for command in (
             "ADDWALER",
+            "UPDWALER",
             "ADDSTRUT",
             "UPDSTRUT",
             "ADDBRACE",
+            "UPDBRACE",
             "SUPSTATUS",
             "SUPCLEAR",
         ):
@@ -329,6 +405,18 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertIn('(getpoint (strcat "\\nPick "', lisp_source)
         self.assertIn('(getpoint p1-ucs (strcat "\\nPick "', lisp_source)
         self.assertIn('(cb:capture-simple "waler" "Waler")', lisp_source)
+        self.assertIn(
+            '(cb:capture-linear-update "waler" "Waler" "WalerID")',
+            lisp_source,
+        )
+        self.assertIn(
+            '(cb:capture-linear-update "brace" "Brace" "BraceID")',
+            lisp_source,
+        )
+        self.assertIn('(cb:read-target-id "StrutID")', lisp_source)
+        self.assertEqual(lisp_source.count("(defun cb:event-json"), 1)
+        self.assertEqual(lisp_source.count("(defun cb:capture-linear-update"), 1)
+        self.assertNotIn("UPDCORNERBRACE", lisp_source)
         self.assertIn("Pick beam positions? [Yes/No] <No>:", lisp_source)
         self.assertIn("Pick column positions? [Yes/No] <No>:", lisp_source)
         self.assertIn("selected point is outside the strut range", lisp_source)
@@ -409,9 +497,11 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         examples = json.loads(examples_text)
         expected_types = {
             "ADDWALER": "waler",
+            "UPDWALER": "waler",
             "ADDSTRUT": "strut",
             "UPDSTRUT": "strut",
             "ADDBRACE": "brace",
+            "UPDBRACE": "brace",
             "SUPCLEAR": "control",
         }
         for command, event_type in expected_types.items():
@@ -422,6 +512,8 @@ class CADBuilderIntegrationTests(unittest.TestCase):
             self.assertEqual(parsed_event["coordinate_space"], "WCS")
             self.assertIsInstance(parsed_event["event_id"], str)
             self.assertIsInstance(parsed_event["data"], dict)
+            if parsed_event["operation"] == "update":
+                self.assertTrue(parsed_event["target_id"])
 
     def test_strut_event_maps_new_position_fields_without_legacy_columns(self):
         event = {
@@ -537,6 +629,205 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertEqual((mapped.row["EndX"], mapped.row["EndY"]), (150, 1000))
         self.assertEqual(mapped.world_start, (10150, 20000))
         self.assertEqual(mapped.world_end, (10150, 21000))
+
+    def test_linear_update_contract_accepts_waler_and_brace(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        rows = {"walers": walers, "struts": [], "braces": [brace]}
+
+        waler = CadEventMapper.map_command(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(0, 100),
+                end=(2000, 100),
+            ),
+            rows,
+        )
+        brace_mapped = CadEventMapper.map_command(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(250, 0),
+                end=(350, 1000),
+            ),
+            rows,
+        )
+
+        self.assertEqual((waler.table_name, waler.row_index), ("walers", 0))
+        self.assertEqual((brace_mapped.table_name, brace_mapped.row_index), ("braces", 0))
+
+    def test_linear_update_contract_rejects_missing_target_and_forbidden_fields(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        rows = {"walers": walers, "struts": [], "braces": [brace]}
+        missing_target = self.linear_update_event("waler", "W1")
+        missing_target.pop("target_id")
+        waler_positions = self.linear_update_event(
+            "waler",
+            "W1",
+            BeamPositions="100",
+        )
+        brace_relation = self.linear_update_event(
+            "brace",
+            "B2",
+            start=(250, 0),
+            end=(350, 1000),
+            FromWaler="W2",
+        )
+
+        with self.assertRaisesRegex(ValueError, "target_id"):
+            CadEventMapper.map_command(missing_target, rows)
+        with self.assertRaisesRegex(ValueError, "BeamPositions"):
+            CadEventMapper.map_command(waler_positions, rows)
+        with self.assertRaisesRegex(ValueError, "FromWaler"):
+            CadEventMapper.map_command(brace_relation, rows)
+
+    def test_update_target_must_exist_once_in_its_own_table(self):
+        walers, _strut = self.project_geometry()
+        missing = self.linear_update_event("waler", "W9")
+        duplicate_braces = [self.brace_row(), copy.deepcopy(self.brace_row())]
+
+        with self.assertRaisesRegex(ValueError, "W9.*walers"):
+            CadEventMapper.map_command(
+                missing,
+                {"walers": walers, "struts": [], "braces": []},
+            )
+        with self.assertRaisesRegex(ValueError, "B2.*braces.*唯一"):
+            CadEventMapper.map_command(
+                self.linear_update_event(
+                    "brace",
+                    "B2",
+                    start=(250, 0),
+                    end=(350, 1000),
+                ),
+                {"walers": walers, "struts": [], "braces": duplicate_braces},
+            )
+
+    def test_waler_update_preserves_nongeometry_and_normalizes_pick_direction(self):
+        walers, _strut = self.project_geometry()
+        walers[0].update(material_spec="H400x400", Remark="keep me")
+        rows = {"walers": walers, "struts": [], "braces": []}
+
+        forward = CadEventMapper.map_command(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(100, 5000),
+                end=(2100, 5000),
+            ),
+            rows,
+        )
+        reverse = CadEventMapper.map_command(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(2100, 5000),
+                end=(100, 5000),
+            ),
+            rows,
+        )
+
+        self.assertEqual(
+            tuple(forward.row[field] for field in ("StartX", "StartY", "EndX", "EndY")),
+            (100, 5000, 2100, 5000),
+        )
+        self.assertEqual(forward.row, reverse.row)
+        self.assertEqual(forward.row["WalerID"], "W1")
+        self.assertEqual(forward.row["material_spec"], "H400x400")
+        self.assertEqual(forward.row["Remark"], "keep me")
+
+    def test_brace_update_preserves_relation_and_reverses_cad_pick(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+
+        mapped = CadEventMapper.map_command(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(400, 1000),
+                end=(250, 0),
+            ),
+            {"walers": walers, "struts": [], "braces": [brace]},
+        )
+
+        self.assertEqual((mapped.row["StartX"], mapped.row["StartY"]), (250, 0))
+        self.assertEqual((mapped.row["EndX"], mapped.row["EndY"]), (400, 1000))
+        self.assertEqual(mapped.row["BraceID"], "B2")
+        self.assertEqual(
+            (mapped.row["FromWaler"], mapped.row["ToWaler"]),
+            ("W1", "W2"),
+        )
+        self.assertEqual(mapped.world_start, (250, 0))
+        self.assertEqual(mapped.world_end, (400, 1000))
+
+    def test_brace_update_rejects_geometry_outside_original_waler_relation(self):
+        walers, _strut = self.project_geometry()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "新斜撐幾何無法維持原 FromWaler / ToWaler 關係",
+        ):
+            CadEventMapper.map_command(
+                self.linear_update_event(
+                    "brace",
+                    "B2",
+                    start=(5000, 3000),
+                    end=(5000, 4000),
+                ),
+                {"walers": walers, "struts": [], "braces": [self.brace_row()]},
+            )
+
+    def test_waler_and_brace_update_reject_lines_below_geometry_minimum(self):
+        walers, _strut = self.project_geometry()
+        rows = {"walers": walers, "struts": [], "braces": [self.brace_row()]}
+
+        for event in (
+            self.linear_update_event("waler", "W1", start=(0, 0), end=(50, 0)),
+            self.linear_update_event("brace", "B2", start=(0, 0), end=(50, 0)),
+        ):
+            with self.subTest(member_type=event["type"]), self.assertRaisesRegex(
+                ValueError,
+                "100 mm",
+            ):
+                CadEventMapper.map_command(event, rows)
+
+    def test_waler_and_brace_update_share_wcs_to_local_conversion(self):
+        walers, _strut = self.project_geometry()
+        rows = {"walers": walers, "struts": [], "braces": [self.brace_row()]}
+        coordinate = CoordinateSystem("local", 10000, 20000, "test")
+
+        waler = CadEventMapper.map_command(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(10100, 20200),
+                end=(12100, 20200),
+            ),
+            rows,
+            coordinate_system=coordinate,
+        )
+        brace = CadEventMapper.map_command(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(10400, 21000),
+                end=(10250, 20000),
+            ),
+            rows,
+            coordinate_system=coordinate,
+        )
+
+        self.assertEqual(
+            tuple(waler.row[field] for field in ("StartX", "StartY", "EndX", "EndY")),
+            (100, 200, 2100, 200),
+        )
+        self.assertEqual(
+            tuple(brace.row[field] for field in ("StartX", "StartY", "EndX", "EndY")),
+            (250, 0, 400, 1000),
+        )
+        self.assertEqual(brace.world_start, (10250, 20000))
+        self.assertEqual(brace.world_end, (10400, 21000))
 
     def test_update_rejects_geometry_that_matches_neither_original_waler_direction(self):
         walers, strut = self.project_geometry()
@@ -702,6 +993,290 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         )
         self.assertIn("DXF 圖面定位需重新確認", app.cad_import_status)
 
+    def test_waler_update_commits_without_cascade_and_validation_reports_relations(self):
+        walers, strut = self.project_geometry()
+        walers[0].update(material_spec="H400x400", Remark="reviewed")
+        brace = self.brace_row()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.struts = [strut]
+        app.braces = [brace]
+        app.dxf_last_import_debug = self.dxf_state()
+        old_struts = copy.deepcopy(app.struts)
+        old_braces = copy.deepcopy(app.braces)
+        self.write_event(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(0, 200),
+                end=(2000, 200),
+            )
+        )
+
+        self.assertTrue(app.read_cad_event())
+
+        self.assertEqual(
+            tuple(
+                app.walers[0][field]
+                for field in ("StartX", "StartY", "EndX", "EndY")
+            ),
+            (0, 200, 2000, 200),
+        )
+        self.assertEqual(app.walers[0]["material_spec"], "H400x400")
+        self.assertEqual(app.walers[0]["Remark"], "reviewed")
+        self.assertEqual(app.struts, old_struts)
+        self.assertEqual(app.braces, old_braces)
+        self.assertTrue(app._dxf_binding_is_stale())
+        self.assertEqual(app.result_items, {})
+        self.assertIsNone(app.project_result)
+        relation_tables = {
+            issue.table for issue in app.last_cad_validation_report.errors
+        }
+        self.assertIn("struts", relation_tables)
+        self.assertIn("braces", relation_tables)
+        self.assertIn("Validation 發現", app.cad_import_status)
+
+    def test_waler_equivalent_reverse_pick_is_a_noop(self):
+        walers, _strut = self.project_geometry()
+        app = self.main_app_for_cad_import(walers=walers)
+        original_state = self.dxf_state()
+        app.dxf_last_import_debug = original_state
+        original_results = copy.deepcopy(app.result_items)
+        self.write_event(
+            self.linear_update_event(
+                "waler",
+                "W1",
+                start=(2000, 0),
+                end=(0, 0),
+            )
+        )
+
+        self.assertTrue(app.read_cad_event())
+
+        self.assertFalse(self.event_path.exists())
+        self.assertEqual(app.result_items, original_results)
+        self.assertFalse(app.project_dirty)
+        self.assertEqual(app.preview_update_count, 0)
+        self.assertIs(app.dxf_last_import_debug, original_state)
+        self.assertFalse(app._dxf_binding_is_stale())
+        self.assertIn("幾何未變更", app.cad_import_status)
+
+    def test_brace_update_syncs_one_safe_dxf_binding(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.braces = [brace]
+        app.dxf_last_import_debug = self.dxf_state(
+            include_strut=False,
+            brace=brace,
+        )
+        source_handles = copy.deepcopy(
+            app.dxf_last_import_debug["converted"]["braces"][0]["source_handles"]
+        )
+        self.write_event(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(250, 0),
+                end=(350, 1000),
+            )
+        )
+
+        self.assertTrue(app.read_cad_event())
+
+        self.assertEqual(
+            tuple(
+                app.braces[0][field]
+                for field in ("StartX", "StartY", "EndX", "EndY")
+            ),
+            (250, 0, 350, 1000),
+        )
+        self.assertEqual(
+            (app.braces[0]["FromWaler"], app.braces[0]["ToWaler"]),
+            ("W1", "W2"),
+        )
+        binding = app.dxf_last_import_debug["converted"]["braces"][0]
+        self.assertEqual(binding["start"], [250.0, 0.0])
+        self.assertEqual(binding["end"], [350.0, 1000.0])
+        self.assertEqual(binding["project_id"], "B2")
+        self.assertEqual(binding["selection_source"], "cad_manual")
+        self.assertEqual(binding["source_handles"], source_handles)
+        self.assertFalse(app._dxf_binding_is_stale())
+        self.assertEqual(app.result_items, {})
+        self.assertIn("DXF 工程線已同步", app.cad_import_status)
+        self.assertTrue(app.last_cad_validation_report.valid)
+
+    def test_ambiguous_brace_binding_marks_stale_without_rolling_back_project(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.braces = [brace]
+        app.dxf_last_import_debug = self.dxf_state(
+            include_strut=False,
+            brace=brace,
+            duplicate_brace=True,
+        )
+        old_bindings = copy.deepcopy(
+            app.dxf_last_import_debug["converted"]["braces"]
+        )
+        self.write_event(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(260, 0),
+                end=(360, 1000),
+            )
+        )
+
+        self.assertTrue(app.read_cad_event())
+
+        self.assertEqual(app.braces[0]["StartX"], 260)
+        self.assertTrue(app._dxf_binding_is_stale())
+        self.assertEqual(
+            app.dxf_last_import_debug["converted"]["braces"],
+            old_bindings,
+        )
+
+    def test_existing_stale_state_is_not_fake_synced_by_brace_update(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.braces = [brace]
+        app.dxf_last_import_debug = self.dxf_state(
+            include_strut=False,
+            brace=brace,
+        )
+        app.dxf_last_import_debug[app.DXF_BINDING_STALE_KEY] = True
+        old_binding = copy.deepcopy(
+            app.dxf_last_import_debug["converted"]["braces"][0]
+        )
+        self.write_event(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(270, 0),
+                end=(370, 1000),
+            )
+        )
+
+        self.assertTrue(app.read_cad_event())
+
+        self.assertEqual(app.braces[0]["StartX"], 270)
+        self.assertTrue(app._dxf_binding_is_stale())
+        self.assertEqual(
+            app.dxf_last_import_debug["converted"]["braces"][0],
+            old_binding,
+        )
+
+    def test_invalid_brace_relation_keeps_event_project_result_and_dxf_state(self):
+        walers, _strut = self.project_geometry()
+        brace = self.brace_row()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.braces = [brace]
+        app.dxf_last_import_debug = self.dxf_state(
+            include_strut=False,
+            brace=brace,
+        )
+        old_row = copy.deepcopy(app.braces[0])
+        old_state = copy.deepcopy(app.dxf_last_import_debug)
+        old_results = copy.deepcopy(app.result_items)
+        self.write_event(
+            self.linear_update_event(
+                "brace",
+                "B2",
+                start=(5000, 3000),
+                end=(5000, 4000),
+            )
+        )
+
+        self.assertFalse(app.read_cad_event())
+
+        self.assertTrue(self.event_path.is_file())
+        self.assertEqual(app.braces[0], old_row)
+        self.assertEqual(app.dxf_last_import_debug, old_state)
+        self.assertEqual(app.result_items, old_results)
+        self.assertIn("新斜撐幾何無法維持", app.cad_last_error)
+
+    def test_waler_and_brace_ack_failure_use_generic_row_rollback(self):
+        walers, _strut = self.project_geometry()
+        for member_type, table_name, target_id, row, event in (
+            (
+                "waler",
+                "walers",
+                "W1",
+                walers[0],
+                self.linear_update_event(
+                    "waler",
+                    "W1",
+                    start=(0, 100),
+                    end=(2000, 100),
+                ),
+            ),
+            (
+                "brace",
+                "braces",
+                "B2",
+                self.brace_row(),
+                self.linear_update_event(
+                    "brace",
+                    "B2",
+                    start=(250, 0),
+                    end=(350, 1000),
+                ),
+            ),
+        ):
+            with self.subTest(member_type=member_type):
+                app = self.main_app_for_cad_import(walers=walers)
+                setattr(app, table_name, [row])
+                if table_name == "braces":
+                    app.dxf_last_import_debug = self.dxf_state(
+                        include_strut=False,
+                        brace=row,
+                    )
+                else:
+                    app.dxf_last_import_debug = self.dxf_state()
+                original_row = copy.deepcopy(getattr(app, table_name)[0])
+                original_state = copy.deepcopy(app.dxf_last_import_debug)
+                original_results = copy.deepcopy(app.result_items)
+                app.cad_event_watcher = Mock()
+                app.cad_event_watcher.acknowledge.side_effect = OSError("ack failed")
+
+                with self.assertRaisesRegex(OSError, "ack failed"):
+                    app._apply_cad_event(event)
+
+                self.assertEqual(getattr(app, table_name), [original_row])
+                self.assertEqual(app.dxf_last_import_debug, original_state)
+                self.assertEqual(app.result_items, original_results)
+                self.assertEqual(app.preview_update_count, 0)
+
+    def test_project_replace_failure_does_not_ack_or_change_adjacent_state(self):
+        walers, _strut = self.project_geometry()
+        app = self.main_app_for_cad_import(walers=walers)
+        original_walers = copy.deepcopy(app.walers)
+        original_results = copy.deepcopy(app.result_items)
+        original_state = self.dxf_state()
+        app.dxf_last_import_debug = original_state
+        app.cad_event_watcher = Mock()
+        project_data = app._ensure_project_data()
+
+        with patch.object(
+            project_data,
+            "replace_row",
+            side_effect=ValueError("replace failed"),
+        ), self.assertRaisesRegex(ValueError, "replace failed"):
+            app._apply_cad_event(
+                self.linear_update_event(
+                    "waler",
+                    "W1",
+                    start=(0, 100),
+                    end=(2000, 100),
+                )
+            )
+
+        app.cad_event_watcher.acknowledge.assert_not_called()
+        self.assertEqual(app.walers, original_walers)
+        self.assertEqual(app.result_items, original_results)
+        self.assertIs(app.dxf_last_import_debug, original_state)
+
     def test_ack_failure_rolls_back_project_row_and_dxf_state(self):
         walers, strut = self.project_geometry()
         app = self.main_app_for_cad_import(walers=walers)
@@ -742,6 +1317,36 @@ class CADBuilderIntegrationTests(unittest.TestCase):
             "事件已保留",
             dialog.cad_temp_status_var.set.call_args.args[0],
         )
+
+    def test_dxf_import_dialog_leaves_waler_and_brace_updates_for_main(self):
+        for member_type, target_id, command_name in (
+            ("waler", "W1", "UPDWALER"),
+            ("brace", "B2", "UPDBRACE"),
+        ):
+            with self.subTest(member_type=member_type):
+                event = self.linear_update_event(
+                    member_type,
+                    target_id,
+                    start=(0, 0),
+                    end=(1000, 0),
+                )
+                self.write_event(event)
+                dialog = DXFImportDialog.__new__(DXFImportDialog)
+                dialog.world_result = object()
+                dialog._selected_member = lambda: SimpleNamespace(id=target_id)
+                dialog._member_role = lambda _member: (member_type, member_type)
+                dialog.cad_temp_status_var = Mock()
+                dialog.cad_event_watcher = TempEventWatcher(self.event_path)
+
+                with patch("tkinter.messagebox.showerror") as show_error:
+                    dialog._read_cad_engineering_line()
+
+                self.assertTrue(self.event_path.is_file())
+                show_error.assert_not_called()
+                self.assertIn(
+                    command_name,
+                    dialog.cad_temp_status_var.set.call_args.args[0],
+                )
 
     def test_dxf_import_dialog_does_not_consume_cancel_event(self):
         event = {

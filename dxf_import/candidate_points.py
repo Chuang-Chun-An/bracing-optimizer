@@ -13,7 +13,6 @@ from .geometry import (
     _distance,
     _dot,
     _length,
-    _line_distance,
     _line_segment_intersection_point,
     _midpoint,
     _project_onto_segment,
@@ -34,6 +33,7 @@ from .models import (
     ComponentAssociation,
     CoordinateSystem,
     CornerBrace,
+    DoubleSupportCandidate,
     DXFImportError,
     DXFImportResult,
     EngineeringLineCandidate,
@@ -54,7 +54,10 @@ from .validation import (
     validate_candidate_point_pair,
     validate_duplicate_engineering_members,
 )
-from .support_pairing import detect_double_support_candidates
+from .support_pairing import (
+    detect_double_support_candidates,
+    preserve_double_support_decisions,
+)
 
 
 class CandidatePointStore:
@@ -367,53 +370,45 @@ class CandidatePointBuilder:
         axis = _unit(world_start, world_end)
         length = _length(world_start, world_end)
         raw_options: list[
-            tuple[float, Point, SourceGeometry, tuple[str, ...]]
+            tuple[float, Point, SourceGeometry, tuple[str, ...], str]
         ] = []
         if axis is not None:
-            corridor = max(
-                self.tolerances.collinear_tolerance_mm,
-                member.source_width * 0.75,
-                self.tolerances.endpoint_tolerance_mm,
-            )
-            extension = self.tolerances.connection_tolerance_mm
             member_handles = set(member.source_handles)
             for geometry in self.source_geometry:
                 if geometry.role != role:
                     continue
                 if geometry.source_handle not in member_handles:
                     continue
-                if len(geometry.points) < 2:
-                    continue
-                xs = [point[0] for point in geometry.points]
-                ys = [point[1] for point in geometry.points]
-                if math.hypot(max(xs) - min(xs), max(ys) - min(ys)) < (
-                    self.tolerances.minimum_component_length_mm
-                ):
-                    continue
                 for point in geometry.points:
                     along = _dot(_vector(world_start, point), axis)
-                    perpendicular = _line_distance(point, world_start, world_end)
-                    if perpendicular > corridor or not (-extension <= along <= length + extension):
-                        continue
                     endpoint_distance = min(
                         _distance(point, world_start),
                         _distance(point, world_end),
                     )
-                    score = 0.82 if endpoint_distance <= extension else 0.58
-                    valid_for = (
-                        ("start",)
-                        if along < length / 2
-                        else ("end",)
-                        if along > length / 2
-                        else ("start", "end")
+                    score = (
+                        0.82
+                        if endpoint_distance
+                        <= self.tolerances.connection_tolerance_mm
+                        else 0.58
                     )
-                    raw_options.append((score, point, geometry, valid_for))
+                    if along < length / 2:
+                        valid_for = ("start",)
+                        side_label = "起點側"
+                    elif along > length / 2:
+                        valid_for = ("end",)
+                        side_label = "終點側"
+                    else:
+                        valid_for = ("start", "end")
+                        side_label = "中心"
+                    raw_options.append(
+                        (score, point, geometry, valid_for, side_label)
+                    )
         raw_options.sort(key=lambda item: (-item[0], item[1][0], item[1][1]))
-        for score, point, geometry, valid_for in raw_options[:40]:
+        for score, point, geometry, valid_for, side_label in raw_options:
             store.add(
                 point,
                 point_type="source_geometry_vertex",
-                label="原始外框有效頂點",
+                label=f"原始外框頂點（{side_label}）",
                 source_handles=(geometry.source_handle,),
                 source_entity_types=(geometry.source_entity_type,),
                 score=score,
@@ -509,6 +504,47 @@ def build_candidate_points(
         corner_braces=tuple(
             builder.build(member) for member in result.corner_braces
         ),
+    )
+
+
+def rebuild_candidate_points_for_components(
+    result: DXFImportResult,
+    component_ids: Sequence[str],
+    tolerances: GeometryTolerances | None = None,
+    *,
+    selection_source: str = "geometry_adjustment",
+) -> DXFImportResult:
+    """Rebuild only changed members and leave every unrelated choice untouched."""
+
+    identifiers = {str(component_id) for component_id in component_ids}
+    if not identifiers:
+        return result
+    tolerances = tolerances or GeometryTolerances()
+    engineering_source_geometry = tuple(
+        geometry
+        for geometry in result.source_geometry
+        if geometry.role not in {"continuous_wall", "auxiliary", "ignore"}
+    )
+    builder = CandidatePointBuilder(
+        engineering_source_geometry,
+        result.walers,
+        tolerances,
+    )
+
+    def rebuild(member: Waler | Strut | Brace | AuxiliaryComponent):
+        if member.id not in identifiers:
+            return member
+        rebuilt = builder.build(member)
+        return replace(rebuilt, selection_source=selection_source)
+
+    return replace(
+        result,
+        walers=tuple(rebuild(member) for member in result.walers),
+        struts=tuple(rebuild(member) for member in result.struts),
+        braces=tuple(rebuild(member) for member in result.braces),
+        columns=tuple(rebuild(member) for member in result.columns),
+        beams=tuple(rebuild(member) for member in result.beams),
+        corner_braces=tuple(rebuild(member) for member in result.corner_braces),
     )
 
 
@@ -769,6 +805,8 @@ def associate_components_to_struts(
     columns: Sequence[Column],
     beams: Sequence[Beam],
     tolerances: GeometryTolerances | None = None,
+    *,
+    double_support_candidates: Sequence[DoubleSupportCandidate] = (),
 ) -> tuple[
     tuple[Strut, ...],
     tuple[Column, ...],
@@ -776,7 +814,13 @@ def associate_components_to_struts(
     tuple[ComponentAssociation, ...],
     tuple[ValidationMessage, ...],
 ]:
-    """Associate Columns by projection and Beams by every path crossing."""
+    """Rebuild Column/Beam constraints from current geometry.
+
+    A Column keeps one nearest primary association.  When that primary Strut
+    has exactly one accepted double-support partner and the Column is also a
+    legal option for the partner, both Struts receive independently projected
+    constraints.  Merely being close to two unrelated Struts is not enough.
+    """
 
     tolerances = tolerances or GeometryTolerances()
     assignments: dict[str, dict[str, list[tuple[float, str]]]] = {
@@ -784,6 +828,22 @@ def associate_components_to_struts(
     }
     associations: list[ComponentAssociation] = []
     messages: list[ValidationMessage] = []
+    strut_ids = set(assignments)
+    accepted_memberships: dict[
+        str, list[tuple[DoubleSupportCandidate, str]]
+    ] = defaultdict(list)
+    for candidate in double_support_candidates:
+        first_id = str(candidate.first_strut_id)
+        second_id = str(candidate.second_strut_id)
+        if (
+            not candidate.accepted
+            or first_id == second_id
+            or first_id not in strut_ids
+            or second_id not in strut_ids
+        ):
+            continue
+        accepted_memberships[first_id].append((candidate, second_id))
+        accepted_memberships[second_id].append((candidate, first_id))
 
     def associate_column(component: Column) -> Column:
         center = component.world_reference_point or _midpoint(
@@ -832,7 +892,32 @@ def associate_components_to_struts(
                 local_association_point=None,
             )
         distance, strut_id, station, projection = options[0]
-        if (
+        options_by_strut_id = {option[1]: option for option in options}
+        memberships = accepted_memberships.get(strut_id, ())
+        assignment_options = (options[0],)
+        eligible_memberships = tuple(
+            (candidate, partner_id)
+            for candidate, partner_id in memberships
+            if partner_id in options_by_strut_id
+        )
+        if len(memberships) == 1 and len(eligible_memberships) == 1:
+            _candidate, partner_id = eligible_memberships[0]
+            assignment_options = (
+                options[0],
+                options_by_strut_id[partner_id],
+            )
+        elif len(memberships) > 1 and eligible_memberships:
+            messages.append(
+                ValidationMessage(
+                    "warning",
+                    "AMBIGUOUS_COMPONENT_ASSOCIATION",
+                    f"{component.id} 的 primary 支撐 {strut_id} 同時屬於多個已採用雙路群組，"
+                    f"保守採用 primary 單支關聯。",
+                    "column",
+                    component.source_handles,
+                )
+            )
+        elif (
             len(options) > 1
             and options[1][0] - distance
             <= tolerances.ambiguous_connection_delta_mm
@@ -846,18 +931,26 @@ def associate_components_to_struts(
                     component.source_handles,
                 )
             )
-        assignments[strut_id]["column"].append((station, component.id))
-        associations.append(
-            ComponentAssociation(
-                component.id,
-                "column",
-                strut_id,
-                station,
-                distance,
-                projection,
-                projection,
+        for (
+            assignment_distance,
+            assignment_strut_id,
+            assignment_station,
+            assignment_projection,
+        ) in assignment_options:
+            assignments[assignment_strut_id]["column"].append(
+                (assignment_station, component.id)
             )
-        )
+            associations.append(
+                ComponentAssociation(
+                    component.id,
+                    "column",
+                    assignment_strut_id,
+                    assignment_station,
+                    assignment_distance,
+                    assignment_projection,
+                    assignment_projection,
+                )
+            )
         return replace(
             component,
             associated_strut_id=strut_id,
@@ -1067,6 +1160,53 @@ def associate_components_to_struts(
         tuple(associations),
         tuple(messages),
     )
+
+
+def rebuild_component_associations(
+    result: DXFImportResult,
+    tolerances: GeometryTolerances | None = None,
+) -> DXFImportResult:
+    """Rebuild every Column/Beam-derived association from current review state.
+
+    This wrapper is safe for either world or local display coordinates.  It
+    clears old association messages and replaces all derived Strut fields and
+    association records in one pass, while leaving CornerBrace data alone.
+    """
+
+    tolerances = tolerances or GeometryTolerances()
+    coordinate_system = result.coordinate_system
+    world_result = apply_coordinate_system(result, CoordinateSystem())
+    (
+        struts,
+        columns,
+        beams,
+        component_associations,
+        association_messages,
+    ) = associate_components_to_struts(
+        world_result.struts,
+        world_result.columns,
+        world_result.beams,
+        tolerances,
+        double_support_candidates=world_result.double_support_candidates,
+    )
+    retained_messages = tuple(
+        message
+        for message in world_result.messages
+        if message.code not in COMPONENT_ASSOCIATION_CODES
+    )
+    rebuilt_world = replace(
+        world_result,
+        struts=struts,
+        columns=columns,
+        beams=beams,
+        messages=(*retained_messages, *association_messages),
+        component_associations=component_associations,
+        beam_crossings=tuple(
+            crossing for beam in beams for crossing in beam.crossings
+        ),
+        coordinate_system=CoordinateSystem(),
+    )
+    return apply_coordinate_system(rebuilt_world, coordinate_system)
 
 
 def attach_corner_braces_to_struts(
@@ -1309,6 +1449,10 @@ def apply_candidate_point_selection(
     connected_struts, connected_braces, connection_messages = (
         connect_components_to_walers(struts, braces, walers, tolerances)
     )
+    double_support_candidates = preserve_double_support_decisions(
+        result.double_support_candidates,
+        detect_double_support_candidates(connected_struts, tolerances),
+    )
     (
         connected_struts,
         columns,
@@ -1320,15 +1464,12 @@ def apply_candidate_point_selection(
         columns,
         beams,
         tolerances,
+        double_support_candidates=double_support_candidates,
     )
     connected_struts = attach_corner_braces_to_struts(
         connected_struts,
         walers,
         corner_braces,
-        tolerances,
-    )
-    double_support_candidates = detect_double_support_candidates(
-        connected_struts,
         tolerances,
     )
     duplicate_messages = validate_duplicate_engineering_members(

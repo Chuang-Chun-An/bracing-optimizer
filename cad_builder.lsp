@@ -4,9 +4,11 @@
 ;;;
 ;;; Commands:
 ;;;   ADDWALER
+;;;   UPDWALER
 ;;;   ADDSTRUT
 ;;;   UPDSTRUT
 ;;;   ADDBRACE
+;;;   UPDBRACE
 ;;;   SUPSTATUS
 ;;;   SUPCLEAR
 
@@ -261,8 +263,47 @@
   (princ)
 )
 
+(defun cb:read-target-id (id-label / target-id)
+  (setq target-id (getstring T (strcat "\nTarget " id-label ": ")))
+  (if target-id (strcase target-id) "")
+)
+
+(defun cb:capture-linear-update (event-type obj id-label / event-path target-id points)
+  (setq event-path (cb:event-path))
+  (if (null event-path)
+    (cb:temp-directory-message)
+    (if (findfile event-path)
+      (cb:pending-message)
+      (progn
+        (setq target-id (cb:read-target-id id-label))
+        (if (= target-id "")
+          (prompt (strcat "\n" obj " update cancelled: target " id-label " is required."))
+          (progn
+            (setq points (cb:pick-two-points obj))
+            (if points
+              (cb:write-event
+                event-type
+                "update"
+                target-id
+                (car points)
+                (cadr points)
+                ""
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+  (princ)
+)
+
 (defun c:ADDWALER ()
   (cb:capture-simple "waler" "Waler")
+)
+
+(defun c:UPDWALER ()
+  (cb:capture-linear-update "waler" "Waler" "WalerID")
 )
 
 (defun cb:capture-strut (operation / points p1 p2 beam-positions column-positions extra-fields event-path target-id)
@@ -274,10 +315,7 @@
       (progn
         (setq target-id "")
         (if (= operation "update")
-          (progn
-            (setq target-id (getstring T "\nTarget StrutID (example S5): "))
-            (if target-id (setq target-id (strcase target-id)))
-          )
+          (setq target-id (cb:read-target-id "StrutID"))
         )
         (if (and (= operation "update") (= target-id ""))
           (prompt "\nStrut update cancelled: target StrutID is required.")
@@ -335,6 +373,10 @@
   (cb:capture-simple "brace" "Brace")
 )
 
+(defun c:UPDBRACE ()
+  (cb:capture-linear-update "brace" "Brace" "BraceID")
+)
+
 (defun c:SUPSTATUS (/ event-path)
   (setq event-path (cb:event-path))
   (if (null event-path)
@@ -380,5 +422,5 @@
 )
 
 (prompt "\n[CAD Bridge] Loaded successfully.")
-(prompt "\nCommands: ADDWALER, ADDSTRUT, UPDSTRUT, ADDBRACE, SUPSTATUS, SUPCLEAR")
+(prompt "\nCommands: ADDWALER, UPDWALER, ADDSTRUT, UPDSTRUT, ADDBRACE, UPDBRACE, SUPSTATUS, SUPCLEAR")
 (princ)

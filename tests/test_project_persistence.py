@@ -131,6 +131,35 @@ class ProjectPersistenceTests(unittest.TestCase):
         self.assertEqual(saved["dxf_asset"]["original_file_name"], "原始 圖面.dxf")
         self.assertNotIn(str(self.project_path.parent), saved["dxf_asset"]["relative_path"])
 
+    def test_source_exclusion_state_round_trips_without_schema_change_or_dxf_write(self):
+        before_bytes = self.external.read_bytes()
+        before_mtime = self.external.stat().st_mtime_ns
+        state = import_state(self.external)
+        state["source_fingerprint"] = self.source.sha256.upper()
+        state["excluded_sources"] = [
+            {
+                "role": "beam",
+                "source_handles": ["6EF"],
+                "source_layers": ["BEAM"],
+                "source_entity_types": ["LWPOLYLINE"],
+                "display_id_when_excluded": "待修-6EF",
+                "reason": "user_excluded",
+                "manual_override": None,
+            }
+        ]
+
+        self.save(state=state)
+        saved = json.loads(self.project_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(saved["schema_version"], 3)
+        self.assertEqual(saved["dxf_import_state"]["source_fingerprint"], self.source.sha256.upper())
+        self.assertEqual(
+            saved["dxf_import_state"]["excluded_sources"][0]["source_handles"],
+            ["6EF"],
+        )
+        self.assertEqual(self.external.read_bytes(), before_bytes)
+        self.assertEqual(self.external.stat().st_mtime_ns, before_mtime)
+
     def test_relative_path_resolves_after_moving_the_project_folder(self):
         result = self.save()
         moved = self.root / "另一台電腦" / "搬移後專案"
@@ -421,6 +450,28 @@ class DxfCompatibilityTests(unittest.TestCase):
             merged["converted"]["walers"][0]["selection_source"],
             "manual",
         )
+
+    def test_changed_content_relink_adopts_candidate_exclusion_scope(self):
+        saved = copy.deepcopy(self.saved)
+        saved["source_fingerprint"] = "OLD-SHA"
+        saved["excluded_sources"] = [
+            {"role": "beam", "source_handles": ["6EF"]}
+        ]
+        candidate = import_state(self.source, handle="99")
+        candidate["source_fingerprint"] = "NEW-SHA"
+        candidate["excluded_sources"] = []
+        report = self.checker.compare(saved, candidate, self.rows)
+
+        merged = self.checker.merge_source_references(
+            saved,
+            candidate,
+            report,
+            source_path=self.source,
+        )
+
+        self.assertTrue(report.compatible)
+        self.assertEqual(merged["source_fingerprint"], "NEW-SHA")
+        self.assertEqual(merged["excluded_sources"], [])
 
     def test_geometry_change_is_not_silently_accepted(self):
         candidate = import_state(self.source, handle="99", offset=1000)

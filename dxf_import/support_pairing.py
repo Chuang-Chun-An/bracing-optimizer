@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import replace
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from .geometry import (
     _angle_difference_deg,
@@ -13,7 +13,135 @@ from .geometry import (
     _midpoint,
     _projection_overlap_ratio,
 )
-from .models import DoubleSupportCandidate, GeometryTolerances, Strut
+from .models import (
+    DXFImportResult,
+    DoubleSupportCandidate,
+    GeometryTolerances,
+    Strut,
+)
+
+
+DoubleSupportSourceIdentity = tuple[tuple[str, ...], tuple[str, ...]]
+
+
+def _strut_source_identity(strut: Strut) -> tuple[str, ...] | None:
+    handles = tuple(
+        sorted(
+            {
+                str(handle).strip().upper()
+                for handle in strut.source_handles
+                if str(handle).strip()
+            }
+        )
+    )
+    return handles or None
+
+
+def double_support_candidate_identity(
+    result: DXFImportResult,
+    candidate: DoubleSupportCandidate,
+) -> DoubleSupportSourceIdentity | None:
+    """Identify a physical pair by both Struts' normalized DXF handles."""
+
+    strut_by_id = {strut.id: strut for strut in result.struts}
+    first = strut_by_id.get(candidate.first_strut_id)
+    second = strut_by_id.get(candidate.second_strut_id)
+    if first is None or second is None:
+        return None
+    first_identity = _strut_source_identity(first)
+    second_identity = _strut_source_identity(second)
+    if first_identity is None or second_identity is None:
+        return None
+    return tuple(sorted((first_identity, second_identity)))
+
+
+def double_support_decisions_from_review_state(
+    state: Mapping[str, Any] | None,
+) -> dict[DoubleSupportSourceIdentity, bool]:
+    """Read only explicit accepted/rejected decisions from review JSON."""
+
+    if not isinstance(state, Mapping):
+        return {}
+    raw_items = state.get("double_support_decisions", ())
+    if not isinstance(raw_items, Sequence) or isinstance(raw_items, (str, bytes)):
+        return {}
+    decisions: dict[DoubleSupportSourceIdentity, bool] = {}
+    conflicts: set[DoubleSupportSourceIdentity] = set()
+    for raw in raw_items:
+        if not isinstance(raw, Mapping):
+            continue
+        first = _normalized_handle_identity(raw.get("first_source_handles", ()))
+        second = _normalized_handle_identity(raw.get("second_source_handles", ()))
+        if first is None or second is None:
+            continue
+        identity = tuple(sorted((first, second)))
+        accepted = bool(raw.get("accepted", False))
+        if identity in decisions and decisions[identity] != accepted:
+            conflicts.add(identity)
+        else:
+            decisions[identity] = accepted
+    for identity in conflicts:
+        decisions.pop(identity, None)
+    return decisions
+
+
+def _normalized_handle_identity(values: Any) -> tuple[str, ...] | None:
+    if isinstance(values, (str, bytes)):
+        values = (values,)
+    if not isinstance(values, Sequence):
+        return None
+    handles = tuple(
+        sorted(
+            {
+                str(value).strip().upper()
+                for value in values
+                if str(value).strip()
+            }
+        )
+    )
+    return handles or None
+
+
+def serialize_double_support_decisions(
+    decisions: Mapping[DoubleSupportSourceIdentity, bool],
+) -> list[dict[str, Any]]:
+    """Return deterministic JSON for explicit double-support decisions."""
+
+    return [
+        {
+            "first_source_handles": list(identity[0]),
+            "second_source_handles": list(identity[1]),
+            "accepted": bool(accepted),
+        }
+        for identity, accepted in sorted(decisions.items())
+    ]
+
+
+def apply_double_support_decisions(
+    result: DXFImportResult,
+    decisions: Mapping[DoubleSupportSourceIdentity, bool],
+) -> tuple[DoubleSupportCandidate, ...]:
+    """Replay saved pair decisions onto newly detected candidates."""
+
+    candidate_by_identity = {
+        identity: candidate
+        for candidate in result.double_support_candidates
+        if (identity := double_support_candidate_identity(result, candidate))
+        is not None
+    }
+    updated = tuple(result.double_support_candidates)
+    # Reject first, then accept through the existing one-to-one rule.
+    for accepted in (False, True):
+        for identity, decision in sorted(decisions.items()):
+            candidate = candidate_by_identity.get(identity)
+            if candidate is None or decision != accepted:
+                continue
+            updated = set_double_support_candidate_accepted(
+                updated,
+                candidate.id,
+                accepted,
+            )
+    return updated
 
 
 def detect_double_support_candidates(
@@ -172,7 +300,80 @@ def set_double_support_candidate_accepted(
     return tuple(updated)
 
 
+def preserve_double_support_decisions(
+    previous: Sequence[DoubleSupportCandidate],
+    detected: Sequence[DoubleSupportCandidate],
+) -> tuple[DoubleSupportCandidate, ...]:
+    """Carry accepted/rejected review decisions across a geometry rebuild.
+
+    This helper is for an in-place geometry rebuild where the recognized
+    Strut identities remain stable.  A pair that no longer passes detection
+    is not kept; a newly detected pair retains the detector's default state.
+    """
+
+    accepted_by_pair = {
+        frozenset((item.first_strut_id, item.second_strut_id)): item.accepted
+        for item in previous
+    }
+    return tuple(
+        replace(
+            item,
+            accepted=accepted_by_pair.get(
+                frozenset((item.first_strut_id, item.second_strut_id)),
+                item.accepted,
+            ),
+        )
+        for item in detected
+    )
+
+
+def preserve_double_support_result_decisions(
+    previous: DXFImportResult,
+    detected: DXFImportResult,
+) -> tuple[DoubleSupportCandidate, ...]:
+    """Carry review decisions across re-recognition by DXF source identity.
+
+    Source exclusion may renumber S1/S2-style IDs.  Matching the normalized
+    source-handle sets of both members prevents an old decision from being
+    applied to a different physical pair that happens to reuse those IDs.
+    """
+
+    decisions: dict[tuple[tuple[str, ...], tuple[str, ...]], bool] = {}
+    conflicting_identities: set[
+        tuple[tuple[str, ...], tuple[str, ...]]
+    ] = set()
+    for candidate in previous.double_support_candidates:
+        identity = double_support_candidate_identity(previous, candidate)
+        if identity is None:
+            continue
+        if identity in decisions and decisions[identity] != candidate.accepted:
+            conflicting_identities.add(identity)
+        else:
+            decisions[identity] = candidate.accepted
+    for identity in conflicting_identities:
+        decisions.pop(identity, None)
+
+    return tuple(
+        replace(
+            candidate,
+            accepted=decisions.get(identity, candidate.accepted),
+        )
+        if (
+            identity := double_support_candidate_identity(detected, candidate)
+        ) is not None
+        else candidate
+        for candidate in detected.double_support_candidates
+    )
+
+
 __all__ = [
+    "DoubleSupportSourceIdentity",
+    "apply_double_support_decisions",
     "detect_double_support_candidates",
+    "double_support_candidate_identity",
+    "double_support_decisions_from_review_state",
+    "preserve_double_support_decisions",
+    "preserve_double_support_result_decisions",
+    "serialize_double_support_decisions",
     "set_double_support_candidate_accepted",
 ]

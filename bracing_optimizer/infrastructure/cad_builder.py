@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from bracing_optimizer.application.project_data import TABLE_SPECS, build_input_row
+from dxf_import.models import GeometryTolerances
 
 
 EVENT_FILE_NAME = "support_distribution_uv_cad_builder_temp.json"
@@ -38,6 +39,25 @@ STRUT_BRACE_LENGTH_FIELDS = (
     "ToBraceToWalerEndLen",
 )
 STRUT_UPDATE_FIELDS = frozenset((*COORDINATE_FIELDS, *POSITION_FIELDS))
+LINEAR_UPDATE_FIELDS = frozenset(COORDINATE_FIELDS)
+MINIMUM_LINEAR_UPDATE_LENGTH_MM = GeometryTolerances().minimum_component_length_mm
+UPDATE_POLICIES = {
+    "walers": {
+        "id_field": "WalerID",
+        "label": "Waler",
+        "allowed_fields": LINEAR_UPDATE_FIELDS,
+    },
+    "struts": {
+        "id_field": "StrutID",
+        "label": "Strut",
+        "allowed_fields": STRUT_UPDATE_FIELDS,
+    },
+    "braces": {
+        "id_field": "BraceID",
+        "label": "Brace",
+        "allowed_fields": LINEAR_UPDATE_FIELDS,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -151,19 +171,21 @@ def _event_contract(event: Mapping[str, Any]) -> tuple[str, str, str, Mapping[st
             raise ValueError("CAD cancel 事件的 data 必須是空物件。")
         return operation, table_name, "", values
     if operation == "update":
-        if table_name != "struts":
-            raise ValueError("第一版 CAD update 只支援 Strut。")
+        policy = UPDATE_POLICIES[table_name]
         if not target_id:
-            raise ValueError("Strut update 缺少 target_id。")
-        missing = [field for field in STRUT_UPDATE_FIELDS if field not in values]
+            raise ValueError(f"{policy['label']} update 缺少 target_id。")
+        allowed_fields = policy["allowed_fields"]
+        missing = [field for field in allowed_fields if field not in values]
         if missing:
             raise ValueError(
-                "Strut update 缺少欄位：" + ", ".join(sorted(missing))
+                f"{policy['label']} update 缺少欄位："
+                + ", ".join(sorted(missing))
             )
-        unexpected = set(values) - STRUT_UPDATE_FIELDS
+        unexpected = set(values) - allowed_fields
         if unexpected:
             raise ValueError(
-                "Strut update 不得修改欄位：" + ", ".join(sorted(unexpected))
+                f"{policy['label']} update 不得修改欄位："
+                + ", ".join(sorted(unexpected))
             )
     elif target_id:
         raise ValueError("CAD add 事件不得包含 target_id。")
@@ -234,6 +256,7 @@ def _unique_row_index(
     rows: Sequence[Mapping[str, Any]],
     field: str,
     identifier: str,
+    table_name: str,
 ) -> int:
     target = identifier.casefold()
     matches = [
@@ -242,9 +265,11 @@ def _unique_row_index(
         if str(row.get(field, "") or "").strip().casefold() == target
     ]
     if not matches:
-        raise ValueError(f"找不到要更新的支撐：{identifier}")
+        raise ValueError(f"找不到目標構件 {identifier}（{table_name}）。")
     if len(matches) != 1:
-        raise ValueError(f"支撐 ID 不唯一，無法更新：{identifier}")
+        raise ValueError(
+            f"目標構件 {identifier} 在 {table_name} 中不是唯一 ID。"
+        )
     return matches[0]
 
 
@@ -266,11 +291,13 @@ def _waler_line(
     return line
 
 
-def _normalized_strut_direction(
+def _normalized_waler_relation_direction(
     start: tuple[float, float],
     end: tuple[float, float],
     old_row: Mapping[str, Any],
     walers: Sequence[Mapping[str, Any]],
+    *,
+    member_label: str,
 ) -> bool:
     """Return True when the event direction must be reversed."""
 
@@ -296,7 +323,8 @@ def _normalized_strut_direction(
     reverse_score = score(end, start)
     if direct_score is None and reverse_score is None:
         raise ValueError(
-            "新支撐的兩種方向都無法符合原 FromWaler / ToWaler；未套用更新。"
+            f"新{member_label}幾何無法維持原 FromWaler / ToWaler 關係，"
+            "本次更新未套用。"
         )
     if direct_score is None:
         return True
@@ -311,6 +339,45 @@ def _normalized_strut_direction(
     direct_change = math.dist(old_line[0], start) + math.dist(old_line[1], end)
     reverse_change = math.dist(old_line[0], end) + math.dist(old_line[1], start)
     return reverse_change < direct_change
+
+
+def _normalized_waler_direction(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    old_row: Mapping[str, Any],
+) -> bool:
+    """Return True when reversing best preserves old Waler endpoint semantics."""
+
+    old_line = _mapping_line(old_row)
+    if old_line is None:
+        return False
+    forward_cost = math.dist(old_line[0], start) + math.dist(old_line[1], end)
+    reverse_cost = math.dist(old_line[0], end) + math.dist(old_line[1], start)
+    return reverse_cost < forward_cost
+
+
+def _coordinates_changed(
+    old_row: Mapping[str, Any],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> bool:
+    old_line = _mapping_line(old_row)
+    return old_line is None or any(
+        not math.isclose(old, new, rel_tol=0.0, abs_tol=1e-9)
+        for old, new in zip((*old_line[0], *old_line[1]), (*start, *end))
+    )
+
+
+def _validate_linear_update_length(
+    start: tuple[float, float],
+    end: tuple[float, float],
+    member_label: str,
+) -> None:
+    if math.dist(start, end) < MINIMUM_LINEAR_UPDATE_LENGTH_MM:
+        raise ValueError(
+            f"{member_label} update 線段長度必須至少為 "
+            f"{MINIMUM_LINEAR_UPDATE_LENGTH_MM:g} mm。"
+        )
 
 
 class CadEventReader:
@@ -423,14 +490,92 @@ class CadEventMapper:
                 world_end,
             )
 
-        rows = rows_by_table.get("struts", ())
-        row_index = _unique_row_index(rows, "StrutID", target_id)
-        old_row = rows[row_index]
-        reverse = _normalized_strut_direction(
+        policy_mapper = {
+            "walers": cls._map_waler_update,
+            "struts": cls._map_strut_update,
+            "braces": cls._map_brace_update,
+        }[table_name]
+        policy = UPDATE_POLICIES[table_name]
+        rows = rows_by_table.get(table_name, ())
+        row_index = _unique_row_index(
+            rows,
+            policy["id_field"],
+            target_id,
+            table_name,
+        )
+        return policy_mapper(
+            target_id,
+            values,
+            rows_by_table,
+            rows[row_index],
+            row_index,
+            project_start,
+            project_end,
+            world_start,
+            world_end,
+        )
+
+    @staticmethod
+    def _map_waler_update(
+        target_id,
+        _values,
+        _rows_by_table,
+        old_row,
+        row_index,
+        project_start,
+        project_end,
+        world_start,
+        world_end,
+    ) -> CadMappedEvent:
+        table_name = "walers"
+        policy = UPDATE_POLICIES[table_name]
+        _validate_linear_update_length(
+            project_start,
+            project_end,
+            policy["label"],
+        )
+        if _normalized_waler_direction(project_start, project_end, old_row):
+            project_start, project_end = project_end, project_start
+            world_start, world_end = world_end, world_start
+
+        staged_row = copy.deepcopy(dict(old_row))
+        staged_row.update(
+            StartX=_normalized_number(project_start[0], "StartX"),
+            StartY=_normalized_number(project_start[1], "StartY"),
+            EndX=_normalized_number(project_end[0], "EndX"),
+            EndY=_normalized_number(project_end[1], "EndY"),
+        )
+        return CadMappedEvent(
+            "update",
+            table_name,
+            staged_row,
+            row_index,
+            str(old_row.get(policy["id_field"], target_id) or target_id).strip(),
+            world_start,
+            world_end,
+            _coordinates_changed(old_row, project_start, project_end),
+        )
+
+    @staticmethod
+    def _map_strut_update(
+        target_id,
+        values,
+        rows_by_table,
+        old_row,
+        row_index,
+        project_start,
+        project_end,
+        world_start,
+        world_end,
+    ) -> CadMappedEvent:
+        table_name = "struts"
+        policy = UPDATE_POLICIES[table_name]
+        reverse = _normalized_waler_relation_direction(
             project_start,
             project_end,
             old_row,
             rows_by_table.get("walers", ()),
+            member_label="支撐",
         )
         beam_positions = _position_values(values["BeamPositions"], "BeamPositions")
         column_positions = _position_values(
@@ -463,14 +608,12 @@ class CadEventMapper:
         staged_row["AssociatedColumnIDs"] = ""
         staged_row["AssociatedBeamIDs"] = ""
 
-        old_line = _mapping_line(old_row)
-        endpoints_changed = old_line is None or any(
-            not math.isclose(old, new, rel_tol=0.0, abs_tol=1e-9)
-            for old, new in zip(
-                (*old_line[0], *old_line[1]),
-                (*project_start, *project_end),
-            )
+        endpoints_changed = _coordinates_changed(
+            old_row,
+            project_start,
+            project_end,
         )
+
         def has_corner_brace_value(field: str) -> bool:
             value = old_row.get(field, 0)
             try:
@@ -486,16 +629,71 @@ class CadEventMapper:
                 staged_row[field] = 0
 
         return CadMappedEvent(
-            operation,
+            "update",
             table_name,
             staged_row,
             row_index,
-            str(old_row.get("StrutID", target_id) or target_id).strip(),
+            str(old_row.get(policy["id_field"], target_id) or target_id).strip(),
             world_start,
             world_end,
             endpoints_changed,
             associated_ids_cleared,
             corner_brace_lengths_cleared,
+        )
+
+    @staticmethod
+    def _map_brace_update(
+        target_id,
+        _values,
+        rows_by_table,
+        old_row,
+        row_index,
+        project_start,
+        project_end,
+        world_start,
+        world_end,
+    ) -> CadMappedEvent:
+        table_name = "braces"
+        policy = UPDATE_POLICIES[table_name]
+        _validate_linear_update_length(
+            project_start,
+            project_end,
+            policy["label"],
+        )
+        from_id = str(old_row.get("FromWaler", "") or "").strip()
+        to_id = str(old_row.get("ToWaler", "") or "").strip()
+        if not from_id or not to_id or from_id.casefold() == to_id.casefold():
+            raise ValueError(
+                "既有斜撐必須具有不同的 FromWaler / ToWaler，"
+                "本次更新未套用。"
+            )
+        reverse = _normalized_waler_relation_direction(
+            project_start,
+            project_end,
+            old_row,
+            rows_by_table.get("walers", ()),
+            member_label="斜撐",
+        )
+        if reverse:
+            project_start, project_end = project_end, project_start
+            world_start, world_end = world_end, world_start
+
+        staged_row = copy.deepcopy(dict(old_row))
+        staged_row.update(
+            StartX=_normalized_number(project_start[0], "StartX"),
+            StartY=_normalized_number(project_start[1], "StartY"),
+            EndX=_normalized_number(project_end[0], "EndX"),
+            EndY=_normalized_number(project_end[1], "EndY"),
+        )
+        return CadMappedEvent(
+            "update",
+            table_name,
+            staged_row,
+            row_index,
+            str(old_row.get(policy["id_field"], target_id) or target_id).strip(),
+            world_start,
+            world_end,
+            _coordinates_changed(old_row, project_start, project_end),
         )
 
     @classmethod
@@ -510,7 +708,65 @@ class CadEventMapper:
         return mapped.table_name, mapped.row
 
     @staticmethod
+    def _locate_dxf_linear_binding(
+        dxf_state: Mapping[str, Any] | None,
+        mapped: CadMappedEvent,
+        old_row: Mapping[str, Any],
+        *,
+        collection_name: str,
+        member_label: str,
+    ) -> tuple[dict[str, Any] | None, list[Any] | None, int | None, str]:
+        if not isinstance(dxf_state, Mapping):
+            return None, None, None, "專案沒有 DXF state"
+        staged = copy.deepcopy(dict(dxf_state))
+        converted = staged.get("converted")
+        if not isinstance(converted, Mapping):
+            return staged, None, None, "DXF state 缺少 converted"
+        converted = dict(converted)
+        members_value = converted.get(collection_name)
+        if not isinstance(members_value, Sequence) or isinstance(
+            members_value, (str, bytes)
+        ):
+            return staged, None, None, f"DXF state 缺少 {member_label} binding"
+        members = list(members_value)
+        converted[collection_name] = members
+        staged["converted"] = converted
+
+        target_key = mapped.target_id.casefold()
+        project_id_matches = [
+            index
+            for index, item in enumerate(members)
+            if isinstance(item, Mapping)
+            and str(item.get("project_id", "") or "").strip().casefold()
+            == target_key
+        ]
+        if len(project_id_matches) > 1:
+            return staged, None, None, "DXF project_id binding 不唯一"
+
+        if project_id_matches:
+            match_index = project_id_matches[0]
+        else:
+            old_line = _mapping_line(old_row)
+            if old_line is None:
+                return staged, None, None, "更新前 Project 幾何無法比對"
+            geometry_matches = [
+                index
+                for index, item in enumerate(members)
+                if isinstance(item, Mapping)
+                and (line := _serialized_line(item)) is not None
+                and _endpoint_error(old_line, line)
+                <= DXF_BINDING_MATCH_TOLERANCE_MM
+            ]
+            if not geometry_matches:
+                return staged, None, None, f"找不到更新前 {member_label} 的 DXF binding"
+            if len(geometry_matches) != 1:
+                return staged, None, None, f"更新前 {member_label} 的 DXF binding 不唯一"
+            match_index = geometry_matches[0]
+        return staged, members, match_index, ""
+
+    @classmethod
     def stage_dxf_strut_binding(
+        cls,
         dxf_state: Mapping[str, Any] | None,
         mapped: CadMappedEvent,
         old_row: Mapping[str, Any],
@@ -519,52 +775,16 @@ class CadEventMapper:
     ) -> tuple[dict[str, Any] | None, bool, str]:
         """Stage a confirmed Strut binding update without touching source geometry."""
 
-        if not isinstance(dxf_state, Mapping):
-            return None, False, "專案沒有 DXF state"
-        staged = copy.deepcopy(dict(dxf_state))
-        converted = staged.get("converted")
-        if not isinstance(converted, Mapping):
-            return staged, False, "DXF state 缺少 converted"
-        converted = dict(converted)
-        struts_value = converted.get("struts")
-        if not isinstance(struts_value, Sequence) or isinstance(
-            struts_value, (str, bytes)
-        ):
-            return staged, False, "DXF state 缺少 Strut binding"
-        struts = list(struts_value)
-        converted["struts"] = struts
-        staged["converted"] = converted
-
-        target_key = mapped.target_id.casefold()
-        project_id_matches = [
-            index
-            for index, item in enumerate(struts)
-            if isinstance(item, Mapping)
-            and str(item.get("project_id", "") or "").strip().casefold()
-            == target_key
-        ]
-        if len(project_id_matches) > 1:
-            return staged, False, "DXF project_id binding 不唯一"
-
-        if project_id_matches:
-            match_index = project_id_matches[0]
-        else:
-            old_line = _mapping_line(old_row)
-            if old_line is None:
-                return staged, False, "更新前 Project 幾何無法比對"
-            geometry_matches = [
-                index
-                for index, item in enumerate(struts)
-                if isinstance(item, Mapping)
-                and (line := _serialized_line(item)) is not None
-                and _endpoint_error(old_line, line)
-                <= DXF_BINDING_MATCH_TOLERANCE_MM
-            ]
-            if not geometry_matches:
-                return staged, False, "找不到更新前 Strut 的 DXF binding"
-            if len(geometry_matches) != 1:
-                return staged, False, "更新前 Strut 的 DXF binding 不唯一"
-            match_index = geometry_matches[0]
+        staged, struts, match_index, reason = cls._locate_dxf_linear_binding(
+            dxf_state,
+            mapped,
+            old_row,
+            collection_name="struts",
+            member_label="Strut",
+        )
+        if staged is None or struts is None or match_index is None:
+            return staged, False, reason
+        converted = staged["converted"]
 
         item = copy.deepcopy(dict(struts[match_index]))
         project_start = float(mapped.row["StartX"]), float(mapped.row["StartY"])
@@ -659,6 +879,71 @@ class CadEventMapper:
                 converted[collection_name] = updated_members
 
         return staged, True, ""
+
+    @classmethod
+    def stage_dxf_brace_binding(
+        cls,
+        dxf_state: Mapping[str, Any] | None,
+        mapped: CadMappedEvent,
+        old_row: Mapping[str, Any],
+        *,
+        event_id: Any,
+    ) -> tuple[dict[str, Any] | None, bool, str]:
+        """Stage a uniquely matched Brace review binding update."""
+
+        staged, braces, match_index, reason = cls._locate_dxf_linear_binding(
+            dxf_state,
+            mapped,
+            old_row,
+            collection_name="braces",
+            member_label="Brace",
+        )
+        if staged is None or braces is None or match_index is None:
+            return staged, False, reason
+
+        item = copy.deepcopy(dict(braces[match_index]))
+        project_start = float(mapped.row["StartX"]), float(mapped.row["StartY"])
+        project_end = float(mapped.row["EndX"]), float(mapped.row["EndY"])
+        item.update(
+            start=list(project_start),
+            end=list(project_end),
+            local_start=list(project_start),
+            local_end=list(project_end),
+            world_start=list(mapped.world_start),
+            world_end=list(mapped.world_end),
+            selection_source="cad_manual",
+            project_id=mapped.target_id,
+            cad_event_id=str(event_id),
+        )
+        braces[match_index] = item
+        return staged, True, ""
+
+    @classmethod
+    def stage_dxf_update_binding(
+        cls,
+        dxf_state: Mapping[str, Any] | None,
+        mapped: CadMappedEvent,
+        old_row: Mapping[str, Any],
+        *,
+        event_id: Any,
+    ) -> tuple[dict[str, Any] | None, bool, str]:
+        """Dispatch optional review-state synchronization for a Project update."""
+
+        if mapped.table_name == "struts":
+            return cls.stage_dxf_strut_binding(
+                dxf_state,
+                mapped,
+                old_row,
+                event_id=event_id,
+            )
+        if mapped.table_name == "braces":
+            return cls.stage_dxf_brace_binding(
+                dxf_state,
+                mapped,
+                old_row,
+                event_id=event_id,
+            )
+        return dxf_state, False, "Waler geometry 變更需重新確認 DXF Review state"
 
 
 class TempEventWatcher:

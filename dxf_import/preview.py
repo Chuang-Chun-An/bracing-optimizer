@@ -254,6 +254,7 @@ class PreviewRenderer:
         self,
         layer: str,
         *coordinates: float,
+        component_id: str = "",
         candidate_point_id: str = "",
         overlay_key: str = "",
         extra_tags: Sequence[str] = (),
@@ -264,6 +265,7 @@ class PreviewRenderer:
         return self._register(
             item_id,
             layer,
+            component_id=component_id,
             candidate_point_id=candidate_point_id,
             overlay_key=overlay_key,
         )

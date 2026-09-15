@@ -46,9 +46,12 @@ from bracing_optimizer.application.solver_input_builder import (
 from dxf_import import (
     CoordinateSystem,
     DXFImportDialog,
+    DXFImportDialogOutcome,
     DXFImportError,
     _active_monitor_work_areas,
     fit_window_geometry_to_work_areas,
+    review_state_matches_source,
+    source_file_fingerprint,
 )
 from bracing_optimizer.presentation.cad_view_interaction import (
     CADViewInteractionController,
@@ -57,7 +60,7 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     DXFResultExportError,
     ExportPiece,
     MemberExportPlan,
-    build_member_bindings,
+    export_coordinate_system_from_import_state,
     export_results_to_dxf,
 )
 from bracing_optimizer.infrastructure.excel_result_export import (
@@ -65,8 +68,10 @@ from bracing_optimizer.infrastructure.excel_result_export import (
 )
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfStatus,
+    DxfWorkflowStatus,
     PROJECT_SCHEMA_VERSION,
     ProjectPersistenceError,
+    dxf_workflow_status_from_payload,
 )
 from bracing_optimizer.application.project_service import (
     RelinkDxfRequest,
@@ -213,6 +218,46 @@ class SupportInputApp:
     }
     DXF_BINDING_STALE_KEY = "project_binding_stale"
     DXF_BINDING_STALE_REASON_KEY = "project_binding_stale_reason"
+
+    def _current_dxf_workflow_status(self):
+        raw = getattr(self, "dxf_workflow_status", None)
+        if isinstance(raw, DxfWorkflowStatus):
+            return raw
+        if raw is not None:
+            try:
+                return DxfWorkflowStatus(str(raw).strip().upper())
+            except ValueError:
+                pass
+        return (
+            DxfWorkflowStatus.COMPLETED
+            if isinstance(getattr(self, "dxf_last_import_debug", None), Mapping)
+            else DxfWorkflowStatus.NONE
+        )
+
+    def _transition_dxf_workflow(self, target):
+        target = (
+            target
+            if isinstance(target, DxfWorkflowStatus)
+            else DxfWorkflowStatus(str(target).strip().upper())
+        )
+        current = self._current_dxf_workflow_status()
+        legal = {
+            DxfWorkflowStatus.NONE: {
+                DxfWorkflowStatus.NONE,
+                DxfWorkflowStatus.REVIEW,
+            },
+            DxfWorkflowStatus.REVIEW: {
+                DxfWorkflowStatus.REVIEW,
+                DxfWorkflowStatus.COMPLETED,
+            },
+            DxfWorkflowStatus.COMPLETED: {DxfWorkflowStatus.COMPLETED},
+        }
+        if target not in legal[current]:
+            raise RuntimeError(
+                f"不允許的 DXF workflow transition：{current.value} → {target.value}"
+            )
+        self.dxf_workflow_status = target
+        self._refresh_dxf_workflow_ui()
 
     def _project_display_name(self):
         path = getattr(self, "current_project_path", None)
@@ -429,7 +474,10 @@ class SupportInputApp:
         self.cad_import_status = "等待 CAD 事件"
         self.cad_last_event = None
         self.cad_last_error = None
+        self.last_cad_validation_report = None
         self.dxf_last_import_debug = None
+        self.dxf_workflow_status = DxfWorkflowStatus.NONE
+        self.dxf_review_session = None
         self._cad_poll_after_id = None
         self.project_cases_dir.mkdir(exist_ok=True)
         self.inventory = self._load_default_inventory()
@@ -1682,11 +1730,19 @@ class SupportInputApp:
             wraplength=900,
             justify="left",
         ).pack(fill="x", padx=10, pady=(10, 6))
-        ttk.Button(
-            intro,
+        action_row = ttk.Frame(intro)
+        action_row.pack(fill="x", padx=10, pady=(0, 10))
+        self.dxf_start_import_button = ttk.Button(
+            action_row,
             text="選擇 DXF 並開始批次匯入…",
             command=self._import_dxf_file,
-        ).pack(anchor="w", padx=10, pady=(0, 10))
+        )
+        self.dxf_start_import_button.pack(side="left")
+        self.dxf_continue_import_button = ttk.Button(
+            action_row,
+            text="繼續 DXF 匯入",
+            command=self._continue_dxf_import,
+        )
 
         status_frame = ttk.LabelFrame(frame, text="最近一次 DXF 匯入")
         status_frame.pack(fill="x", padx=12, pady=(0, 12))
@@ -1712,6 +1768,31 @@ class SupportInputApp:
             wraplength=900,
             justify="left",
         ).pack(fill="x", padx=10, pady=(4, 10))
+        self._refresh_dxf_workflow_ui()
+
+    def _refresh_dxf_workflow_ui(self):
+        workflow = self._current_dxf_workflow_status()
+        start_button = getattr(self, "dxf_start_import_button", None)
+        continue_button = getattr(self, "dxf_continue_import_button", None)
+        if start_button is not None and continue_button is not None:
+            if workflow == DxfWorkflowStatus.NONE:
+                continue_button.pack_forget()
+                if not start_button.winfo_manager():
+                    start_button.pack(side="left")
+            elif workflow == DxfWorkflowStatus.REVIEW:
+                start_button.pack_forget()
+                if not continue_button.winfo_manager():
+                    continue_button.pack(side="left")
+            else:
+                start_button.pack_forget()
+                continue_button.pack_forget()
+
+        status_var = getattr(self, "dxf_import_status_var", None)
+        if status_var is not None:
+            if workflow == DxfWorkflowStatus.REVIEW:
+                status_var.set("DXF 匯入：尚未完成")
+            elif workflow == DxfWorkflowStatus.COMPLETED:
+                status_var.set("DXF 匯入：已完成")
 
     def _create_cad_import_tab(self, parent_notebook=None):
         notebook = parent_notebook or self.notebook
@@ -2199,6 +2280,14 @@ class SupportInputApp:
         lines = [
             f"專案：{self._project_display_name()}",
             f"是否儲存：{'是' if self._project_is_saved() else '否'}",
+            (
+                "DXF 匯入流程："
+                + {
+                    DxfWorkflowStatus.NONE: "無進行中的 Review",
+                    DxfWorkflowStatus.REVIEW: "尚未完成，可繼續",
+                    DxfWorkflowStatus.COMPLETED: "已完成",
+                }[self._current_dxf_workflow_status()]
+            ),
         ]
         if report is None:
             lines.append("DXF 狀態：尚未檢查")
@@ -2211,7 +2300,10 @@ class SupportInputApp:
             ])
             lines.extend(report.messages)
         if self._dxf_binding_is_stale():
-            lines.append("DXF 綁定：工程資料已修改，重新確認前不可匯出成果")
+            lines.append(
+                "DXF 綁定：工程資料已修改；僅影響來源追蹤與重新確認，"
+                "不阻止目前 Project 成果匯出"
+            )
         compatibility = getattr(self, "last_dxf_compatibility_report", None)
         if compatibility is not None:
             lines.append(
@@ -2413,6 +2505,8 @@ class SupportInputApp:
         if hasattr(self, "project_case_var"):
             self.project_case_var.set("")
         self.dxf_last_import_debug = None
+        self.dxf_workflow_status = DxfWorkflowStatus.NONE
+        self.dxf_review_session = None
         self.dxf_asset = None
         self.dxf_asset_status_report = self._ensure_project_service().inspect_dxf_state(
             None, None, None
@@ -2430,9 +2524,17 @@ class SupportInputApp:
             self._refresh_tree(table_name)
         self._refresh_results_tree()
         self.update_preview()
+        self._refresh_dxf_workflow_ui()
         self._clear_project_dirty()
 
     def _relink_dxf(self):
+        if self._current_dxf_workflow_status() == DxfWorkflowStatus.REVIEW:
+            messagebox.showwarning(
+                "DXF Review 尚未完成",
+                "請先繼續目前的 DXF 匯入；Review 期間不能改用重新連結取代來源。",
+                parent=self.root,
+            )
+            return
         file_path = filedialog.askopenfilename(
             title="重新連結 DXF",
             filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
@@ -2463,12 +2565,20 @@ class SupportInputApp:
                         file_path,
                         initial_state=saved_state,
                         cad_event_watcher=self.cad_event_watcher,
+                        material_specs=self.material_specs,
+                        restore_saved_layer_classification=True,
+                        allow_pause=False,
                     ).show()
                 finally:
                     self.dxf_dialog_active = False
                 if payload is None:
                     return
-                candidate_result, _unused_mode = payload
+                if isinstance(payload, DXFImportDialogOutcome):
+                    if payload.action != "complete" or payload.result is None:
+                        return
+                    candidate_result = payload.result
+                else:
+                    candidate_result, _unused_mode = payload
                 result = service.relink_dxf(
                     RelinkDxfRequest(
                         candidate_path=Path(file_path),
@@ -2642,6 +2752,7 @@ class SupportInputApp:
                 "application": "SupportSolver",
             },
             "input_data": self._ensure_project_data().to_case_data(),
+            "dxf_workflow_status": self._current_dxf_workflow_status().value,
             "dxf_import_state": copy.deepcopy(
                 getattr(self, "dxf_last_import_debug", None)
             ),
@@ -2654,6 +2765,8 @@ class SupportInputApp:
         result_payload = payload.get("result", None)
         dxf_import_state = payload.get("dxf_import_state")
         dxf_asset = payload.get("dxf_asset")
+        self.dxf_workflow_status = dxf_workflow_status_from_payload(payload)
+        self.dxf_review_session = None
         self.dxf_last_import_debug = (
             copy.deepcopy(dxf_import_state)
             if isinstance(dxf_import_state, dict)
@@ -2703,6 +2816,7 @@ class SupportInputApp:
             self._refresh_tree(table_name)
         self._refresh_results_tree()
         self.update_preview()
+        self._refresh_dxf_workflow_ui()
 
     def _on_results_tree_click(self, event):
         if self.results_tree.identify_region(event.x, event.y) != "cell":
@@ -2761,8 +2875,11 @@ class SupportInputApp:
             text=f"匯出目前 {total} 個配置成果 Excel",
             state="normal" if can_export_excel else "disabled",
         )
-        has_dxf = isinstance(getattr(self, "dxf_last_import_debug", None), dict)
-        can_export = total > 0 and not conflicts and has_dxf
+        has_coordinate_metadata = isinstance(
+            getattr(self, "dxf_last_import_debug", None),
+            dict,
+        )
+        can_export = total > 0 and not conflicts
         self.export_results_dxf_button.configure(
             text=f"匯出目前 {total} 個配置成果 DXF",
             state="normal" if can_export else "disabled",
@@ -2779,10 +2896,10 @@ class SupportInputApp:
             )
             scope_text += f"  ⚠ {conflict_text}；匯出前請每個構件只保留一個方案。"
             color = "#b71c1c"
-        elif total and not has_dxf:
+        elif total and not has_coordinate_metadata:
             scope_text += (
-                "  尚未有已確認的 DXF 工程幾何，因此目前不能匯出 DXF；"
-                "Excel 材料明細仍可匯出。"
+                "  目前缺少 Project → World 座標資訊；按下 DXF 匯出時"
+                "會顯示需要補齊的資料。Excel 材料明細仍可匯出。"
             )
             color = "#8a5a00"
         else:
@@ -3016,13 +3133,17 @@ class SupportInputApp:
 
     def _export_visible_results_to_dxf(self):
         dxf_state = getattr(self, "dxf_last_import_debug", None)
-        if not isinstance(dxf_state, dict):
+        try:
+            coordinate_system = export_coordinate_system_from_import_state(
+                dxf_state
+            )
+        except DXFResultExportError as exc:
             messagebox.showwarning(
-                "匯出支撐配置成果DXF",
+                "缺少 Project → World 座標資訊",
                 (
-                    "目前專案沒有已確認的 DXF 工程幾何，"
-                    "無法重建乾淨成果圖。\n\n"
-                    "既有 Solver 結果仍會保留；請先匯入 DXF 並完成構件確認。"
+                    f"{exc}\n\n"
+                    "目前 schema 3 尚未把座標系獨立保存為 Project metadata；"
+                    "請先由 DXF Import 建立明確的 world/local 座標資訊。"
                 ),
                 parent=self.root,
             )
@@ -3064,35 +3185,11 @@ class SupportInputApp:
             )
             return
 
-        try:
-            compatible, compatibility = self._check_dxf_export_compatibility(
-                dxf_state
-            )
-        except (AttributeError, KeyError, TypeError, ValueError):
-            messagebox.showwarning(
-                "DXF 圖面需要重新確認",
-                (
-                    "目前保存的 DXF 構件資訊無法與工程資料完成比對。\n"
-                    "為避免成果輸出至錯誤位置，請先重新確認或重新匯入 DXF 圖面。"
-                ),
-                parent=self.root,
-            )
-            return
-        if not compatible:
-            details = "\n".join(compatibility.incompatible_items)
-            detail_text = f"\n\n檢查結果：\n{details}" if details else ""
-            messagebox.showwarning(
-                "DXF 圖面需要重新確認",
-                (
-                    "目前工程資料已修改，與原 DXF 圖面定位不一致。\n"
-                    "為避免成果輸出至錯誤位置，請先重新確認或重新匯入 DXF 圖面。"
-                    f"{detail_text}"
-                ),
-                parent=self.root,
-            )
-            return
-
-        source_text = str(dxf_state.get("source_path", "") or "").strip()
+        source_text = (
+            str(dxf_state.get("source_path", "") or "").strip()
+            if isinstance(dxf_state, Mapping)
+            else ""
+        )
         source_hint = Path(source_text) if source_text else None
         dxf_asset = getattr(self, "dxf_asset", None)
         asset_name = (
@@ -3128,16 +3225,16 @@ class SupportInputApp:
             return
 
         try:
-            bindings = build_member_bindings(
-                dxf_state,
-                self.walers,
-                self.struts,
-            )
             report = export_results_to_dxf(
-                dxf_state,
                 output_path,
                 plans,
-                bindings,
+                self.walers,
+                self.struts,
+                self.braces,
+                coordinate_system,
+                background_state=(
+                    dxf_state if isinstance(dxf_state, Mapping) else None
+                ),
             )
         except (DXFResultExportError, OSError, ezdxf.DXFError) as exc:
             messagebox.showerror(
@@ -3155,6 +3252,7 @@ class SupportInputApp:
             "column": "中間柱",
             "beam": "托梁",
             "auxiliary": "輔助線",
+            "continuous_wall": "連續壁",
         }
         background_summary = "、".join(
             f"{role_labels.get(role, role)} {count}"
@@ -3175,6 +3273,9 @@ class SupportInputApp:
                 f"背景：{report.background_layer_count}個圖層、"
                 f"{report.background_segment_count}條線段\n"
                 f"背景內容：{background_summary}\n"
+                f"目前 Project 工程線：{report.project_geometry_count} 條\n"
+                "Project 圖層：SD_PROJECT_WALER、SD_PROJECT_STRUT、"
+                "SD_PROJECT_BRACE\n"
                 f"成果圖層：SD_RESULT_WALER、SD_RESULT_SUPPORT\n"
                 f"最終結構檢查：{report.final_audit.error_count}項錯誤、"
                 f"{report.final_audit.fix_count}項修復\n"
@@ -5336,57 +5437,30 @@ class SupportInputApp:
         self._set_cad_import_status(status)
 
     def _import_dxf_file(self):
+        workflow = self._current_dxf_workflow_status()
+        if workflow == DxfWorkflowStatus.REVIEW:
+            return self._continue_dxf_import()
+        if workflow == DxfWorkflowStatus.COMPLETED:
+            messagebox.showwarning(
+                "DXF 匯入已完成",
+                "此專案已完成 DXF 匯入，後續請在主畫面修改工程資料。",
+                parent=self.root,
+            )
+            return None
         file_path = filedialog.askopenfilename(
             title="選擇 DXF 檔案",
             filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
             parent=self.root,
         )
         if not file_path:
-            return
+            return None
         try:
-            self.dxf_dialog_active = True
-            try:
-                payload = DXFImportDialog(
-                    self.root,
-                    file_path,
-                    initial_state=self.dxf_last_import_debug,
-                    cad_event_watcher=self.cad_event_watcher,
-                ).show()
-            finally:
-                self.dxf_dialog_active = False
-            if payload is None:
-                return
-            result, mode = payload
-            existing = self._project_rows_by_table() if mode == "append" else None
-            imported = result.to_project_rows(existing)
-            if mode == "append":
-                self.walers = [*self.walers, *imported["walers"]]
-                self.struts = [*self.struts, *imported["struts"]]
-                self.braces = [*self.braces, *imported["braces"]]
-            else:
-                self.walers = imported["walers"]
-                self.struts = imported["struts"]
-                self.braces = imported["braces"]
-
-            # Retain only serializable diagnostics.  No ezdxf Entity crosses
-            # into the application data model or Solver input path.
-            self.dxf_last_import_debug = result.to_debug_dict()
-            self.dxf_asset_status_report = self._ensure_project_service().runtime_dxf_report(
-                file_path
+            outcome = self._run_dxf_review_dialog(
+                Path(file_path),
+                initial_state=None,
+                resume_review=False,
             )
-            self.last_dxf_compatibility_report = None
-            for table_name in ("walers", "struts", "braces"):
-                self._refresh_tree(table_name)
-            self._handle_input_data_changed(preserve_view=False)
-            self._set_dxf_import_status(
-                f"DXF 匯入成功：圍令 {len(imported['walers'])}、"
-                f"支撐 {len(imported['struts'])}、斜撐 {len(imported['braces'])}、"
-                f"中間柱 {len(imported['columns'])}、托梁 {len(imported['beams'])}、"
-                f"角撐 {len(imported['corner_braces'])}、"
-                f"連續壁圖元 {result.source_entity_counts.get('continuous_wall', 0)}、"
-                f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}",
-                source=file_path,
-            )
+            return self._handle_dxf_review_outcome(outcome, Path(file_path))
         except (DXFImportError, ProjectPersistenceError, OSError, ValueError) as exc:
             self._set_dxf_import_status(
                 "DXF 匯入失敗",
@@ -5394,6 +5468,225 @@ class SupportInputApp:
                 error=exc,
             )
             messagebox.showerror("DXF 匯入失敗", str(exc), parent=self.root)
+            return None
+
+    def _run_dxf_review_dialog(
+        self,
+        file_path,
+        *,
+        initial_state,
+        resume_review,
+        initial_world_result=None,
+    ):
+        workflow = self._current_dxf_workflow_status()
+        if resume_review and workflow != DxfWorkflowStatus.REVIEW:
+            raise RuntimeError("只有 REVIEW 狀態可以繼續 DXF 匯入。")
+        if not resume_review and workflow == DxfWorkflowStatus.COMPLETED:
+            raise RuntimeError("COMPLETED 狀態不可重新開啟 DXF Review。")
+        self.dxf_dialog_active = True
+        try:
+            return DXFImportDialog(
+                self.root,
+                file_path,
+                initial_state=initial_state,
+                cad_event_watcher=self.cad_event_watcher,
+                material_specs=self.material_specs,
+                restore_saved_layer_classification=(True if resume_review else None),
+                resume_review=resume_review,
+                initial_world_result=initial_world_result,
+            ).show()
+        finally:
+            self.dxf_dialog_active = False
+
+    @staticmethod
+    def _coerce_dxf_dialog_outcome(payload):
+        if isinstance(payload, DXFImportDialogOutcome):
+            return payload
+        if isinstance(payload, tuple) and len(payload) == 2:
+            result, mode = payload
+            if hasattr(result, "to_debug_dict"):
+                return DXFImportDialogOutcome(
+                    action="complete",
+                    review_state=result.to_debug_dict(),
+                    import_mode=str(mode),
+                    result=result,
+                    world_result=None,
+                )
+        return None
+
+    def _remember_dxf_review(self, outcome, file_path):
+        if self._current_dxf_workflow_status() == DxfWorkflowStatus.COMPLETED:
+            raise RuntimeError("COMPLETED 狀態不可重新建立 DXF Review。")
+        state = copy.deepcopy(dict(outcome.review_state))
+        fingerprint = str(state.get("source_fingerprint", "") or "").strip().upper()
+        current_fingerprint = source_file_fingerprint(file_path)
+        if not fingerprint or fingerprint != current_fingerprint:
+            raise DXFImportError(
+                "DXF Review 狀態與目前來源內容不一致，已停止保存人工修正。"
+            )
+        self.dxf_last_import_debug = state
+        self.dxf_review_session = {
+            "source_fingerprint": fingerprint,
+            "world_result": outcome.world_result,
+        }
+        report = getattr(self, "dxf_asset_status_report", None)
+        active_source = getattr(report, "active_source", None)
+        if (
+            active_source is None
+            or str(active_source.sha256).strip().upper() != fingerprint
+        ):
+            self.dxf_asset_status_report = (
+                self._ensure_project_service().runtime_dxf_report(file_path)
+            )
+        self.last_dxf_compatibility_report = None
+        self._transition_dxf_workflow(DxfWorkflowStatus.REVIEW)
+        self._mark_project_dirty("DXF Review 尚未完成")
+
+    def _handle_dxf_review_outcome(self, payload, file_path):
+        outcome = self._coerce_dxf_dialog_outcome(payload)
+        if outcome is None:
+            return None
+        if outcome.action not in {"pause", "complete"}:
+            return None
+        self._remember_dxf_review(outcome, file_path)
+        if outcome.action == "pause":
+            self._set_dxf_import_status(
+                "DXF 匯入：尚未完成",
+                source=outcome.review_state.get("source_path", file_path),
+            )
+            return "pause"
+        if outcome.action != "complete" or outcome.result is None:
+            return None
+        self._complete_dxf_review(outcome, file_path)
+        return "complete"
+
+    def _complete_dxf_review(self, outcome, file_path):
+        result = outcome.result
+        mode = outcome.import_mode
+        existing = self._project_rows_by_table() if mode == "append" else None
+        imported = result.to_project_rows(existing)
+
+        previous_project_data = self._ensure_project_data()
+        previous_results = copy.deepcopy(self._ensure_project_results())
+        previous_solver_memory = copy.deepcopy(self.solver_memory)
+        previous_support_cache = copy.deepcopy(self.support_candidate_cache)
+        case_data = previous_project_data.to_case_data()
+        if mode == "append":
+            walers = [*case_data["walers"], *imported["walers"]]
+            struts = [*case_data["struts"], *imported["struts"]]
+            braces = [*case_data["braces"], *imported["braces"]]
+        else:
+            walers = imported["walers"]
+            struts = imported["struts"]
+            braces = imported["braces"]
+        staged_project_data = ProjectDataModel(
+            walers=walers,
+            struts=struts,
+            braces=braces,
+            inventory=case_data["inventory"],
+            material_specs=case_data["material_specs"],
+        )
+
+        try:
+            self.project_data = staged_project_data
+            for table_name in ("walers", "struts", "braces"):
+                self._refresh_tree(table_name)
+            self._handle_input_data_changed(preserve_view=False)
+        except Exception:
+            self.project_data = previous_project_data
+            self._project_results = previous_results
+            self.solver_memory = previous_solver_memory
+            self.support_candidate_cache = previous_support_cache
+            for table_name in ("walers", "struts", "braces"):
+                self._refresh_tree(table_name)
+            self.update_preview(preserve_view=False)
+            raise
+
+        self._transition_dxf_workflow(DxfWorkflowStatus.COMPLETED)
+        self.dxf_review_session = None
+        self._set_dxf_import_status(
+            f"DXF 匯入成功：圍令 {len(imported['walers'])}、"
+            f"支撐 {len(imported['struts'])}、斜撐 {len(imported['braces'])}、"
+            f"中間柱 {len(imported['columns'])}、托梁 {len(imported['beams'])}、"
+            f"角撐 {len(imported['corner_braces'])}、"
+            f"連續壁圖元 {result.source_entity_counts.get('continuous_wall', 0)}、"
+            f"輔助線圖元 {result.source_entity_counts.get('auxiliary', 0)}",
+            source=file_path,
+        )
+
+    def _review_resume_source(self):
+        if self._current_dxf_workflow_status() != DxfWorkflowStatus.REVIEW:
+            raise RuntimeError("目前沒有可繼續的 DXF Review。")
+        state = getattr(self, "dxf_last_import_debug", None)
+        if not isinstance(state, Mapping):
+            raise DXFImportError("DXF Review 缺少可恢復的狀態。")
+        candidates = []
+        report = getattr(self, "dxf_asset_status_report", None)
+        active_source = getattr(report, "active_source", None)
+        if active_source is not None:
+            candidates.append(Path(active_source.path))
+        source_text = str(state.get("source_path", "") or "").strip()
+        if source_text:
+            candidates.append(Path(source_text))
+        source = next((path for path in candidates if path.is_file()), None)
+        if source is None:
+            raise DXFImportError(
+                "找不到 DXF Review 的來源或專案管理副本，請先重新連結 DXF。"
+            )
+        fingerprint = source_file_fingerprint(source)
+        if not review_state_matches_source(state, fingerprint, source):
+            raise DXFImportError(
+                "此專案保存的 DXF Review 使用的是不同版本的 DXF。"
+                "為避免人工修正套用到錯誤來源，目前無法直接繼續此 Review。"
+            )
+        return source, fingerprint
+
+    def _continue_dxf_import(self):
+        if self._current_dxf_workflow_status() != DxfWorkflowStatus.REVIEW:
+            messagebox.showwarning(
+                "無法繼續 DXF 匯入",
+                "目前專案沒有尚未完成的 DXF Review。",
+                parent=self.root,
+            )
+            return None
+        try:
+            source, fingerprint = self._review_resume_source()
+            session = getattr(self, "dxf_review_session", None)
+            initial_world_result = None
+            if (
+                isinstance(session, Mapping)
+                and str(session.get("source_fingerprint", "")).strip().upper()
+                == fingerprint
+            ):
+                candidate_result = session.get("world_result")
+                saved_layers = self.dxf_last_import_debug.get(
+                    "layer_classification",
+                    {},
+                )
+                if (
+                    candidate_result is not None
+                    and dict(candidate_result.layer_classification)
+                    == dict(saved_layers)
+                ):
+                    initial_world_result = candidate_result
+            outcome = self._run_dxf_review_dialog(
+                source,
+                initial_state=self.dxf_last_import_debug,
+                resume_review=True,
+                initial_world_result=initial_world_result,
+            )
+            return self._handle_dxf_review_outcome(outcome, source)
+        except (DXFImportError, ProjectPersistenceError, OSError, ValueError) as exc:
+            self._set_dxf_import_status(
+                "DXF Review 無法繼續",
+                error=exc,
+            )
+            messagebox.showerror(
+                "DXF Review 無法繼續",
+                str(exc),
+                parent=self.root,
+            )
+            return None
 
     def _manual_read_cad_event(self):
         imported = self.read_cad_event(report_errors=True)
@@ -5543,6 +5836,11 @@ class SupportInputApp:
         old_row = None
         binding_synced = False
         binding_report = None
+        member_label = {
+            "walers": "圍令",
+            "struts": "支撐",
+            "braces": "斜撐",
+        }[table_name]
 
         if mapped.operation == "add":
             staged_state = self._stage_stale_dxf_state(
@@ -5554,25 +5852,53 @@ class SupportInputApp:
             committed_row = rows[committed_index]
         else:
             if mapped.row_index is None:
-                raise ValueError("Strut update 缺少原資料列索引。")
+                raise ValueError(f"{member_label} update 缺少原資料列索引。")
             committed_index = mapped.row_index
             old_row = copy.deepcopy(rows[committed_index])
-            try:
-                staged_state, binding_synced, binding_reason = (
-                    self.cad_event_mapper.stage_dxf_strut_binding(
-                        old_state,
-                        mapped,
-                        old_row,
-                        event_id=event.get("event_id", ""),
-                    )
+            linear_noop = (
+                table_name in ("walers", "braces")
+                and not mapped.endpoints_changed
+            )
+            if mapped.row == old_row or linear_noop:
+                self.cad_event_watcher.acknowledge(event)
+                identifier_field = self.table_columns[table_name][0]
+                identifier = str(old_row.get(identifier_field, "")).strip()
+                self._set_cad_import_status(
+                    f"{member_label} {identifier} 幾何未變更。",
+                    event=event,
                 )
-            except (AttributeError, KeyError, TypeError, ValueError) as exc:
-                staged_state = None
-                binding_synced = False
-                binding_reason = f"DXF binding 無法建立：{exc}"
+                return table_name, rows[committed_index]
+
+            if self._dxf_binding_is_stale():
+                binding_reason = (
+                    str(
+                        old_state.get(self.DXF_BINDING_STALE_REASON_KEY, "")
+                        if isinstance(old_state, Mapping)
+                        else ""
+                    ).strip()
+                    or "DXF Review state 在更新前已過期"
+                )
+                staged_state = self._stage_stale_dxf_state(
+                    old_state,
+                    binding_reason,
+                )
+            else:
+                try:
+                    staged_state, binding_synced, binding_reason = (
+                        self.cad_event_mapper.stage_dxf_update_binding(
+                            old_state,
+                            mapped,
+                            old_row,
+                            event_id=event.get("event_id", ""),
+                        )
+                    )
+                except (AttributeError, KeyError, TypeError, ValueError) as exc:
+                    staged_state = None
+                    binding_synced = False
+                    binding_reason = f"DXF binding 無法建立：{exc}"
             if binding_synced and isinstance(staged_state, Mapping):
                 staged_rows = copy.deepcopy(project_rows)
-                staged_rows["struts"][committed_index] = copy.deepcopy(mapped.row)
+                staged_rows[table_name][committed_index] = copy.deepcopy(mapped.row)
                 try:
                     checker = getattr(self, "dxf_compatibility_checker", None)
                     if checker is None:
@@ -5591,10 +5917,11 @@ class SupportInputApp:
             if not binding_synced:
                 staged_state = self._stage_stale_dxf_state(
                     old_state,
-                    binding_reason or "無法可靠同步 Strut DXF binding",
+                    binding_reason
+                    or f"無法可靠同步 {member_label} DXF binding",
                 )
             committed_row = self._ensure_project_data().replace_row(
-                "struts",
+                table_name,
                 committed_index,
                 mapped.row,
             )
@@ -5607,7 +5934,7 @@ class SupportInputApp:
                 rows.pop()
             else:
                 self._ensure_project_data().replace_row(
-                    "struts",
+                    table_name,
                     committed_index,
                     old_row,
                 )
@@ -5624,6 +5951,12 @@ class SupportInputApp:
             table_name=table_name,
             dxf_binding_changed=False,
         )
+        validation_report = None
+        if mapped.operation == "update":
+            validation_report = ProjectDataValidator().validate(
+                self._ensure_project_data()
+            )
+            self.last_cad_validation_report = validation_report
 
         identifier_field = self.table_columns[table_name][0]
         identifier = str(committed_row.get(identifier_field, "")).strip()
@@ -5632,9 +5965,9 @@ class SupportInputApp:
         else:
             binding_ready = binding_synced and not self._dxf_binding_is_stale()
             status = (
-                f"已更新支撐 {identifier}；DXF 工程線已同步"
+                f"已更新{member_label} {identifier}；DXF 工程線已同步"
                 if binding_ready
-                else f"已更新支撐 {identifier}；DXF 圖面定位需重新確認"
+                else f"已更新{member_label} {identifier}；DXF 圖面定位需重新確認"
             )
             notes = []
             if mapped.associated_ids_cleared:
@@ -5643,6 +5976,11 @@ class SupportInputApp:
                 notes.append("角撐長度已清除")
             if notes:
                 status += "；" + "；".join(notes)
+            if validation_report is not None and validation_report.errors:
+                status += (
+                    f"；Validation 發現 "
+                    f"{len(validation_report.errors)} 項錯誤"
+                )
             status += "。"
         self._set_cad_import_status(status, event=event)
         return table_name, committed_row

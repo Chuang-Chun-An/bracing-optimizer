@@ -7,7 +7,7 @@ problems without mutating the project or depending on Tkinter.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from typing import Mapping, Sequence
 
@@ -19,6 +19,7 @@ from bracing_optimizer.algorithms import support
 UNLIMITED_INVENTORY_QTY = 99
 SUPPORT_USAGE = "支撐"
 WALER_USAGE = "圍令"
+SUPPORT_STATION_DEDUP_TOLERANCE_MM = 1.0
 
 
 class SolverInputBuildError(ValueError):
@@ -356,6 +357,36 @@ class SupportInputBuilder:
                 grouped_configs[key] = []
                 ordered_keys.append(key)
             grouped_configs[key].append(config)
+        for key, group_configs in grouped_configs.items():
+            if not key.startswith("group:"):
+                continue
+            # DXFImportResult.to_project_rows() has already aligned every
+            # member's start/end and station values to the group's canonical
+            # FromWaler -> ToWaler direction.  Union in that formal Project
+            # station frame so old or manually edited rows cannot omit a
+            # physical Column constraint from one lane.
+            merged_pile_centers: list[float] = []
+            for value in sorted(
+                float(position)
+                for config in group_configs
+                for position in config.pile_centers
+            ):
+                if not any(
+                    abs(value - existing)
+                    <= SUPPORT_STATION_DEDUP_TOLERANCE_MM
+                    for existing in merged_pile_centers
+                ):
+                    merged_pile_centers.append(value)
+            shared_pile_centers = [
+                int(round(value)) for value in merged_pile_centers
+            ]
+            grouped_configs[key] = [
+                replace(
+                    config,
+                    pile_centers=list(shared_pile_centers),
+                )
+                for config in group_configs
+            ]
         return [
             config
             for key in ordered_keys

@@ -1,4 +1,4 @@
-"""Build a clean DXF containing imported engineering geometry and solved results."""
+"""Build a clean DXF from current Project geometry, optional background, and results."""
 
 from __future__ import annotations
 
@@ -24,15 +24,16 @@ DIMSTYLE_NAME = "SUPPORT_SEGMENT"
 JACK_BLOCK_NAME = "SUPPORT_JACK"
 RESULT_WALER_LAYER = "SD_RESULT_WALER"
 RESULT_SUPPORT_LAYER = "SD_RESULT_SUPPORT"
+PROJECT_WALER_LAYER = "SD_PROJECT_WALER"
+PROJECT_STRUT_LAYER = "SD_PROJECT_STRUT"
+PROJECT_BRACE_LAYER = "SD_PROJECT_BRACE"
 CLEAN_DXF_VERSION = "R2018"
 CLEAN_DXF_ACAD_VERSION = "AC1032"
 DRAWING_UNITS = "mm"
 INSUNITS_MILLIMETERS = 4
 WORLD_COORDINATE_TOLERANCE_MM = 0.1
 BACKGROUND_ROLES = (
-    "waler",
-    "strut",
-    "brace",
+    "continuous_wall",
     "corner_brace",
     "column",
     "beam",
@@ -49,10 +50,7 @@ _RAW_POINTER_CODES = (
     | frozenset(range(390, 400))
     | frozenset({480, 481, 1005})
 )
-_CONVERTED_ROLE_KEYS = (
-    ("walers", "waler"),
-    ("struts", "strut"),
-    ("braces", "brace"),
+_CONVERTED_BACKGROUND_ROLE_KEYS = (
     ("corner_braces", "corner_brace"),
     ("columns", "column"),
     ("beams", "beam"),
@@ -97,9 +95,34 @@ class MemberExportPlan:
 class MemberBinding:
     member_id: str
     role: str
-    layer: str
     world_start: tuple[float, float]
     world_end: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class ExportCoordinateSystem:
+    """Narrow contract for converting current Project coordinates to WCS."""
+
+    mode: str
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode).strip().lower()
+        if mode not in {"world", "local"}:
+            raise DXFResultExportError(
+                f"不支援的 Project 座標模式：{mode or '空白'}"
+            )
+        try:
+            origin_x = float(self.origin_x)
+            origin_y = float(self.origin_y)
+        except (TypeError, ValueError) as exc:
+            raise DXFResultExportError("Project 座標原點必須是數字") from exc
+        if not math.isfinite(origin_x) or not math.isfinite(origin_y):
+            raise DXFResultExportError("Project 座標原點必須是有限數字")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "origin_x", origin_x)
+        object.__setattr__(self, "origin_y", origin_y)
 
 
 @dataclass(frozen=True)
@@ -174,6 +197,8 @@ class DXFExportReport:
     final_audit: DXFAuditSummary
     actual_dimension_count: int
     actual_jack_count: int
+    project_geometry_count: int = 0
+    project_counts: tuple[tuple[str, int], ...] = ()
     layer_name_fallbacks: tuple[LayerNameFallback, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -206,6 +231,16 @@ class _PreparedBackgroundSegment:
     world_end: tuple[float, float]
     source_kind: str
     source_id: str
+
+
+@dataclass(frozen=True)
+class _ProjectGeometrySegment:
+    index: int
+    role: str
+    member_id: str
+    output_layer: str
+    world_start: tuple[float, float]
+    world_end: tuple[float, float]
 
 
 @dataclass(frozen=True)
@@ -260,45 +295,40 @@ def _row_points(
     )
 
 
-def _endpoint_error(
-    row_line: tuple[tuple[float, float], tuple[float, float]],
-    candidate_line: tuple[tuple[float, float], tuple[float, float]],
-) -> float:
-    return min(
-        math.dist(row_line[0], candidate_line[0])
-        + math.dist(row_line[1], candidate_line[1]),
-        math.dist(row_line[0], candidate_line[1])
-        + math.dist(row_line[1], candidate_line[0]),
-    )
+def export_coordinate_system_from_import_state(
+    dxf_import_state: Mapping[str, Any] | None,
+) -> ExportCoordinateSystem:
+    """Extract only Project-to-WCS metadata from a saved DXF review state."""
 
-
-def _coordinate_data(
-    dxf_import_state: Mapping[str, Any],
-) -> tuple[str, float, float]:
+    if not isinstance(dxf_import_state, Mapping):
+        raise DXFResultExportError(
+            "缺少 Project → World 座標資訊；目前專案無法確認工程座標是否為 WCS"
+        )
     coordinate = dxf_import_state.get("coordinate_system")
     if not isinstance(coordinate, Mapping):
-        raise DXFResultExportError("缺少DXF世界座標轉換資訊")
-    mode = str(coordinate.get("mode", "")).strip().lower()
-    if mode not in {"world", "local"}:
-        raise DXFResultExportError(f"不支援的DXF座標模式：{mode or '空白'}")
-    origin_x = _number(coordinate.get("origin_x", 0.0), "DXF origin_x")
-    origin_y = _number(coordinate.get("origin_y", 0.0), "DXF origin_y")
-    return mode, origin_x, origin_y
+        raise DXFResultExportError("缺少 Project → World 座標資訊")
+    return ExportCoordinateSystem(
+        str(coordinate.get("mode", "") or ""),
+        _number(coordinate.get("origin_x", 0.0), "Project origin_x"),
+        _number(coordinate.get("origin_y", 0.0), "Project origin_y"),
+    )
 
 
 def _local_to_world(
     point: tuple[float, float],
-    coordinate: tuple[str, float, float],
+    coordinate: ExportCoordinateSystem,
 ) -> tuple[float, float]:
-    mode, origin_x, origin_y = coordinate
-    if mode == "local":
-        return point[0] + origin_x, point[1] + origin_y
+    if coordinate.mode == "local":
+        return (
+            point[0] + coordinate.origin_x,
+            point[1] + coordinate.origin_y,
+        )
     return point
 
 
 def _member_world_line(
     item: Mapping[str, Any],
-    coordinate: tuple[str, float, float],
+    coordinate: ExportCoordinateSystem,
     field_name: str,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     if item.get("world_start") is not None and item.get("world_end") is not None:
@@ -322,92 +352,111 @@ def _member_world_line(
     return _local_to_world(start, coordinate), _local_to_world(end, coordinate)
 
 
-def build_member_bindings(
-    dxf_import_state: Mapping[str, Any],
+def _project_world_line(
+    row: Mapping[str, Any],
+    coordinate: ExportCoordinateSystem,
+    field_name: str,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    if not isinstance(row, Mapping):
+        raise DXFResultExportError(f"{field_name} 必須是 Project row")
+    start, end = _row_points(row)
+    world_start = _local_to_world(start, coordinate)
+    world_end = _local_to_world(end, coordinate)
+    if math.dist(world_start, world_end) <= 1e-9:
+        raise DXFResultExportError(f"{field_name} 起終點不可相同")
+    return world_start, world_end
+
+
+def build_project_member_bindings(
     walers: Sequence[Mapping[str, Any]],
     struts: Sequence[Mapping[str, Any]],
+    coordinate_system: ExportCoordinateSystem,
 ) -> dict[tuple[str, str], MemberBinding]:
-    """Map Solver rows to confirmed imported members using precise world geometry."""
+    """Build Solver placement lines directly from current Project rows."""
 
-    converted = dxf_import_state.get("converted")
-    if not isinstance(converted, Mapping):
-        raise DXFResultExportError("專案未保存可用的DXF工程模型")
-    coordinate = _coordinate_data(dxf_import_state)
+    if not isinstance(coordinate_system, ExportCoordinateSystem):
+        raise DXFResultExportError("缺少明確的 Project → World 座標資訊")
     bindings: dict[tuple[str, str], MemberBinding] = {}
     specs = (
-        ("waler", "walers", "WalerID", walers),
-        ("strut", "struts", "StrutID", struts),
+        ("waler", "WalerID", walers),
+        ("strut", "StrutID", struts),
     )
-    for role, converted_key, id_field, rows in specs:
-        candidates = [
-            item
-            for item in converted.get(converted_key, ())
-            if isinstance(item, Mapping)
-        ]
-        row_items = []
-        for row in rows:
+    for role, id_field, rows in specs:
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise DXFResultExportError(f"Project {role} rows 格式錯誤")
+        for index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise DXFResultExportError(f"Project {role}[{index}] 格式錯誤")
             member_id = str(row.get(id_field, "") or "").strip()
-            if member_id:
-                row_items.append((member_id, _row_points(row)))
-        candidate_active_lines = [
-            (
-                _point(item.get("start"), f"{converted_key}[{index}].start"),
-                _point(item.get("end"), f"{converted_key}[{index}].end"),
+            if not member_id:
+                raise DXFResultExportError(
+                    f"Project {role}[{index}] 缺少 {id_field}"
+                )
+            key = role, member_id
+            if key in bindings:
+                raise DXFResultExportError(f"Project 含重複構件：{role} {member_id}")
+            world_start, world_end = _project_world_line(
+                row,
+                coordinate_system,
+                f"Project {role} {member_id}",
             )
-            for index, item in enumerate(candidates)
-        ]
-        candidate_world_lines = [
-            _member_world_line(item, coordinate, f"{converted_key}[{index}]")
-            for index, item in enumerate(candidates)
-        ]
-
-        pair_options = sorted(
-            (
-                _endpoint_error(row_line, candidate_line),
-                row_index,
-                candidate_index,
-            )
-            for row_index, (_member_id, row_line) in enumerate(row_items)
-            for candidate_index, candidate_line in enumerate(candidate_active_lines)
-        )
-        row_matches: dict[int, int] = {}
-        used_candidates: set[int] = set()
-        for error, row_index, candidate_index in pair_options:
-            if error > 100.0:
-                break
-            if row_index in row_matches or candidate_index in used_candidates:
-                continue
-            row_matches[row_index] = candidate_index
-            used_candidates.add(candidate_index)
-
-        for row_index, (member_id, row_line) in enumerate(row_items):
-            candidate_index = row_matches.get(row_index)
-            # An ID identifies the Solver result only after geometry has
-            # matched.  It must never authorize reuse of stale world points.
-            if candidate_index is None:
-                continue
-            candidate = candidates[candidate_index]
-            layer = str(candidate.get("source_layer", "") or "").strip()
-            active_start, active_end = candidate_active_lines[candidate_index]
-            world_start, world_end = candidate_world_lines[candidate_index]
-            direct = math.dist(row_line[0], active_start) + math.dist(
-                row_line[1], active_end
-            )
-            reverse = math.dist(row_line[0], active_end) + math.dist(
-                row_line[1], active_start
-            )
-            if reverse < direct:
-                world_start, world_end = world_end, world_start
-            if math.dist(world_start, world_end) <= 1e-9:
-                raise DXFResultExportError(f"{member_id} 起終點不可相同")
-            bindings[(role, member_id)] = MemberBinding(
+            bindings[key] = MemberBinding(
                 member_id,
                 role,
-                layer,
                 world_start,
                 world_end,
             )
     return bindings
+
+
+def build_project_geometry_segments(
+    walers: Sequence[Mapping[str, Any]],
+    struts: Sequence[Mapping[str, Any]],
+    braces: Sequence[Mapping[str, Any]],
+    coordinate_system: ExportCoordinateSystem,
+) -> tuple[_ProjectGeometrySegment, ...]:
+    """Convert all current formal Project geometry to deterministic WCS lines."""
+
+    if not isinstance(coordinate_system, ExportCoordinateSystem):
+        raise DXFResultExportError("缺少明確的 Project → World 座標資訊")
+    specs = (
+        ("waler", "WalerID", walers, PROJECT_WALER_LAYER),
+        ("strut", "StrutID", struts, PROJECT_STRUT_LAYER),
+        ("brace", "BraceID", braces, PROJECT_BRACE_LAYER),
+    )
+    segments: list[_ProjectGeometrySegment] = []
+    seen: set[tuple[str, str]] = set()
+    for role, id_field, rows, output_layer in specs:
+        if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+            raise DXFResultExportError(f"Project {role} rows 格式錯誤")
+        for row_index, row in enumerate(rows):
+            if not isinstance(row, Mapping):
+                raise DXFResultExportError(f"Project {role}[{row_index}] 格式錯誤")
+            member_id = str(row.get(id_field, "") or "").strip()
+            if not member_id:
+                raise DXFResultExportError(
+                    f"Project {role}[{row_index}] 缺少 {id_field}"
+                )
+            key = role, member_id
+            if key in seen:
+                raise DXFResultExportError(f"Project 含重複構件：{role} {member_id}")
+            seen.add(key)
+            world_start, world_end = _project_world_line(
+                row,
+                coordinate_system,
+                f"Project {role} {member_id}",
+            )
+            segments.append(
+                _ProjectGeometrySegment(
+                    len(segments) + 1,
+                    role,
+                    member_id,
+                    output_layer,
+                    world_start,
+                    world_end,
+                )
+            )
+    return tuple(segments)
 
 
 def _ensure_dimstyle(document, options: DXFExportOptions) -> None:
@@ -643,30 +692,48 @@ def _append_segment(
 
 
 def _extract_background_segments(
-    dxf_import_state: Mapping[str, Any],
-) -> tuple[_BackgroundSegment, ...]:
-    """Use saved world geometry plus confirmed final engineering lines only."""
+    dxf_import_state: Mapping[str, Any] | None,
+    coordinate_system: ExportCoordinateSystem,
+) -> tuple[tuple[_BackgroundSegment, ...], tuple[str, ...]]:
+    """Extract optional non-Project context without engineering truth roles."""
 
-    coordinate = _coordinate_data(dxf_import_state)
+    if not isinstance(dxf_import_state, Mapping):
+        return (), ()
     output: list[_BackgroundSegment] = []
     seen: set[tuple[Any, ...]] = set()
+    warnings: list[str] = []
     source_geometry = dxf_import_state.get("source_geometry") or ()
-    if not isinstance(source_geometry, Sequence):
-        raise DXFResultExportError("dxf_import_state.source_geometry 格式錯誤")
+    if not isinstance(source_geometry, Sequence) or isinstance(
+        source_geometry, (str, bytes)
+    ):
+        warnings.append("DXF background source_geometry 格式錯誤，已停用該背景來源")
+        source_geometry = ()
     for geometry_index, item in enumerate(source_geometry):
         if not isinstance(item, Mapping):
+            warnings.append(f"DXF background source_geometry[{geometry_index}] 已略過")
             continue
         role = str(item.get("role", "")).strip().lower()
         if role not in BACKGROUND_ROLES:
             continue
         layer = str(item.get("source_layer", "") or "").strip()
         points_value = item.get("points") or ()
-        if not isinstance(points_value, Sequence) or len(points_value) < 2:
+        if (
+            not isinstance(points_value, Sequence)
+            or isinstance(points_value, (str, bytes))
+            or len(points_value) < 2
+        ):
+            warnings.append(
+                f"DXF background source_geometry[{geometry_index}] 缺少完整線段，已略過"
+            )
             continue
-        points = tuple(
-            _point(point, f"source_geometry[{geometry_index}].points")
-            for point in points_value
-        )
+        try:
+            points = tuple(
+                _point(point, f"source_geometry[{geometry_index}].points")
+                for point in points_value
+            )
+        except DXFResultExportError as exc:
+            warnings.append(f"{exc}；該背景項目已略過")
+            continue
         source_id = str(item.get("source_handle", "") or geometry_index)
         pairs = list(zip(points, points[1:]))
         if bool(item.get("closed")) and math.dist(points[-1], points[0]) > 1e-9:
@@ -685,40 +752,55 @@ def _extract_background_segments(
                 ),
             )
 
-    converted = dxf_import_state.get("converted")
+    converted = dxf_import_state.get("converted") or {}
     if not isinstance(converted, Mapping):
-        raise DXFResultExportError("專案未保存人工確認後的正式工程模型")
-    for converted_key, role in _CONVERTED_ROLE_KEYS:
+        warnings.append("DXF background converted 格式錯誤，已停用該背景來源")
+        converted = {}
+    for converted_key, role in _CONVERTED_BACKGROUND_ROLE_KEYS:
         items = converted.get(converted_key) or ()
-        if not isinstance(items, Sequence):
-            raise DXFResultExportError(f"converted.{converted_key} 格式錯誤")
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+            warnings.append(
+                f"DXF background converted.{converted_key} 格式錯誤，已略過"
+            )
+            continue
         for member_index, item in enumerate(items):
             if not isinstance(item, Mapping):
+                warnings.append(
+                    f"DXF background converted.{converted_key}[{member_index}] 已略過"
+                )
                 continue
             member_id = str(item.get("id", "") or f"{role}-{member_index + 1}")
             layer = str(item.get("source_layer", "") or "").strip()
-            world_points: tuple[tuple[float, float], ...]
-            if role == "beam" and item.get("world_path"):
-                world_points = tuple(
-                    _point(point, f"converted.beams[{member_index}].world_path")
-                    for point in item.get("world_path")
-                )
-            elif role == "beam" and item.get("local_path"):
-                world_points = tuple(
-                    _local_to_world(
-                        _point(point, f"converted.beams[{member_index}].local_path"),
-                        coordinate,
+            try:
+                world_points: tuple[tuple[float, float], ...]
+                if role == "beam" and item.get("world_path"):
+                    world_points = tuple(
+                        _point(point, f"converted.beams[{member_index}].world_path")
+                        for point in item.get("world_path")
                     )
-                    for point in item.get("local_path")
-                )
-            else:
-                world_points = _member_world_line(
-                    item,
-                    coordinate,
-                    f"converted.{converted_key}[{member_index}]",
-                )
+                elif role == "beam" and item.get("local_path"):
+                    world_points = tuple(
+                        _local_to_world(
+                            _point(
+                                point,
+                                f"converted.beams[{member_index}].local_path",
+                            ),
+                            coordinate_system,
+                        )
+                        for point in item.get("local_path")
+                    )
+                else:
+                    world_points = _member_world_line(
+                        item,
+                        coordinate_system,
+                        f"converted.{converted_key}[{member_index}]",
+                    )
+            except DXFResultExportError as exc:
+                warnings.append(f"{exc}；該背景項目已略過")
+                continue
             if len(world_points) < 2:
-                raise DXFResultExportError(f"{member_id} 缺少完整工程線")
+                warnings.append(f"{member_id} 缺少完整背景線，已略過")
+                continue
             for start, end in zip(world_points, world_points[1:]):
                 _append_segment(
                     output,
@@ -732,32 +814,7 @@ def _extract_background_segments(
                         member_id,
                     ),
                 )
-    if not output:
-        raise DXFResultExportError("工程模型沒有可重建的底圖線段")
-    return tuple(output)
-
-
-def _validate_import_state(dxf_import_state: Mapping[str, Any]) -> None:
-    if not isinstance(dxf_import_state, Mapping):
-        raise DXFResultExportError("尚未匯入DXF工程模型")
-    _coordinate_data(dxf_import_state)
-    converted = dxf_import_state.get("converted")
-    if not isinstance(converted, Mapping):
-        raise DXFResultExportError("舊版專案缺少dxf_import_state構件綁定")
-    blocking = [
-        item
-        for item in dxf_import_state.get("validation_messages", ()) or ()
-        if isinstance(item, Mapping)
-        and str(item.get("severity", "")).lower() in {"error", "critical"}
-    ]
-    if blocking:
-        messages = [
-            str(item.get("message") or item.get("code") or "工程線尚未確認")
-            for item in blocking[:10]
-        ]
-        raise DXFResultExportError(
-            "部分DXF構件仍需要人工確認，禁止匯出：\n" + "\n".join(messages)
-        )
+    return tuple(output), tuple(warnings)
 
 
 def _fallback_layer_name(role: str, used_names: set[str]) -> str:
@@ -775,7 +832,15 @@ def _prepare_background_layers(
     segments: Sequence[_BackgroundSegment],
 ) -> tuple[tuple[_PreparedBackgroundSegment, ...], tuple[LayerNameFallback, ...]]:
     used_names = {str(layer.dxf.name).casefold() for layer in document.layers}
-    used_names.update({RESULT_WALER_LAYER.casefold(), RESULT_SUPPORT_LAYER.casefold()})
+    used_names.update(
+        {
+            RESULT_WALER_LAYER.casefold(),
+            RESULT_SUPPORT_LAYER.casefold(),
+            PROJECT_WALER_LAYER.casefold(),
+            PROJECT_STRUT_LAYER.casefold(),
+            PROJECT_BRACE_LAYER.casefold(),
+        }
+    )
     mappings: dict[tuple[str, str], str] = {}
     fallbacks: list[LayerNameFallback] = []
     prepared = []
@@ -858,6 +923,37 @@ def _draw_background(
         _set_background_xdata(entity, segment)
 
 
+def _set_project_geometry_xdata(entity, segment: _ProjectGeometrySegment) -> None:
+    entity.set_xdata(
+        APP_ID,
+        [
+            (1000, CLEAN_EXPORT_MARKER),
+            (1000, "project_geometry"),
+            (1000, segment.role),
+            (1000, segment.member_id),
+            (1071, segment.index),
+        ],
+    )
+
+
+def _draw_project_geometry(
+    document,
+    segments: Sequence[_ProjectGeometrySegment],
+) -> None:
+    modelspace = document.modelspace()
+    for segment in segments:
+        entity = modelspace.add_line(
+            segment.world_start,
+            segment.world_end,
+            dxfattribs={
+                "layer": segment.output_layer,
+                "color": 256,
+                "linetype": "BYLAYER",
+            },
+        )
+        _set_project_geometry_xdata(entity, segment)
+
+
 def _new_clean_document(options: DXFExportOptions):
     document = ezdxf.new(CLEAN_DXF_VERSION, setup=True)
     document.header["$INSUNITS"] = INSUNITS_MILLIMETERS
@@ -871,6 +967,18 @@ def _new_clean_document(options: DXFExportOptions):
     document.layers.add(
         RESULT_SUPPORT_LAYER,
         dxfattribs={"color": 3, "linetype": "Continuous"},
+    )
+    document.layers.add(
+        PROJECT_WALER_LAYER,
+        dxfattribs={"color": 1, "linetype": "Continuous"},
+    )
+    document.layers.add(
+        PROJECT_STRUT_LAYER,
+        dxfattribs={"color": 3, "linetype": "Continuous"},
+    )
+    document.layers.add(
+        PROJECT_BRACE_LAYER,
+        dxfattribs={"color": 5, "linetype": "Continuous"},
     )
     return document
 
@@ -1045,6 +1153,63 @@ def _validate_background(
         if min(direct, reverse) > WORLD_COORDINATE_TOLERANCE_MM:
             raise DXFExportValidationError(
                 f"底圖線段 {segment.index} 世界座標驗證失敗"
+            )
+
+
+def _validate_project_geometry(
+    document,
+    expected: Sequence[_ProjectGeometrySegment],
+) -> None:
+    actual: dict[int, Any] = {}
+    for entity in document.modelspace():
+        values = _xdata_values(entity)
+        if len(values) < 5 or values[:2] != (
+            CLEAN_EXPORT_MARKER,
+            "project_geometry",
+        ):
+            continue
+        try:
+            index = int(values[4])
+        except (TypeError, ValueError) as exc:
+            raise DXFExportValidationError("Project 工程線含無效輸出索引") from exc
+        if index in actual:
+            raise DXFExportValidationError(f"Project 工程線索引重複：{index}")
+        actual[index] = entity
+    if len(actual) != len(expected):
+        raise DXFExportValidationError(
+            f"Project 工程線實際 {len(actual)}／預期 {len(expected)}"
+        )
+    for segment in expected:
+        entity = actual.get(segment.index)
+        if entity is None or entity.dxftype() != "LINE":
+            raise DXFExportValidationError(
+                f"Project 工程線 {segment.role} {segment.member_id} 遺失或類型錯誤"
+            )
+        values = _xdata_values(entity)
+        if tuple(str(value) for value in values[2:4]) != (
+            segment.role,
+            segment.member_id,
+        ):
+            raise DXFExportValidationError(
+                f"Project 工程線 {segment.index} 身分資料錯誤"
+            )
+        if entity.dxf.layer != segment.output_layer:
+            raise DXFExportValidationError(
+                f"Project 工程線 {segment.index} 圖層錯誤：{entity.dxf.layer}"
+            )
+        start = tuple(entity.dxf.start)[:2]
+        end = tuple(entity.dxf.end)[:2]
+        direct = max(
+            math.dist(start, segment.world_start),
+            math.dist(end, segment.world_end),
+        )
+        reverse = max(
+            math.dist(start, segment.world_end),
+            math.dist(end, segment.world_start),
+        )
+        if min(direct, reverse) > WORLD_COORDINATE_TOLERANCE_MM:
+            raise DXFExportValidationError(
+                f"Project 工程線 {segment.role} {segment.member_id} 世界座標驗證失敗"
             )
 
 
@@ -1326,6 +1491,7 @@ def _write_clean_export(
     document,
     output_path: Path,
     background: Sequence[_PreparedBackgroundSegment],
+    project_geometry: Sequence[_ProjectGeometrySegment],
     expected_results: Sequence[_ExpectedResultEntity],
 ) -> _CleanValidationResult:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1351,6 +1517,7 @@ def _write_clean_export(
             )
         _validate_clean_structure(temporary_path, reread)
         _validate_background(reread, background)
+        _validate_project_geometry(reread, project_geometry)
         dimension_count, jack_count = _validate_results(
             reread,
             expected_results,
@@ -1379,21 +1546,36 @@ def _write_clean_export(
 
 
 def export_results_to_dxf(
-    dxf_import_state: Mapping[str, Any],
     output_path: str | Path,
     plans: Iterable[MemberExportPlan],
-    bindings: Mapping[tuple[str, str], MemberBinding],
+    walers: Sequence[Mapping[str, Any]],
+    struts: Sequence[Mapping[str, Any]],
+    braces: Sequence[Mapping[str, Any]],
+    coordinate_system: ExportCoordinateSystem,
     *,
+    background_state: Mapping[str, Any] | None = None,
     options: DXFExportOptions | None = None,
 ) -> DXFExportReport:
-    """Create a new clean DXF from saved world geometry and solved results."""
+    """Create a clean DXF from current Project geometry and Solver results."""
 
-    _validate_import_state(dxf_import_state)
+    if not isinstance(coordinate_system, ExportCoordinateSystem):
+        raise DXFResultExportError("缺少明確的 Project → World 座標資訊")
     options = options or DXFExportOptions()
     output_path = Path(output_path).resolve()
     normalized_plans = _normalize_plans(plans)
     if not normalized_plans:
         raise DXFResultExportError("尚未產生或選取可見的Solver配置結果")
+    project_geometry = build_project_geometry_segments(
+        walers,
+        struts,
+        braces,
+        coordinate_system,
+    )
+    bindings = build_project_member_bindings(
+        walers,
+        struts,
+        coordinate_system,
+    )
     missing = [
         f"{plan.role} {plan.member_id}"
         for plan in normalized_plans
@@ -1401,7 +1583,8 @@ def export_results_to_dxf(
     ]
     if missing:
         raise DXFResultExportError(
-            "下列配置結果缺少人工確認後的工程線綁定：\n" + "\n".join(missing)
+            "下列配置結果在目前 Project 找不到對應工程構件：\n"
+            + "\n".join(missing)
         )
     for plan in normalized_plans:
         binding = bindings[(plan.role, plan.member_id)]
@@ -1416,13 +1599,17 @@ def export_results_to_dxf(
                 f"工程線長 {drawing_length:g} mm 不一致，無法正確放置標註"
             )
 
-    background_segments = _extract_background_segments(dxf_import_state)
+    background_segments, background_warnings = _extract_background_segments(
+        background_state,
+        coordinate_system,
+    )
     document = _new_clean_document(options)
     prepared_background, fallbacks = _prepare_background_layers(
         document,
         background_segments,
     )
     _draw_background(document, prepared_background)
+    _draw_project_geometry(document, project_geometry)
     expected_results, dimension_count, jack_count = _draw_results(
         document,
         normalized_plans,
@@ -1433,16 +1620,19 @@ def export_results_to_dxf(
         document,
         output_path,
         prepared_background,
+        project_geometry,
         expected_results,
     )
-    coordinate_mode, _origin_x, _origin_y = _coordinate_data(dxf_import_state)
     background_counts = tuple(
         sorted(Counter(item.role for item in prepared_background).items())
+    )
+    project_counts = tuple(
+        sorted(Counter(item.role for item in project_geometry).items())
     )
     background_layers = {item.output_layer for item in prepared_background}
     result_waler_count = sum(plan.role == "waler" for plan in normalized_plans)
     result_support_count = len(normalized_plans) - result_waler_count
-    warnings = tuple(
+    warnings = tuple(background_warnings) + tuple(
         f"{item.role} 原圖層「{item.original_name or '<空白>'}」改用「{item.output_name}」：{item.reason}"
         for item in fallbacks
     )
@@ -1455,7 +1645,7 @@ def export_results_to_dxf(
         strut_count=result_support_count,
         dxf_version=f"{CLEAN_DXF_VERSION} ({CLEAN_DXF_ACAD_VERSION})",
         coordinate_units=DRAWING_UNITS,
-        coordinate_mode=coordinate_mode,
+        coordinate_mode=coordinate_system.mode,
         background_layer_count=len(background_layers),
         background_segment_count=len(prepared_background),
         background_counts=background_counts,
@@ -1464,6 +1654,8 @@ def export_results_to_dxf(
         final_audit=validation.final_audit,
         actual_dimension_count=validation.actual_dimension_count,
         actual_jack_count=validation.actual_jack_count,
+        project_geometry_count=len(project_geometry),
+        project_counts=project_counts,
         layer_name_fallbacks=fallbacks,
         warnings=warnings,
     )
@@ -1482,14 +1674,20 @@ __all__ = [
     "DXFExportReport",
     "DXFExportValidationError",
     "DXFResultExportError",
+    "ExportCoordinateSystem",
     "ExportPiece",
     "JACK_BLOCK_NAME",
     "LayerNameFallback",
     "MemberBinding",
     "MemberExportPlan",
+    "PROJECT_BRACE_LAYER",
+    "PROJECT_STRUT_LAYER",
+    "PROJECT_WALER_LAYER",
     "RESULT_SUPPORT_LAYER",
     "RESULT_WALER_LAYER",
     "WORLD_COORDINATE_TOLERANCE_MM",
-    "build_member_bindings",
+    "build_project_geometry_segments",
+    "build_project_member_bindings",
+    "export_coordinate_system_from_import_state",
     "export_results_to_dxf",
 ]

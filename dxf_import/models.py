@@ -61,6 +61,7 @@ class GeometryTolerances:
     double_support_spacing_tolerance_mm: float = 150.0
     double_support_overlap_ratio: float = 0.9
     double_support_length_tolerance_mm: float = 250.0
+    material_width_tolerance_mm: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class ValidationMessage:
     message: str
     role: str = ""
     source_handles: tuple[str, ...] = ()
+    member_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,8 @@ class Waler:
     selected_start_point_id: str = ""
     selected_end_point_id: str = ""
     selection_source: str = "auto"
+    material_spec: str = ""
+    material_spec_source: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
@@ -208,7 +212,7 @@ class Waler:
             "StartY": self.start[1],
             "EndX": self.end[0],
             "EndY": self.end[1],
-            "material_spec": "",
+            "material_spec": self.material_spec,
             "Remark": recognition,
         }
 
@@ -249,6 +253,8 @@ class Strut:
     from_brace_to_waler_end_len: float = 0.0
     to_brace_to_waler_start_len: float = 0.0
     to_brace_to_waler_end_len: float = 0.0
+    material_spec: str = ""
+    material_spec_source: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
@@ -301,7 +307,7 @@ class Strut:
             "StartY": start[1],
             "EndX": end[0],
             "EndY": end[1],
-            "material_spec": "",
+            "material_spec": self.material_spec,
             "BeamPositions": position_text(beam_positions),
             "ColumnPositions": position_text(column_positions),
             "AssociatedColumnIDs": ",".join(self.associated_columns),
@@ -447,7 +453,12 @@ class AuxiliaryComponent:
 
 @dataclass(frozen=True)
 class Column(AuxiliaryComponent):
-    """DXF-classified intermediate-column engineering line."""
+    """DXF-classified intermediate-column engineering line.
+
+    ``associated_strut_id`` remains the nearest primary association used for
+    review/UI provenance.  An accepted double-support pair may still contain
+    this Column in both Struts' derived association fields.
+    """
 
 
 @dataclass(frozen=True)
@@ -547,7 +558,7 @@ class SourceText:
 
 @dataclass(frozen=True)
 class ComponentAssociation:
-    """One confirmed Column/Beam ownership relation to a Solver strut."""
+    """One confirmed Column/Beam constraint relation to a Solver strut."""
 
     component_id: str
     component_role: str
@@ -567,6 +578,119 @@ class ProblemRecord:
     role: str
     source_handles: tuple[str, ...]
     member_ids: tuple[str, ...]
+
+
+def _normalized_source_handles(values: Sequence[Any]) -> tuple[str, ...]:
+    """Return the canonical DXF-handle representation used by review state."""
+
+    return tuple(
+        sorted(
+            {
+                str(value).strip().upper()
+                for value in values
+                if str(value).strip()
+            }
+        )
+    )
+
+
+@dataclass(frozen=True)
+class SourceManualOverride:
+    """Only replayable user input for one exact DXF source group."""
+
+    role: str
+    source_handles: tuple[str, ...]
+    display_id: str = ""
+    has_material_spec: bool = False
+    material_spec: str = ""
+    geometry_selection_source: str = ""
+    world_start: Point | None = None
+    world_end: Point | None = None
+    has_waler_contact_input: bool = False
+    original_backfill_mm: float | None = None
+    adopted_backfill_mm: float | None = None
+    original_waler_width_mm: float | None = None
+    adopted_waler_width_mm: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "role", str(self.role).strip().lower())
+        object.__setattr__(
+            self,
+            "source_handles",
+            _normalized_source_handles(self.source_handles),
+        )
+
+
+@dataclass(frozen=True)
+class ExcludedSource:
+    """Persistent user decision to omit one exact DXF source group."""
+
+    role: str
+    source_handles: tuple[str, ...]
+    source_layers: tuple[str, ...] = ()
+    source_entity_types: tuple[str, ...] = ()
+    display_id_when_excluded: str = ""
+    reason: str = "user_excluded"
+    manual_override: SourceManualOverride | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "role", str(self.role).strip().lower())
+        object.__setattr__(
+            self,
+            "source_handles",
+            _normalized_source_handles(self.source_handles),
+        )
+        object.__setattr__(
+            self,
+            "source_layers",
+            tuple(sorted({str(value).strip() for value in self.source_layers if str(value).strip()})),
+        )
+        object.__setattr__(
+            self,
+            "source_entity_types",
+            tuple(
+                sorted(
+                    {
+                        str(value).strip().upper()
+                        for value in self.source_entity_types
+                        if str(value).strip()
+                    }
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "display_id_when_excluded",
+            str(self.display_id_when_excluded).strip(),
+        )
+        object.__setattr__(self, "reason", str(self.reason).strip() or "user_excluded")
+
+    @property
+    def identity(self) -> str:
+        return f"{self.role}:{'|'.join(self.source_handles)}"
+
+
+@dataclass(frozen=True)
+class ReviewItem:
+    """Immutable STEP3/STEP4 projection of one reviewable DXF object."""
+
+    key: str
+    display_id: str
+    role: str
+    status: str
+    member_id: str | None
+    source_handles: tuple[str, ...]
+    source_layers: tuple[str, ...]
+    source_entity_types: tuple[str, ...]
+    selection_source: str
+    problems: tuple[ProblemRecord, ...]
+    highest_severity: str
+    exclusion_reason: str = ""
+    display_id_before_exclusion: str = ""
+
+    @property
+    def problem_count(self) -> int:
+        return len(self.problems)
 
 
 @dataclass
@@ -615,6 +739,60 @@ class DoubleSupportCandidate:
 
 
 @dataclass(frozen=True)
+class WalerContactReviewState:
+    """DXF-review-only baseline and adopted contact dimensions for one Waler."""
+
+    waler_id: str
+    baseline_contact_start: Point
+    baseline_contact_end: Point
+    support_normal_world: Point | None
+    original_backfill_mm: float | None = None
+    adopted_backfill_mm: float | None = None
+    original_waler_width_mm: float | None = None
+    adopted_waler_width_mm: float | None = None
+    waler_outer_start: Point | None = None
+    waler_outer_end: Point | None = None
+    continuous_wall_inner_start: Point | None = None
+    continuous_wall_inner_end: Point | None = None
+    continuous_wall_source_handle: str = ""
+    backfill_recognition_method: str = ""
+
+    @property
+    def contact_displacement(self) -> float | None:
+        values = (
+            self.original_backfill_mm,
+            self.adopted_backfill_mm,
+            self.original_waler_width_mm,
+            self.adopted_waler_width_mm,
+        )
+        if any(value is None for value in values):
+            return None
+        assert all(value is not None for value in values)
+        return (
+            self.adopted_backfill_mm
+            - self.original_backfill_mm
+            + self.adopted_waler_width_mm
+            - self.original_waler_width_mm
+        )
+
+
+@dataclass(frozen=True)
+class CornerBraceConnection:
+    """Stable DXF-review association used when a Waler contact line moves."""
+
+    corner_brace_id: str
+    waler_id: str
+    strut_id: str
+    strut_endpoint_name: str
+    corner_waler_endpoint_name: str
+    baseline_waler_attachment: Point
+    baseline_strut_attachment: Point
+    strut_hole_station_mm: float
+    fixed_length_mm: float
+    baseline_waler_station_mm: float
+
+
+@dataclass(frozen=True)
 class DXFImportResult:
     """Serializable result of recognition, validation and connection analysis."""
 
@@ -638,6 +816,10 @@ class DXFImportResult:
     component_associations: tuple[ComponentAssociation, ...] = ()
     beam_crossings: tuple[BeamCrossing, ...] = ()
     double_support_candidates: tuple[DoubleSupportCandidate, ...] = ()
+    waler_contact_reviews: tuple[WalerContactReviewState, ...] = ()
+    corner_brace_connections: tuple[CornerBraceConnection, ...] = ()
+    source_fingerprint: str = ""
+    excluded_sources: tuple[ExcludedSource, ...] = ()
 
     @property
     def can_import(self) -> bool:
@@ -691,6 +873,7 @@ class DXFImportResult:
                 "beams": len(self.beams),
                 "corner_braces": len(self.corner_braces),
             },
+            "excluded_sources": len(self.excluded_sources),
             "auxiliary_geometry": sum(
                 geometry.role == "auxiliary"
                 for geometry in self.source_geometry
@@ -890,6 +1073,7 @@ class DXFImportResult:
             "summary": self.summary(),
             "coordinate_system": asdict(self.coordinate_system),
             "source_path": self.source_path,
+            "source_fingerprint": self.source_fingerprint,
             "layer_names": list(self.layer_names),
             "selected_layers": dict(self.selected_layers),
             "layer_classification": dict(self.layer_classification),
@@ -917,8 +1101,15 @@ class DXFImportResult:
             "double_support_candidates": [
                 asdict(item) for item in self.double_support_candidates
             ],
+            "waler_contact_reviews": [
+                asdict(item) for item in self.waler_contact_reviews
+            ],
+            "corner_brace_connections": [
+                asdict(item) for item in self.corner_brace_connections
+            ],
             "entities": [asdict(item) for item in self.entity_debug],
             "source_geometry": [asdict(item) for item in self.source_geometry],
+            "excluded_sources": [asdict(item) for item in self.excluded_sources],
         }
 
 
