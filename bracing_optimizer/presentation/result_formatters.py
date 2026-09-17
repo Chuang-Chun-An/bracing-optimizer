@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 
 from bracing_optimizer.algorithms import wales
 
 
-def format_result_value(value, decimals=1):
+def format_result_value(value: object, decimals: int = 1) -> str:
     if value == "N/A":
         return "無資料"
     if isinstance(value, (int, float)):
@@ -17,7 +18,7 @@ def format_result_value(value, decimals=1):
     return str(value)
 
 
-def format_result_list(values):
+def format_result_list(values: Iterable[object] | None) -> str:
     values = list(values or [])
     if not values:
         return "無"
