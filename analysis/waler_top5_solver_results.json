@@ -1,0 +1,6574 @@
+{
+  "metadata": {
+    "git_head": "56b74cdac8ec71b30cb6a2ae4bbdac897606e8ba",
+    "generated_at": "2026-09-16T10:48:58.122170+08:00",
+    "solver_pipeline": "DXFImporter -> Project rows -> ProjectDataModel -> WalerInputBuilder -> OptimizeWaler",
+    "material_ratio_targets": {
+      "short": 0.2,
+      "mid": 0.5,
+      "long": 0.3
+    },
+    "inventory_source": "data/inventory.json",
+    "classification": {
+      "short": "4000 <= length < 6000",
+      "mid": "6000 <= length <= 8000",
+      "long": "8000 < length <= 10000",
+      "out": "all other segment lengths"
+    },
+    "note": "Counts classify only steel segments; tail adjustment/shim and gap are not material segments."
+  },
+  "Y1A": {
+    "source": "Y1A擋土支撐簡化版.dxf",
+    "original_can_import": true,
+    "analysis_only_bypassed_import_errors": [],
+    "waler_count": 4,
+    "runtime_seconds": 41.053787200013176,
+    "walers": [
+      {
+        "id": "W1",
+        "total_length_mm": 22200,
+        "material_spec": "H350x350",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2500,
+          5000,
+          7500,
+          10000,
+          12200,
+          14700,
+          17200,
+          19700
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 1.2804863000055775,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 48,
+          "best_score_history": [
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 48,
+              "best_score": 53333.33333333333,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8000,
+              8500
+            ],
+            "joints_mm": [
+              5500,
+              13500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 2,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8500,
+              8000
+            ],
+            "joints_mm": [
+              5500,
+              14000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 3,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              8500,
+              5500
+            ],
+            "joints_mm": [
+              8000,
+              16500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 4,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              5500,
+              8000
+            ],
+            "joints_mm": [
+              8500,
+              14000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 5,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              8000,
+              5500
+            ],
+            "joints_mm": [
+              8500,
+              16500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          }
+        ]
+      },
+      {
+        "id": "W2",
+        "total_length_mm": 95600,
+        "material_spec": "H350x350",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2050,
+          3550,
+          4550,
+          7050,
+          9550,
+          11550.0,
+          13050,
+          14550.0,
+          17550.0,
+          19050,
+          20550.0,
+          23550.0,
+          25050,
+          26550.0,
+          29550.0,
+          31050,
+          32550.0,
+          34550.0,
+          36050,
+          37550.0,
+          40550.0,
+          42050,
+          43550.0,
+          46550.0,
+          48050,
+          49550.0,
+          52050.0,
+          53550,
+          55050.0,
+          58050.0,
+          59550,
+          61050.0,
+          64050.0,
+          65550,
+          67050.0,
+          70050.0,
+          71550,
+          73050.0,
+          76050.0,
+          77550,
+          79050.0,
+          82050.0,
+          83550,
+          85050.0,
+          86050,
+          88550,
+          91050,
+          92050,
+          93550
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 17.284869199967943,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 120,
+          "best_score_history": [
+            56230.769230769234,
+            56230.769230769234,
+            56230.769230769234,
+            56230.769230769234,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 120,
+              "best_score": 55357.142857142855,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 55357.142857142855,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              4500,
+              8500,
+              8500,
+              8000,
+              8500,
+              4500,
+              6000,
+              6000,
+              5000,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              9000,
+              13500,
+              22000,
+              30500,
+              38500,
+              47000,
+              51500,
+              57500,
+              63500,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 14
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.21428571428571427,
+              "mid": 0.5,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 2,
+            "score": 55857.142857142855,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              9000,
+              4000,
+              8500,
+              8000,
+              8500,
+              4500,
+              6000,
+              4500,
+              6500,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              9000,
+              18000,
+              22000,
+              30500,
+              38500,
+              47000,
+              51500,
+              57500,
+              62000,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 14
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.21428571428571427,
+              "mid": 0.5,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 3,
+            "score": 56230.769230769234,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              9000,
+              5000,
+              10000,
+              6500,
+              10000,
+              9000,
+              6000,
+              5000,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              8000,
+              17000,
+              22000,
+              32000,
+              38500,
+              48500,
+              57500,
+              63500,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.15384615384615385,
+              "mid": 0.5384615384615384,
+              "long": 0.3076923076923077
+            }
+          },
+          {
+            "rank": 4,
+            "score": 57423.07692307692,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              9000,
+              9000,
+              6000,
+              5500,
+              7000,
+              9000,
+              7500,
+              5500,
+              6000,
+              9000,
+              7000,
+              6000
+            ],
+            "joints_mm": [
+              9000,
+              18000,
+              27000,
+              33000,
+              38500,
+              45500,
+              54500,
+              62000,
+              67500,
+              73500,
+              82500,
+              89500
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 6,
+              "long": 5,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.15384615384615385,
+              "mid": 0.46153846153846156,
+              "long": 0.38461538461538464
+            }
+          },
+          {
+            "rank": 5,
+            "score": 58692.307692307695,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7500,
+              8000,
+              5000,
+              7500,
+              9000,
+              7500,
+              9000,
+              5500,
+              6000,
+              9000,
+              5000,
+              8000
+            ],
+            "joints_mm": [
+              8500,
+              16000,
+              24000,
+              29000,
+              36500,
+              45500,
+              53000,
+              62000,
+              67500,
+              73500,
+              82500,
+              87500
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 6,
+              "long": 4,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.23076923076923078,
+              "mid": 0.46153846153846156,
+              "long": 0.3076923076923077
+            }
+          }
+        ]
+      },
+      {
+        "id": "W3",
+        "total_length_mm": 95600,
+        "material_spec": "H350x350",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2050,
+          3550,
+          4550,
+          7050,
+          9550,
+          11550.0,
+          13050,
+          14550.0,
+          17550.0,
+          19050,
+          20550.0,
+          23550.0,
+          25050,
+          26550.0,
+          29550.0,
+          31050,
+          32550.0,
+          34550.0,
+          36050,
+          37550.0,
+          40550.0,
+          42050,
+          43550.0,
+          46550.0,
+          48050,
+          49550.0,
+          52050.0,
+          53550,
+          55050.0,
+          58050.0,
+          59550,
+          61050.0,
+          64050.0,
+          65550,
+          67050.0,
+          70050.0,
+          71550,
+          73050.0,
+          76050.0,
+          77550,
+          79050.0,
+          82050.0,
+          83550,
+          85050.0,
+          86050,
+          88550,
+          91050,
+          92050,
+          93550
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 16.912074799998663,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 120,
+          "best_score_history": [
+            56230.769230769234,
+            56230.769230769234,
+            56230.769230769234,
+            56230.769230769234,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855,
+            55357.142857142855
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 120,
+              "best_score": 55357.142857142855,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 55357.142857142855,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              4500,
+              8500,
+              8500,
+              8000,
+              8500,
+              4500,
+              6000,
+              6000,
+              5000,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              9000,
+              13500,
+              22000,
+              30500,
+              38500,
+              47000,
+              51500,
+              57500,
+              63500,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 14
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.21428571428571427,
+              "mid": 0.5,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 2,
+            "score": 55857.142857142855,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              9000,
+              4000,
+              8500,
+              8000,
+              8500,
+              4500,
+              6000,
+              4500,
+              6500,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              9000,
+              18000,
+              22000,
+              30500,
+              38500,
+              47000,
+              51500,
+              57500,
+              62000,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 14
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.21428571428571427,
+              "mid": 0.5,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 3,
+            "score": 56230.769230769234,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              9000,
+              5000,
+              10000,
+              6500,
+              10000,
+              9000,
+              6000,
+              5000,
+              6500,
+              8000,
+              6000,
+              6500
+            ],
+            "joints_mm": [
+              8000,
+              17000,
+              22000,
+              32000,
+              38500,
+              48500,
+              57500,
+              63500,
+              68500,
+              75000,
+              83000,
+              89000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 7,
+              "long": 4,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.15384615384615385,
+              "mid": 0.5384615384615384,
+              "long": 0.3076923076923077
+            }
+          },
+          {
+            "rank": 4,
+            "score": 57423.07692307692,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              9000,
+              9000,
+              6000,
+              5500,
+              7000,
+              9000,
+              7500,
+              5500,
+              6000,
+              9000,
+              7000,
+              6000
+            ],
+            "joints_mm": [
+              9000,
+              18000,
+              27000,
+              33000,
+              38500,
+              45500,
+              54500,
+              62000,
+              67500,
+              73500,
+              82500,
+              89500
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 6,
+              "long": 5,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.15384615384615385,
+              "mid": 0.46153846153846156,
+              "long": 0.38461538461538464
+            }
+          },
+          {
+            "rank": 5,
+            "score": 58692.307692307695,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7500,
+              8000,
+              5000,
+              7500,
+              9000,
+              7500,
+              9000,
+              5500,
+              6000,
+              9000,
+              5000,
+              8000
+            ],
+            "joints_mm": [
+              8500,
+              16000,
+              24000,
+              29000,
+              36500,
+              45500,
+              53000,
+              62000,
+              67500,
+              73500,
+              82500,
+              87500
+            ],
+            "counts": {
+              "short": 3,
+              "mid": 6,
+              "long": 4,
+              "out": 0,
+              "total": 13
+            },
+            "steel_length_mm": 95500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.23076923076923078,
+              "mid": 0.46153846153846156,
+              "long": 0.3076923076923077
+            }
+          }
+        ]
+      },
+      {
+        "id": "W4",
+        "total_length_mm": 22200,
+        "material_spec": "H350x350",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2500,
+          5000,
+          7500,
+          10000,
+          12200,
+          14700,
+          17200,
+          19700
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.883843700052239,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 48,
+          "best_score_history": [
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 48,
+              "best_score": 53333.33333333333,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8000,
+              8500
+            ],
+            "joints_mm": [
+              5500,
+              13500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 2,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8500,
+              8000
+            ],
+            "joints_mm": [
+              5500,
+              14000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 3,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              8500,
+              5500
+            ],
+            "joints_mm": [
+              8000,
+              16500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 4,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              5500,
+              8000
+            ],
+            "joints_mm": [
+              8500,
+              14000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 5,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              8000,
+              5500
+            ],
+            "joints_mm": [
+              8500,
+              16500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          }
+        ]
+      }
+    ],
+    "aggregate_all_candidates": {
+      "short": 36,
+      "mid": 76,
+      "long": 52,
+      "out": 0,
+      "candidate_count": 20
+    },
+    "aggregate_by_rank": {
+      "1": {
+        "short": 8,
+        "mid": 16,
+        "long": 10,
+        "out": 0,
+        "candidates": 4
+      },
+      "2": {
+        "short": 8,
+        "mid": 16,
+        "long": 10,
+        "out": 0,
+        "candidates": 4
+      },
+      "3": {
+        "short": 6,
+        "mid": 16,
+        "long": 10,
+        "out": 0,
+        "candidates": 4
+      },
+      "4": {
+        "short": 6,
+        "mid": 14,
+        "long": 12,
+        "out": 0,
+        "candidates": 4
+      },
+      "5": {
+        "short": 8,
+        "mid": 14,
+        "long": 10,
+        "out": 0,
+        "candidates": 4
+      }
+    }
+  },
+  "Y29": {
+    "source": "Y29_test.dxf",
+    "original_can_import": false,
+    "analysis_only_bypassed_import_errors": [
+      {
+        "severity": "error",
+        "code": "BRACE_RECOGNITION_FAILED",
+        "role": "brace",
+        "member_ids": [],
+        "source_handles": [
+          "642"
+        ],
+        "message": "幾何群組無法可靠辨識為單一工程構件。"
+      },
+      {
+        "severity": "error",
+        "code": "BRACE_CENTERLINE_FAILED",
+        "role": "brace",
+        "member_ids": [],
+        "source_handles": [
+          "642"
+        ],
+        "message": "幾何群組無法建立可靠中心線。"
+      },
+      {
+        "severity": "error",
+        "code": "BEAM_RECOGNITION_FAILED",
+        "role": "beam",
+        "member_ids": [],
+        "source_handles": [
+          "6EF"
+        ],
+        "message": "幾何群組無法可靠辨識為單一工程構件。"
+      },
+      {
+        "severity": "error",
+        "code": "BEAM_CENTERLINE_FAILED",
+        "role": "beam",
+        "member_ids": [],
+        "source_handles": [
+          "6EF"
+        ],
+        "message": "幾何群組無法建立可靠中心線。"
+      },
+      {
+        "severity": "error",
+        "code": "BRACE_NOT_CONNECTED",
+        "role": "brace",
+        "member_ids": [],
+        "source_handles": [
+          "72F"
+        ],
+        "message": "B1 兩端皆未連接圍令。"
+      },
+      {
+        "severity": "error",
+        "code": "COLUMN_NOT_ASSOCIATED",
+        "role": "column",
+        "member_ids": [],
+        "source_handles": [
+          "53B"
+        ],
+        "message": "C34 未找到有效範圍內的所屬支撐。"
+      },
+      {
+        "severity": "error",
+        "code": "COLUMN_NOT_ASSOCIATED",
+        "role": "column",
+        "member_ids": [],
+        "source_handles": [
+          "53C"
+        ],
+        "message": "C41 未找到有效範圍內的所屬支撐。"
+      }
+    ],
+    "waler_count": 20,
+    "runtime_seconds": 134.37990679999348,
+    "walers": [
+      {
+        "id": "W1",
+        "total_length_mm": 5100,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          588.0,
+          2088,
+          3091,
+          4588.0
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 9.835302600055002,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W1"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 165000.0,
+            "valid": true,
+            "segments_mm": [
+              5000
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 5000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 1.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W2",
+        "total_length_mm": 9200,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2200,
+          4400,
+          6500,
+          8800
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 10.373759799986146,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0,
+            145000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W2"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 145000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 145000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 145000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 145000.0,
+            "valid": true,
+            "segments_mm": [
+              9000
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 0,
+              "long": 1,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 9000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.0,
+              "long": 1.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W3",
+        "total_length_mm": 8150,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          1550,
+          3750,
+          5950
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 11.146308799972758,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W3"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 105000.0,
+            "valid": true,
+            "segments_mm": [
+              8000
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 8000,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W4",
+        "total_length_mm": 22400,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2588.0,
+          4088,
+          5088,
+          6588.0,
+          7588.0,
+          9088,
+          10088,
+          11588.0,
+          12588.0,
+          14088,
+          15088,
+          16588.0,
+          17588.0,
+          19088,
+          20091,
+          21588.0
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.923369999974966,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 18,
+          "best_score_history": [
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333,
+            53333.33333333333
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 18,
+              "best_score": 53333.33333333333,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8000,
+              8500
+            ],
+            "joints_mm": [
+              5500,
+              13500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 2,
+            "score": 53333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              5500,
+              8500
+            ],
+            "joints_mm": [
+              8000,
+              13500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 3,
+            "score": 53833.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              7500,
+              9000
+            ],
+            "joints_mm": [
+              5500,
+              13000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 4,
+            "score": 54333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              5000,
+              9000
+            ],
+            "joints_mm": [
+              8000,
+              13000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 5,
+            "score": 54833.33333333333,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              6500,
+              10000
+            ],
+            "joints_mm": [
+              5500,
+              12000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 22000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.3333333333333333,
+              "long": 0.3333333333333333
+            }
+          }
+        ]
+      },
+      {
+        "id": "W5",
+        "total_length_mm": 12200,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          1200,
+          3100,
+          5600,
+          7800,
+          10000
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.6290940999751911,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 7,
+          "best_score_history": [
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0,
+            72000.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 7,
+              "best_score": 72000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 72000.0,
+            "valid": true,
+            "segments_mm": [
+              6500,
+              5500
+            ],
+            "joints_mm": [
+              6500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 2,
+            "score": 73000.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              7000
+            ],
+            "joints_mm": [
+              5000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 3,
+            "score": 73000.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              5000
+            ],
+            "joints_mm": [
+              7000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 74000.0,
+            "valid": true,
+            "segments_mm": [
+              4500,
+              7500
+            ],
+            "joints_mm": [
+              4500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 5,
+            "score": 75000.0,
+            "valid": true,
+            "segments_mm": [
+              4000,
+              8000
+            ],
+            "joints_mm": [
+              4000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W6",
+        "total_length_mm": 12200,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          788,
+          1600,
+          1788,
+          3288.0,
+          3500,
+          4288.0,
+          5788,
+          6000,
+          6788,
+          8200,
+          8288.0,
+          10400
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 3.100915899965912,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "ENHANCED",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 300,
+          "valid_candidate_count": 180,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 5,
+          "best_score_history": [
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0,
+            73000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 73000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 5,
+              "best_score": 73000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 73000.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              7000
+            ],
+            "joints_mm": [
+              5000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 2,
+            "score": 74000.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              4500
+            ],
+            "joints_mm": [
+              7500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 3,
+            "score": 257000.0,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              3000
+            ],
+            "joints_mm": [
+              9000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 0,
+              "long": 1,
+              "out": 1,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.0,
+              "long": 1.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 259000.0,
+            "valid": true,
+            "segments_mm": [
+              10000,
+              2000
+            ],
+            "joints_mm": [
+              10000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 0,
+              "long": 1,
+              "out": 1,
+              "total": 2
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.0,
+              "long": 1.0
+            }
+          },
+          {
+            "rank": 5,
+            "score": 689000.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              2500,
+              1500,
+              1000,
+              1000,
+              1000
+            ],
+            "joints_mm": [
+              5000,
+              7500,
+              9000,
+              10000,
+              11000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 0,
+              "out": 5,
+              "total": 6
+            },
+            "steel_length_mm": 12000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 1.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W7",
+        "total_length_mm": 7500,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 4,
+        "runtime_seconds": 10.10740090010222,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 4,
+          "unique_solution_count": 3,
+          "best_score_history": [
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 2,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 3,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 105000.0,
+            "valid": true,
+            "segments_mm": [
+              7500
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 7500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 2,
+            "score": 273500.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              2500
+            ],
+            "joints_mm": [
+              5000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 0,
+              "out": 1,
+              "total": 2
+            },
+            "steel_length_mm": 7500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 1.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 3,
+            "score": 381000.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              1500,
+              1000
+            ],
+            "joints_mm": [
+              5000,
+              6500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 0,
+              "out": 2,
+              "total": 3
+            },
+            "steel_length_mm": 7500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 1.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 419000.0,
+            "valid": true,
+            "segments_mm": [
+              3500,
+              2500,
+              1500
+            ],
+            "joints_mm": [
+              3500,
+              6000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 0,
+              "long": 0,
+              "out": 3,
+              "total": 3
+            },
+            "steel_length_mm": 7500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W8",
+        "total_length_mm": 7100,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          900,
+          2588.0,
+          3100,
+          4088,
+          5091,
+          5300,
+          6588.0
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 10.199332799995318,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W8"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 105000.0,
+            "valid": true,
+            "segments_mm": [
+              7000
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 7000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W9",
+        "total_length_mm": 13500,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          2088.0,
+          3588,
+          4588,
+          5100,
+          6088.0,
+          7088.0,
+          7300,
+          8588,
+          9500,
+          9591,
+          11088.0,
+          11700
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.8976621000329033,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 7,
+          "best_score_history": [
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0,
+            73500.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 7,
+              "best_score": 73500.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 73500.0,
+            "valid": true,
+            "segments_mm": [
+              5500,
+              8000
+            ],
+            "joints_mm": [
+              5500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 13500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 2,
+            "score": 73500.0,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              5500
+            ],
+            "joints_mm": [
+              8000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 13500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 3,
+            "score": 111500.0,
+            "valid": true,
+            "segments_mm": [
+              6500,
+              7000
+            ],
+            "joints_mm": [
+              6500
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 0,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 13500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 115500.0,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              4500
+            ],
+            "joints_mm": [
+              9000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 13500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.0,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 5,
+            "score": 179500.0,
+            "valid": true,
+            "segments_mm": [
+              4000,
+              6000,
+              3500
+            ],
+            "joints_mm": [
+              4000,
+              10000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 1,
+              "long": 0,
+              "out": 1,
+              "total": 3
+            },
+            "steel_length_mm": 13500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W10",
+        "total_length_mm": 7609,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          1009,
+          2297.0,
+          3797,
+          4800,
+          6297.0
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 13.60376740002539,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W10"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 105000.0,
+            "valid": true,
+            "segments_mm": [
+              7500
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 7500,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 9,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W11",
+        "total_length_mm": 7100,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          900,
+          3100,
+          5300
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 15.586327799945138,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0,
+            105000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W11"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 105000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 105000.0,
+            "valid": true,
+            "segments_mm": [
+              7000
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 7000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 1.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W12",
+        "total_length_mm": 28136,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          224.0,
+          1724,
+          2724,
+          4224.0,
+          5224.0,
+          6724,
+          7724,
+          9224.0,
+          10224.0,
+          11724,
+          12724,
+          14224.0,
+          25224.0,
+          26724,
+          27724
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 1.4831363999983296,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 32,
+          "best_score_history": [
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0,
+            31000.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 32,
+              "best_score": 31000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 31000.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7000,
+              5500,
+              7000
+            ],
+            "joints_mm": [
+              8500,
+              15500,
+              21000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 28000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 36,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 2,
+            "score": 31000.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7000,
+              7000,
+              5500
+            ],
+            "joints_mm": [
+              8500,
+              15500,
+              22500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 28000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 36,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 3,
+            "score": 36500.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              5000,
+              7000,
+              7500
+            ],
+            "joints_mm": [
+              8500,
+              13500,
+              20500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 28000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 36,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 4,
+            "score": 36500.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              5000,
+              7500,
+              7000
+            ],
+            "joints_mm": [
+              8500,
+              13500,
+              21000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 28000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 36,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 5,
+            "score": 36500.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              5000,
+              8000,
+              6500
+            ],
+            "joints_mm": [
+              8500,
+              13500,
+              21500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 28000,
+            "tail_adjustment_mm": 100,
+            "gap_mm": 36,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          }
+        ]
+      },
+      {
+        "id": "W13",
+        "total_length_mm": 56500,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          588,
+          2088.0,
+          3088.0,
+          4588,
+          5588,
+          7088.0,
+          8088.0,
+          9588,
+          10588,
+          12088.0,
+          13088.0,
+          14588,
+          15591,
+          17088.0,
+          18088.0,
+          19588,
+          20588,
+          22088.0,
+          23088.0,
+          24588,
+          25588,
+          27088.0,
+          28088.0,
+          29588,
+          30591,
+          32088.0,
+          33088.0,
+          34588,
+          35591,
+          37088.0,
+          38088.0,
+          39588,
+          40588,
+          42088.0,
+          43088.0,
+          44588,
+          45588,
+          47088.0,
+          48088.0,
+          49588,
+          50588,
+          52088.0,
+          53088.0,
+          54588,
+          55588
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 25.747682200046256,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "ENHANCED",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 300,
+          "valid_candidate_count": 180,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 164,
+          "best_score_history": [
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            45000.0,
+            40000.0,
+            42000.0,
+            42000.0,
+            42000.0,
+            42000.0,
+            42000.0,
+            42000.0,
+            42000.0,
+            41500.0,
+            41500.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0,
+            40000.0
+          ],
+          "escalation_reasons": [
+            "最佳分數在搜尋尾段仍未穩定"
+          ],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 111,
+              "best_score": 40000.0,
+              "tail_score_improvement": 0.1111111111111111,
+              "result_is_stable": false,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "最佳分數在搜尋尾段仍未穩定"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 164,
+              "best_score": 40000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 40000.0,
+            "valid": true,
+            "segments_mm": [
+              6000,
+              5500,
+              7500,
+              8500,
+              8500,
+              5500,
+              7500,
+              7500
+            ],
+            "joints_mm": [
+              6000,
+              11500,
+              19000,
+              27500,
+              36000,
+              41500,
+              49000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 56500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 2,
+            "score": 40000.0,
+            "valid": true,
+            "segments_mm": [
+              6000,
+              7500,
+              5500,
+              8500,
+              8500,
+              5500,
+              7500,
+              7500
+            ],
+            "joints_mm": [
+              6000,
+              13500,
+              19000,
+              27500,
+              36000,
+              41500,
+              49000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 56500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 3,
+            "score": 40000.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              6000,
+              5500,
+              7500,
+              8500,
+              7500,
+              8500,
+              5500
+            ],
+            "joints_mm": [
+              7500,
+              13500,
+              19000,
+              26500,
+              35000,
+              42500,
+              51000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 56500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 4,
+            "score": 40000.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              6000,
+              5500,
+              8500,
+              8500,
+              5500,
+              7500,
+              7500
+            ],
+            "joints_mm": [
+              7500,
+              13500,
+              19000,
+              27500,
+              36000,
+              41500,
+              49000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 56500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 5,
+            "score": 40000.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              8500,
+              5500,
+              6000,
+              8500,
+              5500,
+              7500,
+              7500
+            ],
+            "joints_mm": [
+              7500,
+              16000,
+              21500,
+              27500,
+              36000,
+              41500,
+              49000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 56500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          }
+        ]
+      },
+      {
+        "id": "W14",
+        "total_length_mm": 5579,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 1,
+        "runtime_seconds": 8.50322299997788,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "DEEP",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": true,
+          "search_was_escalated": true,
+          "result_is_stable": true,
+          "candidate_count": 540,
+          "valid_candidate_count": 240,
+          "retained_candidate_count": 1,
+          "unique_solution_count": 1,
+          "best_score_history": [
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0,
+            165000.0
+          ],
+          "escalation_reasons": [
+            "合法且唯一方案數低於政策門檻"
+          ],
+          "stopping_reason": "已達最大搜尋階段",
+          "main_issue_category": "SEARCH_INSUFFICIENT",
+          "main_issue_message": "已找到合法方案，但搜尋達上限時仍未完全穩定。",
+          "secondary_issue_categories": [
+            "CANDIDATE_INSUFFICIENT"
+          ],
+          "issue_counts": {},
+          "affected_component_ids": [
+            "W14"
+          ],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "ENHANCED",
+              "generations": 30,
+              "population_size": 180,
+              "random_seed": 137,
+              "legal_solution_found": true,
+              "valid_solution_count": 180,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "進入下一搜尋階段",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            },
+            {
+              "stage": "DEEP",
+              "generations": 60,
+              "population_size": 240,
+              "random_seed": 271,
+              "legal_solution_found": true,
+              "valid_solution_count": 240,
+              "unique_solution_count": 1,
+              "best_score": 165000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": [
+                "合法且唯一方案數低於政策門檻"
+              ]
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 165000.0,
+            "valid": true,
+            "segments_mm": [
+              5500
+            ],
+            "joints_mm": [],
+            "counts": {
+              "short": 1,
+              "mid": 0,
+              "long": 0,
+              "out": 0,
+              "total": 1
+            },
+            "steel_length_mm": 5500,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 79,
+            "segment_ratios": {
+              "short": 1.0,
+              "mid": 0.0,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W15",
+        "total_length_mm": 17650,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          120,
+          2250,
+          4450,
+          6850,
+          8850,
+          11050,
+          13250,
+          15450
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.8078630999661982,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 20,
+          "best_score_history": [
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 20,
+              "best_score": 53500.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 53500.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              10000
+            ],
+            "joints_mm": [
+              7500
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17500,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 2,
+            "score": 53500.0,
+            "valid": true,
+            "segments_mm": [
+              10000,
+              7500
+            ],
+            "joints_mm": [
+              10000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17500,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 3,
+            "score": 78499.99999999999,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              6500,
+              6000
+            ],
+            "joints_mm": [
+              5000,
+              11500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 0,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 17500,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.6666666666666666,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 78499.99999999999,
+            "valid": true,
+            "segments_mm": [
+              6000,
+              6500,
+              5000
+            ],
+            "joints_mm": [
+              6000,
+              12500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 0,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 17500,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.6666666666666666,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 5,
+            "score": 106333.33333333333,
+            "valid": true,
+            "segments_mm": [
+              6500,
+              5500,
+              5500
+            ],
+            "joints_mm": [
+              6500,
+              12000
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 1,
+              "long": 0,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 17500,
+            "tail_adjustment_mm": 150,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.6666666666666666,
+              "mid": 0.3333333333333333,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W16",
+        "total_length_mm": 17249,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 0.7914985000388697,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 24,
+          "best_score_history": [
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0,
+            52000.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 24,
+              "best_score": 52000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 52000.0,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              9000
+            ],
+            "joints_mm": [
+              8000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 49,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 2,
+            "score": 52000.0,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              8000
+            ],
+            "joints_mm": [
+              9000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 49,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 3,
+            "score": 54000.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              10000
+            ],
+            "joints_mm": [
+              7000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 49,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 4,
+            "score": 54000.0,
+            "valid": true,
+            "segments_mm": [
+              10000,
+              7000
+            ],
+            "joints_mm": [
+              10000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 1,
+              "long": 1,
+              "out": 0,
+              "total": 2
+            },
+            "steel_length_mm": 17000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 49,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.5,
+              "long": 0.5
+            }
+          },
+          {
+            "rank": 5,
+            "score": 72999.99999999999,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              6000,
+              6000
+            ],
+            "joints_mm": [
+              5000,
+              11000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 0,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 17000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 49,
+            "segment_ratios": {
+              "short": 0.3333333333333333,
+              "mid": 0.6666666666666666,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W17",
+        "total_length_mm": 24400,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          1982.0,
+          2200,
+          3482,
+          4400,
+          4979.0,
+          6600,
+          7488.0,
+          8800,
+          8988,
+          10485.0,
+          11000,
+          12488.0,
+          13200,
+          13988,
+          14988,
+          15400,
+          16491.0,
+          17488.0,
+          17741,
+          18988,
+          19941,
+          19988,
+          21491.0,
+          21888.0,
+          22441,
+          23988
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 1.1910136000951752,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 24,
+          "best_score_history": [
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0,
+            55000.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 24,
+              "best_score": 55000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 55000.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              10000,
+              7000
+            ],
+            "joints_mm": [
+              7000,
+              17000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 2,
+            "score": 55000.0,
+            "valid": true,
+            "segments_mm": [
+              10000,
+              7000,
+              7000
+            ],
+            "joints_mm": [
+              10000,
+              17000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 3,
+            "score": 58000.0,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7500,
+              8000
+            ],
+            "joints_mm": [
+              8500,
+              16000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 4,
+            "score": 59000.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              9000,
+              8000
+            ],
+            "joints_mm": [
+              7000,
+              16000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 5,
+            "score": 59000.0,
+            "valid": true,
+            "segments_mm": [
+              8000,
+              9000,
+              7000
+            ],
+            "joints_mm": [
+              8000,
+              17000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 100,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          }
+        ]
+      },
+      {
+        "id": "W18",
+        "total_length_mm": 25217,
+        "material_spec": "",
+        "inventory_mode": "unspecified_material_unlimited_fallback",
+        "forbidden_points_mm": [
+          482,
+          1982.0,
+          3982.0,
+          5482,
+          6482,
+          7449,
+          7985.0,
+          8982.0,
+          10482,
+          11482,
+          12985.0,
+          13982.0,
+          15482,
+          16482,
+          17456,
+          17982.0,
+          18982.0,
+          20482,
+          20791,
+          21482,
+          22985.0,
+          24127
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          9500,
+          10000
+        ],
+        "stock_item_count": 19,
+        "candidate_count": 5,
+        "runtime_seconds": 2.0685164999449626,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 35,
+          "best_score_history": [
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0,
+            37500.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 35,
+              "best_score": 37500.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 37500.0,
+            "valid": true,
+            "segments_mm": [
+              6000,
+              8500,
+              4000,
+              6500
+            ],
+            "joints_mm": [
+              6000,
+              14500,
+              18500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 25000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 2,
+            "score": 74500.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              5500,
+              7000,
+              5500
+            ],
+            "joints_mm": [
+              7000,
+              12500,
+              19500
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 2,
+              "long": 0,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 25000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.5,
+              "mid": 0.5,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 3,
+            "score": 80000.0,
+            "valid": true,
+            "segments_mm": [
+              5000,
+              7000,
+              6500,
+              6500
+            ],
+            "joints_mm": [
+              5000,
+              12000,
+              18500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 3,
+              "long": 0,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 25000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.75,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 4,
+            "score": 80000.0,
+            "valid": true,
+            "segments_mm": [
+              6000,
+              7500,
+              6000,
+              5500
+            ],
+            "joints_mm": [
+              6000,
+              13500,
+              19500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 3,
+              "long": 0,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 25000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.75,
+              "long": 0.0
+            }
+          },
+          {
+            "rank": 5,
+            "score": 80000.0,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              6500,
+              5000,
+              6500
+            ],
+            "joints_mm": [
+              7000,
+              13500,
+              18500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 3,
+              "long": 0,
+              "out": 0,
+              "total": 4
+            },
+            "steel_length_mm": 25000,
+            "tail_adjustment_mm": 200,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.75,
+              "long": 0.0
+            }
+          }
+        ]
+      },
+      {
+        "id": "W19",
+        "total_length_mm": 53317,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [
+          3137,
+          9808,
+          23005.0,
+          24505,
+          25505,
+          27008.0,
+          28005.0,
+          29505,
+          30508,
+          32008.0,
+          33005.0,
+          34505,
+          35505,
+          37008.0,
+          38005.0,
+          39505,
+          40505,
+          42005.0,
+          43005.0,
+          44505,
+          45508,
+          47005.0,
+          48917,
+          51117
+        ],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 5.588941799942404,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 111,
+          "best_score_history": [
+            43785.71428571428,
+            43785.71428571428,
+            43785.71428571428,
+            41000.0,
+            41000.0,
+            41000.0,
+            41000.0,
+            41000.0,
+            41000.0,
+            41000.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 111,
+              "best_score": 41000.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 41000.0,
+            "valid": true,
+            "segments_mm": [
+              4500,
+              7000,
+              6500,
+              8500,
+              8500,
+              6500,
+              7000,
+              4500
+            ],
+            "joints_mm": [
+              4500,
+              11500,
+              18000,
+              26500,
+              35000,
+              41500,
+              48500
+            ],
+            "counts": {
+              "short": 2,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 8
+            },
+            "steel_length_mm": 53000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.25,
+              "mid": 0.5,
+              "long": 0.25
+            }
+          },
+          {
+            "rank": 2,
+            "score": 43785.71428571428,
+            "valid": true,
+            "segments_mm": [
+              7000,
+              9000,
+              7500,
+              7500,
+              7500,
+              9000,
+              5500
+            ],
+            "joints_mm": [
+              7000,
+              16000,
+              23500,
+              31000,
+              38500,
+              47500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 7
+            },
+            "steel_length_mm": 53000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.14285714285714285,
+              "mid": 0.5714285714285714,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 3,
+            "score": 43785.71428571428,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              8500,
+              7500,
+              7500,
+              7500,
+              5500,
+              9000
+            ],
+            "joints_mm": [
+              7500,
+              16000,
+              23500,
+              31000,
+              38500,
+              44000
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 7
+            },
+            "steel_length_mm": 53000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.14285714285714285,
+              "mid": 0.5714285714285714,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 4,
+            "score": 43785.71428571428,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              8500,
+              7500,
+              7500,
+              7500,
+              9000,
+              5500
+            ],
+            "joints_mm": [
+              7500,
+              16000,
+              23500,
+              31000,
+              38500,
+              47500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 7
+            },
+            "steel_length_mm": 53000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.14285714285714285,
+              "mid": 0.5714285714285714,
+              "long": 0.2857142857142857
+            }
+          },
+          {
+            "rank": 5,
+            "score": 43785.71428571428,
+            "valid": true,
+            "segments_mm": [
+              8500,
+              7500,
+              7500,
+              7500,
+              7500,
+              9000,
+              5500
+            ],
+            "joints_mm": [
+              8500,
+              16000,
+              23500,
+              31000,
+              38500,
+              47500
+            ],
+            "counts": {
+              "short": 1,
+              "mid": 4,
+              "long": 2,
+              "out": 0,
+              "total": 7
+            },
+            "steel_length_mm": 53000,
+            "tail_adjustment_mm": 300,
+            "gap_mm": 17,
+            "segment_ratios": {
+              "short": 0.14285714285714285,
+              "mid": 0.5714285714285714,
+              "long": 0.2857142857142857
+            }
+          }
+        ]
+      },
+      {
+        "id": "W20",
+        "total_length_mm": 24000,
+        "material_spec": "H400x400",
+        "inventory_mode": "specified_material_inventory",
+        "forbidden_points_mm": [],
+        "purchasable_lengths_mm": [
+          1000,
+          1500,
+          2000,
+          2500,
+          3000,
+          3500,
+          4000,
+          4500,
+          5000,
+          5500,
+          6000,
+          6500,
+          7000,
+          7500,
+          8000,
+          8500,
+          9000,
+          10000
+        ],
+        "stock_item_count": 18,
+        "candidate_count": 5,
+        "runtime_seconds": 1.1211762999882922,
+        "diagnostics": {
+          "solver_type": "waler",
+          "search_status": "completed",
+          "search_stage": "STANDARD",
+          "legal_solution_found": true,
+          "infeasibility_proven": false,
+          "search_limit_reached": false,
+          "search_was_escalated": false,
+          "result_is_stable": true,
+          "candidate_count": 120,
+          "valid_candidate_count": 120,
+          "retained_candidate_count": 5,
+          "unique_solution_count": 59,
+          "best_score_history": [
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0,
+            53500.0
+          ],
+          "escalation_reasons": [],
+          "stopping_reason": "結果已穩定且方案數充足",
+          "main_issue_category": "NONE",
+          "main_issue_message": "",
+          "secondary_issue_categories": [],
+          "issue_counts": {},
+          "affected_component_ids": [],
+          "component_candidate_counts": {},
+          "policy_id": "solver_auto_search",
+          "policy_version": 1,
+          "stage_records": [
+            {
+              "stage": "STANDARD",
+              "generations": 10,
+              "population_size": 120,
+              "random_seed": 42,
+              "legal_solution_found": true,
+              "valid_solution_count": 120,
+              "unique_solution_count": 59,
+              "best_score": 53500.0,
+              "tail_score_improvement": 0.0,
+              "result_is_stable": true,
+              "decision": "停止搜尋",
+              "reasons": []
+            }
+          ]
+        },
+        "candidates": [
+          {
+            "rank": 1,
+            "score": 53500.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              7500,
+              9000
+            ],
+            "joints_mm": [
+              7500,
+              15000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 2,
+            "score": 53500.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              9000,
+              7500
+            ],
+            "joints_mm": [
+              7500,
+              16500
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 3,
+            "score": 53500.0,
+            "valid": true,
+            "segments_mm": [
+              9000,
+              7500,
+              7500
+            ],
+            "joints_mm": [
+              9000,
+              16500
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 4,
+            "score": 55000.0,
+            "valid": true,
+            "segments_mm": [
+              10000,
+              7000,
+              7000
+            ],
+            "joints_mm": [
+              10000,
+              17000
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          },
+          {
+            "rank": 5,
+            "score": 58000.0,
+            "valid": true,
+            "segments_mm": [
+              7500,
+              8000,
+              8500
+            ],
+            "joints_mm": [
+              7500,
+              15500
+            ],
+            "counts": {
+              "short": 0,
+              "mid": 2,
+              "long": 1,
+              "out": 0,
+              "total": 3
+            },
+            "steel_length_mm": 24000,
+            "tail_adjustment_mm": 0,
+            "gap_mm": 0,
+            "segment_ratios": {
+              "short": 0.0,
+              "mid": 0.6666666666666666,
+              "long": 0.3333333333333333
+            }
+          }
+        ]
+      }
+    ],
+    "aggregate_all_candidates": {
+      "short": 53,
+      "mid": 118,
+      "long": 51,
+      "out": 14,
+      "candidate_count": 71
+    },
+    "aggregate_by_rank": {
+      "1": {
+        "short": 12,
+        "mid": 27,
+        "long": 12,
+        "out": 0,
+        "candidates": 20
+      },
+      "2": {
+        "short": 11,
+        "mid": 22,
+        "long": 10,
+        "out": 1,
+        "candidates": 13
+      },
+      "3": {
+        "short": 9,
+        "mid": 24,
+        "long": 10,
+        "out": 3,
+        "candidates": 13
+      },
+      "4": {
+        "short": 9,
+        "mid": 22,
+        "long": 11,
+        "out": 4,
+        "candidates": 13
+      },
+      "5": {
+        "short": 12,
+        "mid": 23,
+        "long": 8,
+        "out": 6,
+        "candidates": 12
+      }
+    }
+  }
+}

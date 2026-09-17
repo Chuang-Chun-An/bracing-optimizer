@@ -10,6 +10,7 @@ from .dialogs.solver_dialog_base import (
 )
 from .dialogs.support_solver_dialog import SupportSolverDialog
 from .dialogs.waler_solver_dialog import WalerSolverDialog
+from .dialogs.waler_global_solver_dialog import WalerGlobalSolverDialog
 from .result_formatters import (
     format_result_list,
     format_result_value,
@@ -24,6 +25,7 @@ __all__ = [
     "SupportSolverDialog",
     "TextRedirector",
     "WalerSelectionDialog",
+    "WalerGlobalSolverDialog",
     "WalerSolverDialog",
     "ZoningSelectionDialog",
     "format_result_list",

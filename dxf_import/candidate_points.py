@@ -911,7 +911,7 @@ def associate_components_to_struts(
                 ValidationMessage(
                     "warning",
                     "AMBIGUOUS_COMPONENT_ASSOCIATION",
-                    f"{component.id} 的 primary 支撐 {strut_id} 同時屬於多個已採用雙路群組，"
+                    f"{component.id} 的主要支撐 {strut_id} 同時屬於多個已採用雙路群組，"
                     f"保守採用 primary 單支關聯。",
                     "column",
                     component.source_handles,

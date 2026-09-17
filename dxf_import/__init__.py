@@ -134,10 +134,12 @@ from dxf_import.importer import (
     Y29_LAYER_MAPPING,
     default_layer_mapping_for_file,
 )
-from dxf_import.dialog import (
+from window_layout import (
     _parse_window_geometry,
     fit_window_geometry_to_work_areas,
     _active_monitor_work_areas,
+)
+from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
 )
@@ -191,6 +193,18 @@ from dxf_import.source_exclusion import (
     shared_handle_conflicts,
     source_file_fingerprint,
 )
+from dxf_import.review_confirmation import (
+    FORMAL_REVIEW_ROLES,
+    confirm_review_item,
+    review_confirmation_identity,
+    review_confirmation_signature,
+    review_confirmations_from_state,
+    review_item_can_be_confirmed,
+    review_item_is_confirmed,
+    serialize_review_confirmations,
+    unconfirmed_formal_review_items,
+    valid_review_confirmations,
+)
 
 __all__ = [
     'AuxiliaryComponent',
@@ -216,6 +230,7 @@ __all__ = [
     'DXFImportError',
     'DXFImporter',
     'DXFImportResult',
+    'FORMAL_REVIEW_ROLES',
     'default_layer_mapping_for_file',
     'DoubleSupportCandidate',
     'DoubleSupportSourceIdentity',
@@ -239,6 +254,7 @@ __all__ = [
     'ValidationMessage',
     'ValidationOverviewItem',
     'Waler',
+    'confirm_review_item',
     'WalerContactAdjustmentPlan',
     'WalerBackfillMeasurement',
     'WalerContactReviewState',
@@ -301,7 +317,15 @@ __all__ = [
     'normalize_source_handles',
     'replay_manual_overrides',
     'review_state_matches_source',
+    'review_confirmation_identity',
+    'review_confirmation_signature',
+    'review_confirmations_from_state',
+    'review_item_can_be_confirmed',
+    'review_item_is_confirmed',
+    'serialize_review_confirmations',
     'shared_handle_conflicts',
     'source_file_fingerprint',
+    'unconfirmed_formal_review_items',
+    'valid_review_confirmations',
     'support_side_normal',
 ]

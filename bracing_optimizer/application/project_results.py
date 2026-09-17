@@ -43,6 +43,20 @@ class ProjectResultModel:
     persisted_payload: dict | None = None
 
     @staticmethod
+    def waler_result_identity(result_id: str, item: Mapping) -> str:
+        """Return the exact Waler ID, including the supported legacy fallback."""
+
+        if not isinstance(item, Mapping) or item.get("type") != "waler":
+            return ""
+        result = item.get("result")
+        if isinstance(result, Mapping):
+            explicit_id = str(result.get("waler_id", "") or "").strip()
+            if explicit_id:
+                return explicit_id
+        legacy_id, separator, _suffix = str(result_id or "").partition("-方案")
+        return legacy_id.strip() if separator else ""
+
+    @staticmethod
     def serialize_support_plan(plan) -> dict:
         return {
             "support_id": getattr(plan, "support_id", ""),

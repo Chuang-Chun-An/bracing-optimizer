@@ -1,0 +1,1953 @@
+{
+  "metadata": {
+    "git_head": "56b74cdac8ec71b30cb6a2ae4bbdac897606e8ba",
+    "git_subject": "第一版_waler背填、錯誤辨識",
+    "length_basis": "world_start/world_end, falling back to start/end",
+    "percentile_method": "linear interpolation at (n - 1) * p",
+    "angle_method": "degrees(atan2(dy, dx)) modulo 180; horizontal/vertical tolerance is 5 degrees",
+    "classification_rules": {
+      "short": "4000 <= length < 6000",
+      "mid": "6000 <= length <= 8000",
+      "long": "8000 < length <= 10000",
+      "out": "all other lengths"
+    }
+  },
+  "source_inventory": {
+    "Y1A": [
+      {
+        "path": "Y1A擋土支撐簡化版.dxf",
+        "exists": true,
+        "kind": "formal_input",
+        "note": "Filename-scoped Y1A mapping target.",
+        "size_bytes": 7388788,
+        "sha256": "C3352E9E830D49C699AD17C8FAACA7B8B3F95E098B2850F8E2804E458E35E315"
+      },
+      {
+        "path": "project_cases/Y1A站第一層支撐/source/source.dxf",
+        "exists": true,
+        "kind": "managed_copy",
+        "note": "Managed project source; byte-identical to the root formal input when hashes match.",
+        "size_bytes": 7388788,
+        "sha256": "C3352E9E830D49C699AD17C8FAACA7B8B3F95E098B2850F8E2804E458E35E315"
+      },
+      {
+        "path": "Y1A擋土支撐簡化版_支撐配置成果.dxf",
+        "exists": true,
+        "kind": "result_output",
+        "note": "Solver result DXF; not used as import input.",
+        "size_bytes": 938830,
+        "sha256": "18CFFA19379E7D80ED532A94A0DEEB92A522FD64D8F566186C8C404628574F87"
+      },
+      {
+        "path": "project_cases/Y1A站第一層支撐/project.json",
+        "exists": true,
+        "kind": "project_fixture",
+        "note": "Saved formal Project data and DXF review state.",
+        "size_bytes": 3166988,
+        "sha256": "A5811319FE5ECE8E22544D385810A047EA9533FC89FCA3947DF572E971A4939E"
+      },
+      {
+        "path": "project_cases/Y1A站第一層支撐/project.json.bak",
+        "exists": true,
+        "kind": "project_backup",
+        "note": "Backup project fixture; not used for this pipeline run.",
+        "size_bytes": 3126630,
+        "sha256": "D6DA891FFA3A0FCB01DD45C860276D6CA8B5F977B46AC022A0930DCC3604A0B1"
+      },
+      {
+        "path": "project_cases/Y1A站第一層支撐.json",
+        "exists": true,
+        "kind": "legacy_project_fixture",
+        "note": "Additional saved Project fixture; not used for this pipeline run.",
+        "size_bytes": 27585,
+        "sha256": "B49FA209F5F158BABDF35FDA824F334D20B5460069483D333B21FAFED0013400"
+      },
+      {
+        "path": "project_cases/Y1A站第二層支撐.json",
+        "exists": true,
+        "kind": "legacy_project_fixture",
+        "note": "Second-layer saved Project fixture; not used for this first-layer DXF comparison.",
+        "size_bytes": 45961,
+        "sha256": "E9E5F5DB2123DCC5E05CD16E05B32D82CE15DD8176A417927EAF22F2668C25A7"
+      },
+      {
+        "path": "project_cases/Y1A第一層支撐1.json",
+        "exists": true,
+        "kind": "legacy_project_fixture",
+        "note": "Additional first-layer saved Project fixture; not used for this pipeline run.",
+        "size_bytes": 27583,
+        "sha256": "DD8C214E373BB678B8468F9FE8D77F11912415CF14F32F50DDDB8C3AA3F222AF"
+      }
+    ],
+    "Y29": [
+      {
+        "path": "Y29_test.dxf",
+        "exists": true,
+        "kind": "regression_input",
+        "note": "Only Y29 DXF/test-data source in the repository; used by the formal importer regression test.",
+        "size_bytes": 1657916,
+        "sha256": "54A127D6B3409109C924705FB887ACF0D1A679B48F7C2348966E550763416A4E"
+      }
+    ]
+  },
+  "Y1A": {
+    "source": "Y1A擋土支撐簡化版.dxf",
+    "source_sha256": "C3352E9E830D49C699AD17C8FAACA7B8B3F95E098B2850F8E2804E458E35E315",
+    "source_size_bytes": 7388788,
+    "pipeline": "DXFImporter.read().convert(layer_roles=filename_scoped_mapping, material_specs=DEFAULT_MATERIAL_SPECS)",
+    "layer_mapping": {
+      "L-SITE-WALL": "連續壁",
+      "ES-圍令L1H350x350": "圍令",
+      "ES-LH350x350": "支撐",
+      "ES-大斜撐_支撐350x350": "斜撐",
+      "!T1 (站體)_角撐": "角撐",
+      "ES-中間樁NO": "中間柱",
+      "ES-C250x90": "托梁",
+      "DIM-軸線U": "輔助線",
+      "DIM-軸線X": "輔助線"
+    },
+    "recognized_layers": {
+      "0": "ignore",
+      "Defpoints": "ignore",
+      "XBOX": "ignore",
+      "圖名": "ignore",
+      "XBOX-name": "ignore",
+      "XBOX-日期": "ignore",
+      "A-FLOR": "ignore",
+      "L-SITE-WALL": "continuous_wall",
+      "I-WALL": "ignore",
+      "S-STRS": "ignore",
+      "A-GENM": "ignore",
+      "S-BEAM": "ignore",
+      "A-DETL-GENF": "ignore",
+      "A-DETL": "ignore",
+      "A-WALL-PATT": "ignore",
+      "S-STRS-MBND": "ignore",
+      "A-FLOR-HDLN": "ignore",
+      "A-WALL-HDLN": "ignore",
+      "A-DETL-THIN": "ignore",
+      "S-GRID": "ignore",
+      "S-GRID-IDEN": "ignore",
+      "A-ANNO-DIMS": "ignore",
+      "OFF-框": "ignore",
+      "ES-中間柱LINE線": "ignore",
+      "DIM-軸線U": "auxiliary",
+      "DIM-軸線X": "auxiliary",
+      "TEXT-圖名": "ignore",
+      "ES-LH414x405": "ignore",
+      "TEXT": "ignore",
+      "ES-圍令背填": "ignore",
+      "ES-圍令L1H350x350": "waler",
+      "ES-LH350x350": "strut",
+      "ES-LH300x300": "ignore",
+      "ES-LH TEXT": "ignore",
+      "ES-BH700X300": "ignore",
+      "ES-中間柱標註尺寸": "ignore",
+      "!T1 (站體)_角撐": "corner_brace",
+      "ES-C380x100": "ignore",
+      "ES-支撐DIM": "ignore",
+      "ES-大斜撐_支撐350x350": "brace",
+      "ES-LH400x400": "ignore",
+      "ES_角撐400": "ignore",
+      "ES-圍令L1H414x405": "ignore",
+      "ES-圍令L1H400x400": "ignore",
+      "ES-圍令L1H428x407": "ignore",
+      "ES-大斜撐_支撐400x400": "ignore",
+      "ES-中間柱號碼": "ignore",
+      "ES-KP400x400": "ignore",
+      "ES-KP350x350": "ignore",
+      "ES-LH428x407": "ignore",
+      "ES-LH458x417": "ignore",
+      "ES-中間樁NO": "column",
+      "!dim": "ignore",
+      "!T1-1 (東西井)_圍令": "ignore",
+      "ES-C300x90": "ignore",
+      "ES-C250x90": "beam",
+      "ES-C200x80": "ignore",
+      "steel": "ignore",
+      "ES-版梁588x300": "ignore",
+      "ES-版梁700x300": "ignore",
+      "ES-LH400x408": "ignore",
+      "ES-BH414x405": "ignore",
+      "ES-BH TEXT": "ignore",
+      "ES-BH428x407": "ignore",
+      "版開口": "ignore",
+      "ES-BH588X300": "ignore",
+      "ES 覆蓋版1X2": "ignore",
+      "ES 覆蓋版-COM": "ignore",
+      "DIM": "ignore",
+      "ES-BH-DIM": "ignore",
+      "ES 覆蓋版-DIM": "ignore",
+      "DIM-剖面": "ignore",
+      "ES-中間柱-DIM": "ignore",
+      "SE-DIM": "ignore",
+      "!DW": "ignore",
+      "!三角架": "ignore",
+      "!鑽掘樁": "ignore",
+      "!版": "ignore",
+      "bolt": "ignore",
+      "帽頭": "ignore",
+      "!角鐵拉桿": "ignore",
+      "gt_dim": "ignore",
+      "剖面符號": "ignore",
+      "DIM-EL-5": "ignore",
+      "標註": "ignore",
+      "S-FNDN": "ignore",
+      "STRUT-S": "ignore",
+      "STRUT-TB": "ignore",
+      "Rev": "ignore",
+      "DIM-OTHER": "ignore",
+      "接圖線": "ignore",
+      "STEXT": "ignore",
+      "S": "ignore",
+      "輔助線": "ignore",
+      "分割線": "ignore",
+      "标注": "ignore",
+      "擋土壁編號": "ignore",
+      "ES-圍令RC": "ignore",
+      "ES-大斜撐_支撐414x405": "ignore",
+      "ES-壓梁C300x90": "ignore",
+      "繫樑": "ignore",
+      "密排樁": "ignore",
+      "詳圖框框": "ignore",
+      "dw": "ignore",
+      "A-ANNO-NOTE": "ignore",
+      "staff": "ignore"
+    },
+    "can_import": true,
+    "all_message_counts": {
+      "info": 3,
+      "warning": 16,
+      "error": 0,
+      "critical": 0
+    },
+    "all_messages": [
+      {
+        "severity": "info",
+        "code": "TEXT_SKIPPED",
+        "message": "已略過 15 個 DXF 文字圖元；文字不參與構件辨識。",
+        "role": "strut",
+        "source_handles": [],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CDA1B",
+          "CDA1F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CDA1C",
+          "CDA20"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CDA1D",
+          "CDA21"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF857",
+          "CF85B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF858",
+          "CF85C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF859",
+          "CF85D"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF85F",
+          "CF863"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF860",
+          "CF864"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF861",
+          "CF865"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF867",
+          "CF86B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF868",
+          "CF86C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF869",
+          "CF86D"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF85E",
+          "CF862"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF866",
+          "CF86A"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CDA17",
+          "CDA1E"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "CF856",
+          "CF85A"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "info",
+        "code": "TEXT_SKIPPED",
+        "message": "已略過 30 個 DXF 文字圖元；文字不參與構件辨識。",
+        "role": "column",
+        "source_handles": [],
+        "member_ids": []
+      },
+      {
+        "severity": "info",
+        "code": "TEXT_SKIPPED",
+        "message": "已略過 1 個 DXF 文字圖元；文字不參與構件辨識。",
+        "role": "beam",
+        "source_handles": [],
+        "member_ids": []
+      }
+    ],
+    "walers": [
+      {
+        "id": "W1",
+        "start": [
+          338238.2870494365,
+          -725295.5694823606
+        ],
+        "end": [
+          338238.2870494365,
+          -703095.5703399841
+        ],
+        "length_mm": 22199.999142376473,
+        "length_m": 22.199999142376473,
+        "material_spec": "H350x350",
+        "source_layer": "ES-圍令L1H350x350",
+        "source_handles": [
+          "CE83A"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.0,
+        "direction_group_5deg": "vertical",
+        "material_classification": "out"
+      },
+      {
+        "id": "W4",
+        "start": [
+          433838.33862282755,
+          -703095.5055625981
+        ],
+        "end": [
+          433838.3901963693,
+          -725295.5055624783
+        ],
+        "length_mm": 22199.999999940115,
+        "length_m": 22.199999999940115,
+        "material_spec": "H350x350",
+        "source_layer": "ES-圍令L1H350x350",
+        "source_handles": [
+          "CE83D"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.00013310568819,
+        "direction_group_5deg": "vertical",
+        "material_classification": "out"
+      },
+      {
+        "id": "W3",
+        "start": [
+          338238.2870494365,
+          -724845.5055624783
+        ],
+        "end": [
+          433838.3901963694,
+          -724845.5055624784
+        ],
+        "length_mm": 95600.1031469329,
+        "length_m": 95.60010314693291,
+        "material_spec": "H350x350",
+        "source_layer": "ES-圍令L1H350x350",
+        "source_handles": [
+          "CE83C"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.99999999999994,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W2",
+        "start": [
+          338238.28704943653,
+          -703545.5055624783
+        ],
+        "end": [
+          433838.3901963693,
+          -703545.5976083238
+        ],
+        "length_mm": 95600.1031469771,
+        "length_m": 95.60010314697709,
+        "material_spec": "H350x350",
+        "source_layer": "ES-圍令L1H350x350",
+        "source_handles": [
+          "CE83B"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.9999448343852,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      }
+    ],
+    "short_walers_under_6000": [],
+    "summary": {
+      "count": 4,
+      "min_mm": 22199.999142376473,
+      "max_mm": 95600.1031469771,
+      "mean_mm": 58900.05135905665,
+      "median_mm": 58900.05157343651,
+      "p25_mm": 22199.999785549204,
+      "p75_mm": 95600.10314694395,
+      "under_4000": 0,
+      "4000_to_under_6000": 0,
+      "6000_to_8000": 0,
+      "over_8000_to_10000": 0,
+      "over_10000": 4,
+      "under_6000": 0,
+      "short": 0,
+      "mid": 0,
+      "long": 0,
+      "out": 4,
+      "bin_ratios": {
+        "under_4000": 0.0,
+        "4000_to_under_6000": 0.0,
+        "6000_to_8000": 0.0,
+        "over_8000_to_10000": 0.0,
+        "over_10000": 1.0
+      },
+      "classification_ratios": {
+        "short": 0.0,
+        "mid": 0.0,
+        "long": 0.0,
+        "out": 1.0
+      },
+      "direction_counts_5deg": {
+        "horizontal": 2,
+        "vertical": 2,
+        "diagonal": 0
+      },
+      "direction_ratios_5deg": {
+        "horizontal": 0.5,
+        "vertical": 0.5,
+        "diagonal": 0.0
+      }
+    },
+    "adjacency": {
+      "available": false,
+      "reason": "DXFImportResult has no explicit Waler-to-Waler topology; no new proximity topology was inferred for this inventory."
+    }
+  },
+  "Y29": {
+    "source": "Y29_test.dxf",
+    "source_sha256": "54A127D6B3409109C924705FB887ACF0D1A679B48F7C2348966E550763416A4E",
+    "source_size_bytes": 1657916,
+    "pipeline": "DXFImporter.read().convert(layer_roles=filename_scoped_mapping, material_specs=DEFAULT_MATERIAL_SPECS)",
+    "layer_mapping": {
+      "圍令": "圍令",
+      "支撐": "支撐",
+      "斜撐": "斜撐",
+      "細線": "連續壁",
+      "s": "中間柱",
+      "S-GRID": "輔助線",
+      "S-GRID-IDEN": "輔助線",
+      "壓梁": "托梁",
+      "壓樑": "托梁",
+      "角撐": "角撐"
+    },
+    "recognized_layers": {
+      "0": "ignore",
+      "S-FNDN": "ignore",
+      "線": "ignore",
+      "S-GRID": "auxiliary",
+      "S-GRID-IDEN": "auxiliary",
+      "Defpoints": "ignore",
+      "s": "column",
+      "角撐": "corner_brace",
+      "圍令": "waler",
+      "支撐": "strut",
+      "壓樑": "beam",
+      "A-DETL-GENF": "ignore",
+      "細線": "continuous_wall",
+      "I-WALL": "ignore",
+      "斜撐": "brace"
+    },
+    "can_import": false,
+    "all_message_counts": {
+      "info": 0,
+      "warning": 64,
+      "error": 7,
+      "critical": 0
+    },
+    "all_messages": [
+      {
+        "severity": "error",
+        "code": "BRACE_RECOGNITION_FAILED",
+        "message": "幾何群組無法可靠辨識為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "642"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "BRACE_CENTERLINE_FAILED",
+        "message": "幾何群組無法建立可靠中心線。",
+        "role": "brace",
+        "source_handles": [
+          "642"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "brace",
+        "source_handles": [
+          "44E",
+          "45C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "BEAM_RECOGNITION_FAILED",
+        "message": "幾何群組無法可靠辨識為單一工程構件。",
+        "role": "beam",
+        "source_handles": [
+          "6EF"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "BEAM_CENTERLINE_FAILED",
+        "message": "幾何群組無法建立可靠中心線。",
+        "role": "beam",
+        "source_handles": [
+          "6EF"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "corner_brace",
+        "source_handles": [
+          "479",
+          "484"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "DUPLICATED_COMPONENT",
+        "message": "重疊的外框與中心線已合併為單一工程構件。",
+        "role": "corner_brace",
+        "source_handles": [
+          "47A",
+          "485"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W8 與 W7，採用距離較近的 W8。",
+        "role": "strut",
+        "source_handles": [
+          "D7"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W8 與 W7，採用距離較近的 W8。",
+        "role": "strut",
+        "source_handles": [
+          "D8"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W12 與 W6，採用距離較近的 W12。",
+        "role": "strut",
+        "source_handles": [
+          "23D"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "strut",
+        "source_handles": [
+          "23E"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "strut",
+        "source_handles": [
+          "23F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W12 與 W6，採用距離較近的 W12。",
+        "role": "strut",
+        "source_handles": [
+          "243"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "strut",
+        "source_handles": [
+          "244"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "strut",
+        "source_handles": [
+          "245"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "48B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "48B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "48C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "48D"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W10 與 W19，採用距離較近的 W10。",
+        "role": "strut",
+        "source_handles": [
+          "493"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W10 與 W19，採用距離較近的 W10。",
+        "role": "strut",
+        "source_handles": [
+          "4B2"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "4B8"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "4B9"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "4B9"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "4BA"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "4BA"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "4BB"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "4BB"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "strut",
+        "source_handles": [
+          "4C0"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "4C0"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "605"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "strut",
+        "source_handles": [
+          "622"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "BRACE_NOT_CONNECTED",
+        "message": "B1 兩端皆未連接圍令。",
+        "role": "brace",
+        "source_handles": [
+          "72F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "brace",
+        "source_handles": [
+          "237"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "brace",
+        "source_handles": [
+          "238"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "brace",
+        "source_handles": [
+          "239"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "brace",
+        "source_handles": [
+          "23A"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W8 與 W7，採用距離較近的 W8。",
+        "role": "brace",
+        "source_handles": [
+          "25F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W10 與 W19，採用距離較近的 W10。",
+        "role": "brace",
+        "source_handles": [
+          "4B0"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W19 與 W10，採用距離較近的 W19。",
+        "role": "brace",
+        "source_handles": [
+          "4B1"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "5FF"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "600"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "601"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "602"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "6A3"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "71F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W8 與 W7，採用距離較近的 W8。",
+        "role": "brace",
+        "source_handles": [
+          "D9"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "6A0"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "6A1"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "6A2"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "brace",
+        "source_handles": [
+          "718"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "brace",
+        "source_handles": [
+          "719"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W19 與 W18，採用距離較近的 W19。",
+        "role": "brace",
+        "source_handles": [
+          "71A"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "brace",
+        "source_handles": [
+          "71B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W18 與 W19，採用距離較近的 W18。",
+        "role": "brace",
+        "source_handles": [
+          "71C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W19 與 W18，採用距離較近的 W19。",
+        "role": "brace",
+        "source_handles": [
+          "71E"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W19 與 W10，採用距離較近的 W19。",
+        "role": "brace",
+        "source_handles": [
+          "44E",
+          "45C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W17 與 W20，採用距離較近的 W17。",
+        "role": "brace",
+        "source_handles": [
+          "515"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W6 與 W12，採用距離較近的 W6。",
+        "role": "brace",
+        "source_handles": [
+          "1F4"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_WALER_CONNECTION",
+        "message": "端點同時接近 W8 與 W7，採用距離較近的 W8。",
+        "role": "brace",
+        "source_handles": [
+          "4F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "message": "C25 同時接近 S20 與 S35，已採用較近的 S20。",
+        "role": "column",
+        "source_handles": [
+          "402"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "message": "C32 同時接近 S20 與 S35，已採用較近的 S20。",
+        "role": "column",
+        "source_handles": [
+          "401"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "COLUMN_NOT_ASSOCIATED",
+        "message": "C34 未找到有效範圍內的所屬支撐。",
+        "role": "column",
+        "source_handles": [
+          "53B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "message": "C38 同時接近 S20 與 S35，已採用較近的 S20。",
+        "role": "column",
+        "source_handles": [
+          "3FD"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "error",
+        "code": "COLUMN_NOT_ASSOCIATED",
+        "message": "C41 未找到有效範圍內的所屬支撐。",
+        "role": "column",
+        "source_handles": [
+          "53C"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "message": "C63 同時接近 S20 與 S35，已採用較近的 S20。",
+        "role": "column",
+        "source_handles": [
+          "400"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "BEAM_NOT_ASSOCIATED",
+        "message": "BM46 的托梁路徑未與任何支撐相交，未建立禁止點。",
+        "role": "beam",
+        "source_handles": [
+          "27F"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "BEAM_NOT_ASSOCIATED",
+        "message": "BM48 的托梁路徑未與任何支撐相交，未建立禁止點。",
+        "role": "beam",
+        "source_handles": [
+          "494"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "BEAM_NOT_ASSOCIATED",
+        "message": "BM49 的托梁路徑未與任何支撐相交，未建立禁止點。",
+        "role": "beam",
+        "source_handles": [
+          "495"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "BEAM_NOT_ASSOCIATED",
+        "message": "BM55 的托梁路徑未與任何支撐相交，未建立禁止點。",
+        "role": "beam",
+        "source_handles": [
+          "47B"
+        ],
+        "member_ids": []
+      },
+      {
+        "severity": "warning",
+        "code": "BEAM_CROSSING_SNAPPED",
+        "message": "BM56 第 1 段與 S28 有小間隙，已吸附至支撐建立禁止點。",
+        "role": "beam",
+        "source_handles": [
+          "440"
+        ],
+        "member_ids": []
+      }
+    ],
+    "walers": [
+      {
+        "id": "W1",
+        "start": [
+          326182.9996857584,
+          -430260.0002208125
+        ],
+        "end": [
+          331283.0000000002,
+          -430260.0002208125
+        ],
+        "length_mm": 5100.000314241799,
+        "length_m": 5.100000314241799,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "74"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "short"
+      },
+      {
+        "id": "W14",
+        "start": [
+          222483.0000000001,
+          -438778.989920837
+        ],
+        "end": [
+          226024.05567242217,
+          -443090.0831589252
+        ],
+        "length_mm": 5578.9425685054575,
+        "length_m": 5.5789425685054574,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "58D"
+        ],
+        "recognition_method": "existing_inner_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 129.39907755032095,
+        "direction_group_5deg": "diagonal",
+        "material_classification": "short"
+      },
+      {
+        "id": "W11",
+        "start": [
+          284682.99999999994,
+          -452060.0003330314
+        ],
+        "end": [
+          284683.0,
+          -459160.0000606317
+        ],
+        "length_mm": 7099.999727600312,
+        "length_m": 7.099999727600312,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "4BC"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.00000000000047,
+        "direction_group_5deg": "vertical",
+        "material_classification": "mid"
+      },
+      {
+        "id": "W8",
+        "start": [
+          324182.9914620388,
+          -422910.37883344066
+        ],
+        "end": [
+          331283.0072197142,
+          -422910.3757703541
+        ],
+        "length_mm": 7100.015757676118,
+        "length_m": 7.100015757676117,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "260"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 2.4718526947952042e-05,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "mid"
+      },
+      {
+        "id": "W7",
+        "start": [
+          324182.99146203866,
+          -422910.3791942873
+        ],
+        "end": [
+          331683.00721971394,
+          -422910.3761430025
+        ],
+        "length_mm": 7500.015757675903,
+        "length_m": 7.500015757675903,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "25E"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 2.3310049972927545e-05,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "mid"
+      },
+      {
+        "id": "W10",
+        "start": [
+          277473.871945788,
+          -459160.0000031791
+        ],
+        "end": [
+          285083.0,
+          -459160.0000319054
+        ],
+        "length_mm": 7609.128054212022,
+        "length_m": 7.6091280542120225,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "43F"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.9999997836946,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "mid"
+      },
+      {
+        "id": "W3",
+        "start": [
+          331283.0000000001,
+          -430660.00015980884
+        ],
+        "end": [
+          331283.00759238086,
+          -422510.3564151308
+        ],
+        "length_mm": 8149.643744681599,
+        "length_m": 8.1496437446816,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "F4"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 89.99994662203811,
+        "direction_group_5deg": "vertical",
+        "material_classification": "long"
+      },
+      {
+        "id": "W2",
+        "start": [
+          326182.9996857581,
+          -439860.0001620635
+        ],
+        "end": [
+          326182.9996857581,
+          -430660.0002208125
+        ],
+        "length_mm": 9199.999941251008,
+        "length_m": 9.199999941251008,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "76"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.0,
+        "direction_group_5deg": "vertical",
+        "material_classification": "long"
+      },
+      {
+        "id": "W5",
+        "start": [
+          312682.99999999994,
+          -439860.0001669466
+        ],
+        "end": [
+          312683.0,
+          -452060.0001059428
+        ],
+        "length_mm": 12199.99993899616,
+        "length_m": 12.199999938996159,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "211"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.00000000000027,
+        "direction_group_5deg": "vertical",
+        "material_classification": "out"
+      },
+      {
+        "id": "W6",
+        "start": [
+          300483.0000610037,
+          -451660.0001059428
+        ],
+        "end": [
+          312683.0,
+          -451660.0001059428
+        ],
+        "length_mm": 12199.999938996276,
+        "length_m": 12.199999938996276,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "232"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W9",
+        "start": [
+          312683.0,
+          -439460.0001669466
+        ],
+        "end": [
+          326183.0000000001,
+          -439460.0001669464
+        ],
+        "length_mm": 13500.000000000116,
+        "length_m": 13.500000000000117,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "284"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 9.881639424208176e-13,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W16",
+        "start": [
+          226215.11094743217,
+          -443030.94026507763
+        ],
+        "end": [
+          231316.00672238524,
+          -459509.27205390856
+        ],
+        "length_mm": 17249.769744832243,
+        "length_m": 17.249769744832243,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "63D"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 107.19999999999976,
+        "direction_group_5deg": "diagonal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W15",
+        "start": [
+          222683.0,
+          -439860.0001598086
+        ],
+        "end": [
+          222683.0,
+          -422210.0001598086
+        ],
+        "length_mm": 17650.0,
+        "length_m": 17.65,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "603"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 90.0,
+        "direction_group_5deg": "vertical",
+        "material_classification": "out"
+      },
+      {
+        "id": "W4",
+        "start": [
+          302182.9998243458,
+          -422610.0001598088
+        ],
+        "end": [
+          324582.9996021562,
+          -422610.0001598088
+        ],
+        "length_mm": 22399.999777810415,
+        "length_m": 22.399999777810415,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "193"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W20",
+        "start": [
+          222683.0,
+          -422610.0001598086
+        ],
+        "end": [
+          246683.0,
+          -422610.0001598086
+        ],
+        "length_mm": 24000.0,
+        "length_m": 24.0,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "721"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W17",
+        "start": [
+          222283.0,
+          -422610.0001598086
+        ],
+        "end": [
+          246682.9999999998,
+          -422610.0001598086
+        ],
+        "length_mm": 24399.999999999796,
+        "length_m": 24.399999999999796,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "69C"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W18",
+        "start": [
+          230789.162861975,
+          -459160.0000606314
+        ],
+        "end": [
+          256006.3619690283,
+          -459160.0000606316
+        ],
+        "length_mm": 25217.19910705331,
+        "length_m": 25.21719910705331,
+        "material_spec": "",
+        "source_layer": "圍令",
+        "source_handles": [
+          "69F"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.9999999999996,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W12",
+        "start": [
+          284547.0,
+          -451660.0003330314
+        ],
+        "end": [
+          312683.0,
+          -451660.0003330314
+        ],
+        "length_mm": 28136.0,
+        "length_m": 28.136,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "4E4"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 0.0,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W19",
+        "start": [
+          231766.0067223853,
+          -459160.0000606315
+        ],
+        "end": [
+          285083.0,
+          -459160.0000606317
+        ],
+        "length_mm": 53316.9932776147,
+        "length_m": 53.316993277614706,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "720"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.99999999999974,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      },
+      {
+        "id": "W13",
+        "start": [
+          246683.0,
+          -423210.0001598086
+        ],
+        "end": [
+          303183.0,
+          -423210.0001598087
+        ],
+        "length_mm": 56500.0,
+        "length_m": 56.5,
+        "material_spec": "H400x400",
+        "source_layer": "圍令",
+        "source_handles": [
+          "4E5"
+        ],
+        "recognition_method": "inner_boundary_line",
+        "selection_source": "auto",
+        "confidence": 0.98,
+        "warnings": [],
+        "problems": [],
+        "has_warning_or_error": false,
+        "angle_deg": 179.9999999999999,
+        "direction_group_5deg": "horizontal",
+        "material_classification": "out"
+      }
+    ],
+    "short_walers_under_6000": [
+      "W1",
+      "W14"
+    ],
+    "summary": {
+      "count": 20,
+      "min_mm": 5100.000314241799,
+      "max_mm": 56500.0,
+      "mean_mm": 18205.38538255736,
+      "median_mm": 12849.999969498196,
+      "p25_mm": 7581.849980077992,
+      "p75_mm": 24099.99999999995,
+      "under_4000": 0,
+      "4000_to_under_6000": 2,
+      "6000_to_8000": 4,
+      "over_8000_to_10000": 2,
+      "over_10000": 12,
+      "under_6000": 2,
+      "short": 2,
+      "mid": 4,
+      "long": 2,
+      "out": 12,
+      "bin_ratios": {
+        "under_4000": 0.0,
+        "4000_to_under_6000": 0.1,
+        "6000_to_8000": 0.2,
+        "over_8000_to_10000": 0.1,
+        "over_10000": 0.6
+      },
+      "classification_ratios": {
+        "short": 0.1,
+        "mid": 0.2,
+        "long": 0.1,
+        "out": 0.6
+      },
+      "direction_counts_5deg": {
+        "horizontal": 13,
+        "vertical": 5,
+        "diagonal": 2
+      },
+      "direction_ratios_5deg": {
+        "horizontal": 0.65,
+        "vertical": 0.25,
+        "diagonal": 0.1
+      }
+    },
+    "adjacency": {
+      "available": false,
+      "reason": "DXFImportResult has no explicit Waler-to-Waler topology; no new proximity topology was inferred for this inventory."
+    }
+  },
+  "comparison_Y29_minus_Y1A": {
+    "count": 16,
+    "mean_mm": -40694.66597649929,
+    "median_mm": -46050.051603938315,
+    "under_4000_ratio": 0.0,
+    "under_6000_ratio": 0.1,
+    "classification_count": {
+      "short": 2,
+      "mid": 4,
+      "long": 2,
+      "out": 8
+    },
+    "classification_ratio": {
+      "short": 0.1,
+      "mid": 0.2,
+      "long": 0.1,
+      "out": -0.4
+    }
+  }
+}

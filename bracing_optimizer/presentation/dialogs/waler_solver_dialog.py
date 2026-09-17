@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 import threading
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
@@ -10,6 +11,7 @@ from tkinter import messagebox, scrolledtext, ttk
 from bracing_optimizer.algorithms import solver_search, wales
 from bracing_optimizer.application.optimize_waler import OptimizeWalerRequest
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
+from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
 from .solver_dialog_base import (
@@ -20,6 +22,10 @@ from .solver_dialog_base import (
 from ..result_formatters import format_waler_score_breakdown
 
 
+LOGGER = logging.getLogger(__name__)
+WALER_SOLVER_BUSY_MESSAGE = "目前已有圍令計算正在執行，請等待完成後再試。"
+
+
 class WalerSolverDialog(SolverDialogThreadBridge):
     def __init__(
         self,
@@ -28,6 +34,7 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         solver_memory,
         callback,
         optimize_waler,
+        waler_solver_guard: WalerSolverBusyGuard,
     ):
         self.callback = callback
         self.waler_input = waler_input
@@ -40,6 +47,7 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         self.purchasable_lengths = waler_input.purchasable_lengths
         self.solver_memory = solver_memory
         self.optimize_waler = optimize_waler
+        self.waler_solver_guard = waler_solver_guard
         self.min_piece_length = 1000
         self.max_piece_length = 10000
         self.joint_clearance = 300
@@ -373,25 +381,47 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             self._display_results(restored_results, diagnostics=restored_diagnostics)
             return
 
-        self.result_text.configure(state="normal")
-        self.result_text.delete("1.0", "end")
-        self.result_text.configure(state="disabled")
-        self.current_results = None
-        self.summary_var.set(
-            "正在建立配置候選並檢查工程合法性……系統會自動判斷是否需要加強搜尋。"
-        )
-        self._append_message("開始計算。系統將自動調整搜尋強度。\n")
-        self.run_button.configure(state="disabled")
+        lease = self.waler_solver_guard.try_acquire("single")
+        if lease is None:
+            LOGGER.warning("Single Waler blocked by busy guard")
+            messagebox.showwarning(
+                "圍令計算中",
+                WALER_SOLVER_BUSY_MESSAGE,
+                parent=self.dialog,
+            )
+            return
 
-        thread = threading.Thread(
-            target=self._solver_thread,
-            args=(request,),
-            daemon=True,
-        )
-        thread.start()
+        LOGGER.info("Single Waler Solver start: %s", self.waler_id)
+        try:
+            self.result_text.configure(state="normal")
+            self.result_text.delete("1.0", "end")
+            self.result_text.configure(state="disabled")
+            self.current_results = None
+            self.summary_var.set(
+                "正在建立配置候選並檢查工程合法性……"
+                "系統會自動判斷是否需要加強搜尋。"
+            )
+            self._append_message("開始計算。系統將自動調整搜尋強度。\n")
+            self.run_button.configure(state="disabled")
+
+            thread = threading.Thread(
+                target=self._solver_thread,
+                args=(request, lease),
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            lease.release()
+            self.run_button.configure(state="normal")
+            LOGGER.exception("Single Waler Solver thread start failed")
+            messagebox.showerror(
+                "圍令計算失敗",
+                "無法啟動圍令計算背景工作。",
+                parent=self.dialog,
+            )
 
 
-    def _solver_thread(self, request):
+    def _solver_thread(self, request, lease):
         def gui_logger(*args):
             message = " ".join(str(arg) for arg in args)
             if not message.endswith("\n"):
@@ -424,6 +454,8 @@ class WalerSolverDialog(SolverDialogThreadBridge):
                 )
             )
         finally:
+            lease.release()
+            LOGGER.info("Single Waler Solver finish: %s", self.waler_id)
             self._post_ui(lambda: self.run_button.configure(state="normal"))
 
     def _waler_ratio_targets(self):

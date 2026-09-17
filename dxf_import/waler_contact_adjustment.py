@@ -385,7 +385,7 @@ def build_corner_brace_connections(
                 ValidationMessage(
                     "warning",
                     "CORNER_BRACE_CONNECTION_INVALID",
-                    f"{corner.id} 無法唯一確認 Waler 與 Strut 接點。",
+                    f"{corner.id} 無法唯一確認圍令與支撐接點。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -401,7 +401,7 @@ def build_corner_brace_connections(
                 ValidationMessage(
                     "warning",
                     "CORNER_BRACE_CONNECTION_INVALID",
-                    f"{corner.id} 的 Waler／Strut 配對有歧義。",
+                    f"{corner.id} 的圍令／支撐配對有歧義。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -449,7 +449,7 @@ def build_corner_brace_connections(
                 ValidationMessage(
                     "warning",
                     "CORNER_BRACE_CONNECTION_INVALID",
-                    f"{corner.id} 的 Strut 孔位或實測長度無效。",
+                    f"{corner.id} 的支撐孔位或實測長度無效。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -661,11 +661,17 @@ def _corner_field_updates(
         member_values = values.setdefault(strut.id, {})
         if field_name in member_values:
             previous_id, _previous_value = member_values[field_name]
+            field_label = {
+                "from_brace_to_waler_start_len": "起點角撐長度（往圍令起點）",
+                "from_brace_to_waler_end_len": "起點角撐長度（往圍令終點）",
+                "to_brace_to_waler_start_len": "終點角撐長度（往圍令起點）",
+                "to_brace_to_waler_end_len": "終點角撐長度（往圍令終點）",
+            }.get(field_name, field_name)
             messages.append(
                 ValidationMessage(
                     "error",
                     "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
-                    f"{strut.id} 的 {field_name} 同時對應 {previous_id} 與 {corner.id}。",
+                    f"{strut.id} 的{field_label}同時對應 {previous_id} 與 {corner.id}。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -708,7 +714,7 @@ def plan_waler_contact_adjustment(
         None,
     )
     if waler is None or review is None:
-        raise DXFImportError(f"找不到 Waler contact review state：{waler_id}")
+        raise DXFImportError(f"找不到圍令接觸位置檢核資料：{waler_id}")
 
     original_backfill = _validated_dimension(
         original_backfill_mm, "圖面背填厚度", strictly_positive=False
@@ -763,7 +769,7 @@ def plan_waler_contact_adjustment(
             ValidationMessage(
                 "error",
                 "WALER_CONTACT_BASELINE_CHANGED",
-                f"{waler_id} 的正式幾何已不符合保存的 contact baseline。",
+                f"{waler_id} 的正式幾何已不符合保存的接觸基準線。",
                 "waler",
                 waler.source_handles,
             )
@@ -858,7 +864,7 @@ def plan_waler_contact_adjustment(
                         ValidationMessage(
                             "error",
                             "BRACE_STATION_INVALID",
-                            f"{brace.id} 在 {waler_id} 的既有 attachment station 超出有限線段。",
+                            f"{brace.id} 在 {waler_id} 的既有接點位置超出有限線段。",
                             "brace",
                             brace.source_handles,
                         )
@@ -913,7 +919,7 @@ def plan_waler_contact_adjustment(
             ValidationMessage(
                 "error",
                 "CORNER_BRACE_CONNECTION_INVALID",
-                f"{corner.id} 位於 {waler_id} 附近，但沒有唯一 CornerBraceConnection。",
+                f"{corner.id} 位於 {waler_id} 附近，但沒有唯一角撐連接關係。",
                 "corner_brace",
                 corner.source_handles,
             )
@@ -975,7 +981,7 @@ def plan_waler_contact_adjustment(
                     ValidationMessage(
                         "error",
                         "CORNER_BRACE_CONNECTION_INVALID",
-                        f"{corner.id} 的正式幾何已不符合保存的 CornerBraceConnection。",
+                        f"{corner.id} 的正式幾何已不符合保存的角撐連接關係。",
                         "corner_brace",
                         corner.source_handles,
                     )
@@ -996,7 +1002,7 @@ def plan_waler_contact_adjustment(
                 ValidationMessage(
                     "error",
                     "CORNER_BRACE_CONNECTION_INVALID",
-                    f"{corner.id} 的固定 Strut 孔位已超出調整後支撐。",
+                    f"{corner.id} 的固定支撐孔位已超出調整後支撐。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -1018,7 +1024,8 @@ def plan_waler_contact_adjustment(
                 ValidationMessage(
                     "error",
                     "CORNER_BRACE_INTERSECTION_FAILED",
-                    f"{corner.id}：依固定 Strut 孔位與原角撐實際長度，無法與調整後 Waler 相交。",
+                    f"{corner.id}：依固定支撐孔位與原角撐實際長度，"
+                    "無法與調整後圍令相交。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -1045,7 +1052,7 @@ def plan_waler_contact_adjustment(
                 ValidationMessage(
                     "error",
                     "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
-                    f"{corner.id} 與調整後 Waler 有兩個無法唯一判斷的交點。",
+                    f"{corner.id} 與調整後圍令有兩個無法唯一判斷的交點。",
                     "corner_brace",
                     corner.source_handles,
                 )
@@ -1117,7 +1124,7 @@ def plan_waler_contact_adjustment(
         ValidationMessage(
             "info",
             "WALER_CONTACT_ADJUSTED",
-            f"{waler_id} contact line 由 baseline 平行調整 {displacement:+.3f} mm。",
+            f"{waler_id} 接觸線由基準線平行調整 {displacement:+.3f} mm。",
             "waler",
             waler.source_handles,
         )
@@ -1224,7 +1231,7 @@ def apply_waler_contact_adjustment(
                 if message.severity in {"error", "critical"}
             ]
         if not errors:
-            raise DXFImportError("Waler contact adjustment failed validation.")
+            raise DXFImportError("圍令接觸位置調整未通過檢核。")
         raise DXFImportError(errors[0].message)
     return plan.proposed_result
 
@@ -1308,44 +1315,52 @@ def format_adjustment_plan(plan: WalerContactAdjustmentPlan) -> str:
     lines = [
         f"{plan.waler_id} 接觸位置調整：{plan.contact_displacement:+.3f} mm",
         "",
-        "Strut",
+        "支撐",
     ]
     for change in plan.strut_changes:
         old_line = _world_line(change.old_member)
         new_line = _world_line(change.new_member)
         lines.append(
-            f"{change.member_id} {change.endpoint_name}: "
-            f"Length {_length(*old_line):.3f} → {_length(*new_line):.3f} mm"
+            f"{change.member_id} "
+            f"{'起點' if change.endpoint_name == 'start' else '終點'}："
+            f"長度 {_length(*old_line):.3f} → {_length(*new_line):.3f} mm"
         )
-    lines.extend(("", "Brace"))
+    lines.extend(("", "斜撐"))
     for change in plan.brace_changes:
         old_line = _world_line(change.old_member)
         new_line = _world_line(change.new_member)
         lines.extend(
             (
                 change.member_id,
-                f"Waler station：{change.waler_station_mm:.3f} → {change.waler_station_mm:.3f} mm",
-                f"Length：{_length(*old_line):.3f} → {_length(*new_line):.3f} mm",
-                f"Angle：{_angle_deg(*old_line):.3f}° → {_angle_deg(*new_line):.3f}°",
+                f"圍令位置：{change.waler_station_mm:.3f} → {change.waler_station_mm:.3f} mm",
+                f"長度：{_length(*old_line):.3f} → {_length(*new_line):.3f} mm",
+                f"角度：{_angle_deg(*old_line):.3f}° → {_angle_deg(*new_line):.3f}°",
             )
         )
-    lines.extend(("", "CornerBrace"))
+    lines.extend(("", "角撐"))
     for change in plan.corner_brace_changes:
         old_line = _world_line(change.old_member)
         new_line = _world_line(change.new_member)
         lines.extend(
             (
                 change.member_id,
-                f"Strut hole station：{change.strut_hole_station_mm:.3f} → {change.strut_hole_station_mm:.3f} mm",
-                f"Measured fixed length：{change.fixed_length_mm:.3f} → {change.fixed_length_mm:.3f} mm",
-                f"Waler station：{change.old_waler_station_mm:.3f} → {change.new_waler_station_mm:.3f} mm",
-                f"Angle：{_angle_deg(*old_line):.3f}° → {_angle_deg(*new_line):.3f}°",
+                f"支撐孔位：{change.strut_hole_station_mm:.3f} → {change.strut_hole_station_mm:.3f} mm",
+                f"實測固定長度：{change.fixed_length_mm:.3f} → {change.fixed_length_mm:.3f} mm",
+                f"圍令位置：{change.old_waler_station_mm:.3f} → {change.new_waler_station_mm:.3f} mm",
+                f"角度：{_angle_deg(*old_line):.3f}° → {_angle_deg(*new_line):.3f}°",
             )
         )
     if plan.messages:
-        lines.extend(("", "Validation"))
+        severity_labels = {
+            "success": "正常",
+            "info": "資訊",
+            "warning": "警告",
+            "error": "錯誤",
+            "critical": "嚴重錯誤",
+        }
+        lines.extend(("", "檢核結果"))
         lines.extend(
-            f"[{message.severity.upper()}] {message.message}"
+            f"[{severity_labels.get(message.severity, message.severity)}] {message.message}"
             for message in plan.messages
         )
     return "\n".join(lines)

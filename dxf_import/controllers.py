@@ -32,6 +32,7 @@ class SelectionController:
         "error_list",
         "restore_recommended",
         "cad_manual",
+        "coordinate_dialog",
     }
 
     def __init__(
@@ -143,6 +144,32 @@ class SelectionController:
             source,
             RenderDirty.CANDIDATE_SELECTION
             | RenderDirty.TEMP_LINE
+            | RenderDirty.DETAIL_PANEL
+            | RenderDirty.TREE_SELECTION,
+        )
+
+    def preview_candidate_point(self, point_id: str, source: str) -> bool:
+        """Highlight a candidate without changing pending endpoint edits."""
+
+        self._called()
+        component_id = self.state.selected_component_id
+        point = self.candidate_store.get(component_id, point_id)
+        if point is None:
+            return self._noop()
+        selected_source = (
+            source if source in self.VALID_SOURCES else "programmatic"
+        )
+        if (
+            point_id == self.state.selected_candidate_point_id
+            and selected_source == self.state.selected_candidate_source
+        ):
+            return self._noop()
+        self.state.selected_candidate_point_id = point_id
+        self.state.selected_candidate_source = selected_source
+        self.state.preview_candidate_point_id = point_id
+        return self._commit(
+            source,
+            RenderDirty.CANDIDATE_SELECTION
             | RenderDirty.DETAIL_PANEL
             | RenderDirty.TREE_SELECTION,
         )

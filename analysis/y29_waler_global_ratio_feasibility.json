@@ -1,0 +1,1680 @@
+{
+  "source": "analysis/waler_top5_solver_results.json",
+  "dataset": "Y29",
+  "target": {
+    "short": 0.2,
+    "mid": 0.5,
+    "long": 0.3,
+    "denominator": "short + mid + long; out excluded",
+    "ratio_deviation": "abs(short_ratio-0.20)+abs(mid_ratio-0.50)+abs(long_ratio-0.30)"
+  },
+  "validation": {
+    "declared_waler_count": 20,
+    "actual_waler_count": 20,
+    "expected_waler_count": 20,
+    "all_walers_have_candidate": true,
+    "json_candidate_count": 71,
+    "valid_candidate_count": 71,
+    "unique_legal_candidate_count": 71,
+    "expected_unique_legal_candidate_count": 71,
+    "matches_expected_shape": true,
+    "by_waler": [
+      {
+        "waler": "W1",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W2",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W3",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W4",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W5",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W6",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W7",
+        "declared_candidate_count": 4,
+        "json_candidate_count": 4,
+        "unique_legal_candidate_count": 4
+      },
+      {
+        "waler": "W8",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W9",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W10",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W11",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W12",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W13",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W14",
+        "declared_candidate_count": 1,
+        "json_candidate_count": 1,
+        "unique_legal_candidate_count": 1
+      },
+      {
+        "waler": "W15",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W16",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W17",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W18",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W19",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      },
+      {
+        "waler": "W20",
+        "declared_candidate_count": 5,
+        "json_candidate_count": 5,
+        "unique_legal_candidate_count": 5
+      }
+    ]
+  },
+  "search": {
+    "method": "deterministic dynamic programming over aggregate (short, mid, long, out)",
+    "one_candidate_per_waler": true,
+    "same_aggregate_state_pruning": true,
+    "representative_tie_break": "fewest rank!=1 selections, then lexicographically smallest candidate-rank vector",
+    "state_counts_after_each_waler_including_initial": [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      3,
+      12,
+      12,
+      41,
+      41,
+      41,
+      41,
+      41,
+      41,
+      100,
+      152,
+      152,
+      312,
+      482,
+      482
+    ],
+    "sum_retained_states_across_layers": 1959,
+    "peak_retained_states": 482,
+    "final_distinct_aggregate_states": 482,
+    "raw_transitions_evaluated": 6830,
+    "duplicate_aggregate_transitions_pruned": 4872,
+    "exact_target_reachable_state_count": 0,
+    "exact_target_zero_out_reachable_state_count": 0
+  },
+  "baseline_all_rank1": {
+    "totals": {
+      "short": 12,
+      "mid": 27,
+      "long": 12,
+      "out": 0,
+      "classified_total": 51,
+      "all_segments_total": 51
+    },
+    "ratios": {
+      "short": 0.23529411764705882,
+      "mid": 0.5294117647058824,
+      "long": 0.23529411764705882
+    },
+    "ratio_percent": {
+      "short": 23.52941176470588,
+      "mid": 52.94117647058824,
+      "long": 23.52941176470588
+    },
+    "ratio_deviation": 0.12941176470588237,
+    "ratio_deviation_exact": "11/85",
+    "changed_from_rank1_count": 0,
+    "theoretical_target": {
+      "classified_total": 51,
+      "target_counts": {
+        "short": 10.200000000000001,
+        "mid": 25.5,
+        "long": 15.299999999999999
+      },
+      "actual_counts": {
+        "short": 12,
+        "mid": 27,
+        "long": 12
+      },
+      "difference_actual_minus_target": {
+        "short": 1.799999999999999,
+        "mid": 1.5,
+        "long": -3.299999999999999
+      },
+      "integer_exact_target_possible_for_this_total": false
+    },
+    "selection": [
+      {
+        "waler": "W1",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5000
+        ]
+      },
+      {
+        "waler": "W2",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 0,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          9000
+        ]
+      },
+      {
+        "waler": "W3",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          8000
+        ]
+      },
+      {
+        "waler": "W4",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          5500,
+          8000,
+          8500
+        ]
+      },
+      {
+        "waler": "W5",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          6500,
+          5500
+        ]
+      },
+      {
+        "waler": "W6",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5000,
+          7000
+        ]
+      },
+      {
+        "waler": "W7",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7500
+        ]
+      },
+      {
+        "waler": "W8",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W9",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5500,
+          8000
+        ]
+      },
+      {
+        "waler": "W10",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7500
+        ]
+      },
+      {
+        "waler": "W11",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W12",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8500,
+          7000,
+          5500,
+          7000
+        ]
+      },
+      {
+        "waler": "W13",
+        "candidate_rank": 1,
+        "short": 2,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          5500,
+          7500,
+          8500,
+          8500,
+          5500,
+          7500,
+          7500
+        ]
+      },
+      {
+        "waler": "W14",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5500
+        ]
+      },
+      {
+        "waler": "W15",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          10000
+        ]
+      },
+      {
+        "waler": "W16",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8000,
+          9000
+        ]
+      },
+      {
+        "waler": "W17",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7000,
+          10000,
+          7000
+        ]
+      },
+      {
+        "waler": "W18",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          8500,
+          4000,
+          6500
+        ]
+      },
+      {
+        "waler": "W19",
+        "candidate_rank": 1,
+        "short": 2,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          4500,
+          7000,
+          6500,
+          8500,
+          8500,
+          6500,
+          7000,
+          4500
+        ]
+      },
+      {
+        "waler": "W20",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          7500,
+          9000
+        ]
+      }
+    ]
+  },
+  "best_ratio_unconstrained_out": {
+    "totals": {
+      "short": 10,
+      "mid": 24,
+      "long": 14,
+      "out": 4,
+      "classified_total": 48,
+      "all_segments_total": 52
+    },
+    "ratios": {
+      "short": 0.20833333333333334,
+      "mid": 0.5,
+      "long": 0.2916666666666667
+    },
+    "ratio_percent": {
+      "short": 20.833333333333336,
+      "mid": 50.0,
+      "long": 29.166666666666668
+    },
+    "ratio_deviation": 0.016666666666666666,
+    "ratio_deviation_exact": "1/60",
+    "changed_from_rank1_count": 4,
+    "theoretical_target": {
+      "classified_total": 48,
+      "target_counts": {
+        "short": 9.600000000000001,
+        "mid": 24.0,
+        "long": 14.399999999999999
+      },
+      "actual_counts": {
+        "short": 10,
+        "mid": 24,
+        "long": 14
+      },
+      "difference_actual_minus_target": {
+        "short": 0.3999999999999986,
+        "mid": 0.0,
+        "long": -0.3999999999999986
+      },
+      "integer_exact_target_possible_for_this_total": false
+    },
+    "selection": [
+      {
+        "waler": "W1",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5000
+        ]
+      },
+      {
+        "waler": "W2",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 0,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          9000
+        ]
+      },
+      {
+        "waler": "W3",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          8000
+        ]
+      },
+      {
+        "waler": "W4",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          5500,
+          8000,
+          8500
+        ]
+      },
+      {
+        "waler": "W5",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          6500,
+          5500
+        ]
+      },
+      {
+        "waler": "W6",
+        "candidate_rank": 3,
+        "short": 0,
+        "mid": 0,
+        "long": 1,
+        "out": 1,
+        "segments_mm": [
+          9000,
+          3000
+        ]
+      },
+      {
+        "waler": "W7",
+        "candidate_rank": 4,
+        "short": 0,
+        "mid": 0,
+        "long": 0,
+        "out": 3,
+        "segments_mm": [
+          3500,
+          2500,
+          1500
+        ]
+      },
+      {
+        "waler": "W8",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W9",
+        "candidate_rank": 4,
+        "short": 1,
+        "mid": 0,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          9000,
+          4500
+        ]
+      },
+      {
+        "waler": "W10",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7500
+        ]
+      },
+      {
+        "waler": "W11",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W12",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8500,
+          7000,
+          5500,
+          7000
+        ]
+      },
+      {
+        "waler": "W13",
+        "candidate_rank": 1,
+        "short": 2,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          5500,
+          7500,
+          8500,
+          8500,
+          5500,
+          7500,
+          7500
+        ]
+      },
+      {
+        "waler": "W14",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5500
+        ]
+      },
+      {
+        "waler": "W15",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          10000
+        ]
+      },
+      {
+        "waler": "W16",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8000,
+          9000
+        ]
+      },
+      {
+        "waler": "W17",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7000,
+          10000,
+          7000
+        ]
+      },
+      {
+        "waler": "W18",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          8500,
+          4000,
+          6500
+        ]
+      },
+      {
+        "waler": "W19",
+        "candidate_rank": 2,
+        "short": 1,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          7000,
+          9000,
+          7500,
+          7500,
+          7500,
+          9000,
+          5500
+        ]
+      },
+      {
+        "waler": "W20",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          7500,
+          9000
+        ]
+      }
+    ]
+  },
+  "best_ratio_zero_out": {
+    "totals": {
+      "short": 11,
+      "mid": 26,
+      "long": 13,
+      "out": 0,
+      "classified_total": 50,
+      "all_segments_total": 50
+    },
+    "ratios": {
+      "short": 0.22,
+      "mid": 0.52,
+      "long": 0.26
+    },
+    "ratio_percent": {
+      "short": 22.0,
+      "mid": 52.0,
+      "long": 26.0
+    },
+    "ratio_deviation": 0.08,
+    "ratio_deviation_exact": "2/25",
+    "changed_from_rank1_count": 2,
+    "theoretical_target": {
+      "classified_total": 50,
+      "target_counts": {
+        "short": 10.0,
+        "mid": 25.0,
+        "long": 15.0
+      },
+      "actual_counts": {
+        "short": 11,
+        "mid": 26,
+        "long": 13
+      },
+      "difference_actual_minus_target": {
+        "short": 1.0,
+        "mid": 1.0,
+        "long": -2.0
+      },
+      "integer_exact_target_possible_for_this_total": true
+    },
+    "selection": [
+      {
+        "waler": "W1",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5000
+        ]
+      },
+      {
+        "waler": "W2",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 0,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          9000
+        ]
+      },
+      {
+        "waler": "W3",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          8000
+        ]
+      },
+      {
+        "waler": "W4",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          5500,
+          8000,
+          8500
+        ]
+      },
+      {
+        "waler": "W5",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          6500,
+          5500
+        ]
+      },
+      {
+        "waler": "W6",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5000,
+          7000
+        ]
+      },
+      {
+        "waler": "W7",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7500
+        ]
+      },
+      {
+        "waler": "W8",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W9",
+        "candidate_rank": 4,
+        "short": 1,
+        "mid": 0,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          9000,
+          4500
+        ]
+      },
+      {
+        "waler": "W10",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7500
+        ]
+      },
+      {
+        "waler": "W11",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          7000
+        ]
+      },
+      {
+        "waler": "W12",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8500,
+          7000,
+          5500,
+          7000
+        ]
+      },
+      {
+        "waler": "W13",
+        "candidate_rank": 1,
+        "short": 2,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          5500,
+          7500,
+          8500,
+          8500,
+          5500,
+          7500,
+          7500
+        ]
+      },
+      {
+        "waler": "W14",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 0,
+        "long": 0,
+        "out": 0,
+        "segments_mm": [
+          5500
+        ]
+      },
+      {
+        "waler": "W15",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          10000
+        ]
+      },
+      {
+        "waler": "W16",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 1,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          8000,
+          9000
+        ]
+      },
+      {
+        "waler": "W17",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7000,
+          10000,
+          7000
+        ]
+      },
+      {
+        "waler": "W18",
+        "candidate_rank": 1,
+        "short": 1,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          6000,
+          8500,
+          4000,
+          6500
+        ]
+      },
+      {
+        "waler": "W19",
+        "candidate_rank": 2,
+        "short": 1,
+        "mid": 4,
+        "long": 2,
+        "out": 0,
+        "segments_mm": [
+          7000,
+          9000,
+          7500,
+          7500,
+          7500,
+          9000,
+          5500
+        ]
+      },
+      {
+        "waler": "W20",
+        "candidate_rank": 1,
+        "short": 0,
+        "mid": 2,
+        "long": 1,
+        "out": 0,
+        "segments_mm": [
+          7500,
+          7500,
+          9000
+        ]
+      }
+    ]
+  },
+  "adjustable_walers": [
+    {
+      "waler": "W6",
+      "candidate_count": 5,
+      "distinct_composition_count": 3,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 0,
+          "long": 1,
+          "out": 1,
+          "candidate_ranks": [
+            3,
+            4
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 0,
+          "out": 5,
+          "candidate_ranks": [
+            5
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W7",
+      "candidate_count": 4,
+      "distinct_composition_count": 4,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 0,
+          "long": 0,
+          "out": 3,
+          "candidate_ranks": [
+            4
+          ]
+        },
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 0,
+          "out": 1,
+          "candidate_ranks": [
+            2
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 0,
+          "out": 2,
+          "candidate_ranks": [
+            3
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W9",
+      "candidate_count": 5,
+      "distinct_composition_count": 4,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 2,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            3
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            4
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 1,
+          "long": 0,
+          "out": 1,
+          "candidate_ranks": [
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W15",
+      "candidate_count": 5,
+      "distinct_composition_count": 3,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 2,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            3,
+            4
+          ]
+        },
+        {
+          "short": 2,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W16",
+      "candidate_count": 5,
+      "distinct_composition_count": 2,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 2,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W18",
+      "candidate_count": 5,
+      "distinct_composition_count": 3,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 2,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        },
+        {
+          "short": 1,
+          "mid": 3,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            3,
+            4,
+            5
+          ]
+        },
+        {
+          "short": 2,
+          "mid": 2,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            2
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W19",
+      "candidate_count": 5,
+      "distinct_composition_count": 2,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 4,
+          "long": 2,
+          "out": 0,
+          "candidate_ranks": [
+            2,
+            3,
+            4,
+            5
+          ]
+        },
+        {
+          "short": 2,
+          "mid": 4,
+          "long": 2,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    }
+  ],
+  "fixed_composition_walers": [
+    {
+      "waler": "W1",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W2",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 0,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W3",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W4",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 1,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W5",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W8",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W10",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W11",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 1,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W12",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 2,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W13",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 2,
+          "mid": 4,
+          "long": 2,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W14",
+      "candidate_count": 1,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 1,
+          "mid": 0,
+          "long": 0,
+          "out": 0,
+          "candidate_ranks": [
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W17",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 2,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    },
+    {
+      "waler": "W20",
+      "candidate_count": 5,
+      "distinct_composition_count": 1,
+      "compositions": [
+        {
+          "short": 0,
+          "mid": 2,
+          "long": 1,
+          "out": 0,
+          "candidate_ranks": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        }
+      ]
+    }
+  ],
+  "pareto_frontier": [
+    {
+      "totals": {
+        "short": 11,
+        "mid": 26,
+        "long": 13,
+        "out": 0,
+        "classified_total": 50,
+        "all_segments_total": 50
+      },
+      "ratios": {
+        "short": 0.22,
+        "mid": 0.52,
+        "long": 0.26
+      },
+      "ratio_percent": {
+        "short": 22.0,
+        "mid": 52.0,
+        "long": 26.0
+      },
+      "ratio_deviation": 0.08,
+      "ratio_deviation_exact": "2/25",
+      "changed_from_rank1_count": 2,
+      "theoretical_target": {
+        "classified_total": 50,
+        "target_counts": {
+          "short": 10.0,
+          "mid": 25.0,
+          "long": 15.0
+        },
+        "actual_counts": {
+          "short": 11,
+          "mid": 26,
+          "long": 13
+        },
+        "difference_actual_minus_target": {
+          "short": 1.0,
+          "mid": 1.0,
+          "long": -2.0
+        },
+        "integer_exact_target_possible_for_this_total": true
+      }
+    },
+    {
+      "totals": {
+        "short": 10,
+        "mid": 25,
+        "long": 14,
+        "out": 1,
+        "classified_total": 49,
+        "all_segments_total": 50
+      },
+      "ratios": {
+        "short": 0.20408163265306123,
+        "mid": 0.5102040816326531,
+        "long": 0.2857142857142857
+      },
+      "ratio_percent": {
+        "short": 20.408163265306122,
+        "mid": 51.02040816326531,
+        "long": 28.57142857142857
+      },
+      "ratio_deviation": 0.02857142857142857,
+      "ratio_deviation_exact": "1/35",
+      "changed_from_rank1_count": 3,
+      "theoretical_target": {
+        "classified_total": 49,
+        "target_counts": {
+          "short": 9.8,
+          "mid": 24.5,
+          "long": 14.7
+        },
+        "actual_counts": {
+          "short": 10,
+          "mid": 25,
+          "long": 14
+        },
+        "difference_actual_minus_target": {
+          "short": 0.1999999999999993,
+          "mid": 0.5,
+          "long": -0.6999999999999993
+        },
+        "integer_exact_target_possible_for_this_total": false
+      }
+    },
+    {
+      "totals": {
+        "short": 10,
+        "mid": 24,
+        "long": 14,
+        "out": 4,
+        "classified_total": 48,
+        "all_segments_total": 52
+      },
+      "ratios": {
+        "short": 0.20833333333333334,
+        "mid": 0.5,
+        "long": 0.2916666666666667
+      },
+      "ratio_percent": {
+        "short": 20.833333333333336,
+        "mid": 50.0,
+        "long": 29.166666666666668
+      },
+      "ratio_deviation": 0.016666666666666666,
+      "ratio_deviation_exact": "1/60",
+      "changed_from_rank1_count": 4,
+      "theoretical_target": {
+        "classified_total": 48,
+        "target_counts": {
+          "short": 9.600000000000001,
+          "mid": 24.0,
+          "long": 14.399999999999999
+        },
+        "actual_counts": {
+          "short": 10,
+          "mid": 24,
+          "long": 14
+        },
+        "difference_actual_minus_target": {
+          "short": 0.3999999999999986,
+          "mid": 0.0,
+          "long": -0.3999999999999986
+        },
+        "integer_exact_target_possible_for_this_total": false
+      }
+    }
+  ]
+}

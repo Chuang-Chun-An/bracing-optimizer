@@ -255,7 +255,8 @@ def build_review_items(
         if not handles:
             continue
         # A source already used by any formal member is not presented as a
-        # second ghost object when its ownership is ambiguous. STEP7 retains
+        # second ghost object when its ownership is ambiguous. The global
+        # problem list retains
         # the original ProblemRecord for review.
         if any(owners_by_handle.get(handle) for handle in handles):
             continue
@@ -320,29 +321,29 @@ def _guidance_for_problem(record: ProblemRecord, item: ReviewItem) -> str:
     code = record.code
     if item.status == "unresolved":
         return (
-            "此來源尚未形成正式工程構件。請回 STEP1 確認圖層用途並重新辨識，"
-            "同時檢查原始 DXF 幾何；目前 STEP5、STEP6 不適用。"
+            "此來源尚未形成正式工程構件。請開啟「圖層 ✓」確認用途並重新辨識，"
+            "同時檢查原始 DXF 幾何；目前幾何修正工具不適用。"
         )
     if code in _WALER_CONTACT_CODES:
-        return "請在 STEP4 的 Waler 接觸位置調整中檢查圖面值與採用值。"
+        return "請在工程資料的圍令接觸位置調整中檢查圖面值與採用值。"
     if "COORDINATE" in code:
-        return "請至 STEP2 檢查座標系統。"
+        return "請開啟「座標 ✓」檢查座標系統。"
     if code in _RECOGNITION_CODES:
-        return "請回 STEP1 確認圖層用途後重新辨識，並檢查原始 DXF 幾何。"
+        return "請開啟「圖層 ✓」確認用途後重新辨識，並檢查原始 DXF 幾何。"
     if code in _ENDPOINT_CODES or code in _DUPLICATE_CODES:
         if item.role in {"waler", "strut", "brace"}:
             return (
-                "請至 STEP5 檢查候選起點與終點；若需依 CAD 圖面重新指定工程線，"
-                "可使用 STEP6。"
+                "請在候選點區檢查起點與終點；若需依 CAD 圖面重新指定工程線，"
+                "可使用修改工具中的「從 CAD 指定工程線」。"
             )
-        return "請至 STEP5 檢查候選起點與終點。"
+        return "請在候選點區檢查起點與終點。"
     if code in _RELATIONSHIP_CODES:
         if item.role in {"waler", "strut", "brace"}:
             return (
-                "請先檢查相關構件的工程線與端點；若位置有誤，可由 STEP5 或 STEP6 修正。"
+                "請先檢查相關構件的工程線與端點；若位置有誤，可由候選點或 CAD 工程線工具修正。"
             )
         return (
-            "請先檢查相關構件的工程線與端點；若此構件端點有誤，可至 STEP5 修正。"
+            "請先檢查相關構件的工程線與端點；若此構件端點有誤，可在候選點區修正。"
         )
     return "請依上方問題內容檢查此構件；目前沒有對應的專用人工修正工具。"
 
@@ -484,9 +485,9 @@ def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOvervi
             ValidationOverviewItem("info", f"已人工選擇 {manual_count} 個構件工程線")
         )
     if result.can_import:
-        items.append(ValidationOverviewItem("success", "工程模型可以匯入 Solver"))
+        items.append(ValidationOverviewItem("success", "工程模型可以匯入求解器"))
     else:
-        items.append(ValidationOverviewItem("error", "存在阻擋錯誤，目前不可匯入 Solver"))
+        items.append(ValidationOverviewItem("error", "存在阻擋錯誤，目前不可匯入求解器"))
     return tuple(items)
 
 

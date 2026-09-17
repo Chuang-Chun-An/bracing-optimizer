@@ -344,11 +344,11 @@ class ReviewProjectionTests(unittest.TestCase):
         unresolved_guidance = review_item_guidance(unresolved)
 
         self.assertEqual(len(formal_guidance), 1)
-        self.assertIn("STEP5", formal_guidance[0])
-        self.assertIn("STEP6", formal_guidance[0])
+        self.assertIn("候選點區", formal_guidance[0])
+        self.assertIn("從 CAD 指定工程線", formal_guidance[0])
         self.assertEqual(len(unresolved_guidance), 1)
-        self.assertIn("STEP1", unresolved_guidance[0])
-        self.assertIn("STEP5、STEP6 不適用", unresolved_guidance[0])
+        self.assertIn("圖層 ✓", unresolved_guidance[0])
+        self.assertIn("幾何修正工具不適用", unresolved_guidance[0])
 
     def test_rebuilding_projection_removes_resolved_source_item(self):
         failed = _result(

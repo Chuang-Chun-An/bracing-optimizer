@@ -60,6 +60,13 @@ shutil.copy2(
     output_dir / "cad_builder.lsp",
 )
 
+# Keep the Y29 regression drawing beside the executable so it can be selected
+# directly from the packaged application during solver/import testing.
+shutil.copy2(
+    Path(SPECPATH) / "Y29_test.dxf",
+    output_dir / "Y29_test.dxf",
+)
+
 shutil.copytree(
     Path(SPECPATH) / "test_cases",
     output_dir / "test_cases",

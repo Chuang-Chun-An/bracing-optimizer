@@ -46,8 +46,10 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
         for module_name in (
             "bracing_optimizer/algorithms/support.py",
             "bracing_optimizer/algorithms/wales.py",
+            "bracing_optimizer/algorithms/waler_global.py",
             "bracing_optimizer/application/optimize_support_zone.py",
             "bracing_optimizer/application/optimize_waler.py",
+            "bracing_optimizer/application/optimize_waler_global.py",
             "bracing_optimizer/application/plan_editing.py",
             "bracing_optimizer/application/project_data.py",
             "bracing_optimizer/application/project_mapper.py",
@@ -73,6 +75,7 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
             "bracing_optimizer/algorithms/solver_search.py",
             "bracing_optimizer/algorithms/support.py",
             "bracing_optimizer/algorithms/wales.py",
+            "bracing_optimizer/algorithms/waler_global.py",
         ):
             with self.subTest(module=module_name):
                 self.assertFalse(

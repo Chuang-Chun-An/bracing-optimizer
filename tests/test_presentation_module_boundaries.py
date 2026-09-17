@@ -13,6 +13,7 @@ MOVED_CLASS_NAMES = {
     "SupportSolverDialog",
     "TextRedirector",
     "WalerSelectionDialog",
+    "WalerGlobalSolverDialog",
     "WalerSolverDialog",
     "ZoningSelectionDialog",
 }

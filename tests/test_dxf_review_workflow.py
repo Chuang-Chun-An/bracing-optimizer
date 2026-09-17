@@ -233,6 +233,8 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(state["coordinate_system"]["origin_x"], 12.5)
         self.assertEqual(state["coordinate_system"]["origin_y"], -8.0)
         self.assertEqual(state["import_mode"], "append")
+        self.assertEqual(state["review_state_version"], 2)
+        self.assertEqual(state["review_confirmations"], {})
 
     def test_continue_button_depends_only_on_workflow(self):
         app = self.app()
@@ -368,6 +370,7 @@ class DxfReviewWorkflowTests(unittest.TestCase):
                 "source_entity_types": ["LWPOLYLINE"],
                 "reason": "user_excluded",
             }],
+            review_confirmations={"strut:HS": "ABC123"},
         )
         app.dxf_asset_status_report = DxfAssetManager().runtime_report(self.source)
 
@@ -383,8 +386,16 @@ class DxfReviewWorkflowTests(unittest.TestCase):
             ["6EF"],
         )
         self.assertEqual(
+            saved["dxf_import_state"]["review_confirmations"],
+            {"strut:HS": "ABC123"},
+        )
+        self.assertEqual(
             loaded._current_dxf_workflow_status(),
             DxfWorkflowStatus.REVIEW,
+        )
+        self.assertEqual(
+            loaded.dxf_last_import_debug["review_confirmations"],
+            {"strut:HS": "ABC123"},
         )
         self.assertEqual(resume_source, saved_path.parent / "source" / "source.dxf")
 

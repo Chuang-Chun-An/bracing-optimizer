@@ -12,6 +12,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from bracing_optimizer.presentation.cad_view_interaction import CADViewport
+from bracing_optimizer.presentation.field_labels import (
+    dxf_entity_type_label,
+    engineering_field_label,
+    recognition_method_label,
+)
 
 from .candidate_points import (
     CandidatePointStore,
@@ -40,7 +45,6 @@ from .models import (
     SourceGeometry,
     SourceText,
     Strut,
-    ValidationOverviewItem,
     Waler,
     apply_coordinate_system,
     coordinate_system_from_candidate,
@@ -58,7 +62,6 @@ from .preview import (
 from .validation import (
     build_problem_records,
     build_review_items,
-    build_validation_overview,
     problem_severity_rank,
     review_item_guidance,
     validate_candidate_point_pair,
@@ -94,10 +97,19 @@ from .source_exclusion import (
     review_state_matches_source,
     shared_handle_conflicts,
 )
+from .review_confirmation import (
+    FORMAL_REVIEW_ROLES,
+    confirm_review_item,
+    review_confirmation_identity,
+    review_confirmations_from_state,
+    review_item_can_be_confirmed,
+    review_item_is_confirmed,
+    serialize_review_confirmations,
+    unconfirmed_formal_review_items,
+    valid_review_confirmations,
+)
 from window_layout import (
-    WorkArea,
     _active_monitor_work_areas,
-    _parse_window_geometry,
     fit_window_geometry_to_work_areas,
 )
 
@@ -209,7 +221,7 @@ class DXFImportDialog:
             )
         except (TypeError, ValueError) as exc:
             raise DXFImportError(
-                "保存的 DXF Review 座標設定格式錯誤，無法繼續。"
+                "保存的 DXF 檢核座標設定格式錯誤，無法繼續。"
             ) from exc
 
     @staticmethod
@@ -293,8 +305,8 @@ class DXFImportDialog:
         )
         if self.resume_review and not self._initial_state_matches_source:
             raise DXFImportError(
-                "此專案保存的 DXF Review 使用的是不同版本的 DXF。"
-                "為避免人工修正套用到錯誤來源，目前無法直接繼續此 Review。"
+                "此專案保存的 DXF 檢核使用的是不同版本的 DXF。"
+                "為避免人工修正套用到錯誤來源，目前無法直接繼續此檢核。"
             )
         restore_decision = exclusions_from_review_state(
             self.initial_state,
@@ -324,6 +336,11 @@ class DXFImportDialog:
             bool,
         ] = (
             double_support_decisions_from_review_state(self.initial_state)
+            if self._initial_state_matches_source
+            else {}
+        )
+        self.review_confirmations: dict[str, str] = (
+            review_confirmations_from_state(self.initial_state)
             if self._initial_state_matches_source
             else {}
         )
@@ -385,7 +402,7 @@ class DXFImportDialog:
         )
         self.developer_expanded = False
         self.preview_cursor_var = tk.StringVar(value="游標：—")
-        self.preview_coordinate_var = tk.StringVar(value="Coordinate System：尚未套用")
+        self.preview_coordinate_var = tk.StringVar(value="座標系統：尚未套用")
         self.preview_selected_member_var = tk.StringVar(value="目前構件：—")
         self.show_source_var = tk.BooleanVar(
             value=bool(self.ui_state.get("show_source", True))
@@ -436,105 +453,13 @@ class DXFImportDialog:
             self.candidate_point_store,
         )
 
+        # The main Review layout is intentionally not one large scrolling page.
+        # The left navigator, diagnostics header and footer remain fixed while
+        # the right-hand detail column owns its vertical scrolling.
         self.form_scroll_host = ttk.Frame(self.window)
-        form_background = ttk.Style(self.window).lookup("TFrame", "background")
-        self.form_canvas = tk.Canvas(
-            self.form_scroll_host,
-            background=form_background or self.window.cget("background"),
-            borderwidth=0,
-            highlightthickness=0,
-            yscrollincrement=24,
-        )
-        self.form_scrollbar = ttk.Scrollbar(
-            self.form_scroll_host,
-            orient="vertical",
-            command=self.form_canvas.yview,
-        )
-        self.form_canvas.configure(yscrollcommand=self.form_scrollbar.set)
-        self.form_canvas.pack(side="left", fill="both", expand=True)
-        self.form_scrollbar.pack(side="right", fill="y")
-        self.form_content = ttk.Frame(self.form_canvas)
-        self.form_content_window = self.form_canvas.create_window(
-            (0, 0),
-            window=self.form_content,
-            anchor="nw",
-        )
-        self.form_content.bind("<Configure>", self._update_form_scrollregion)
-        self.form_canvas.bind("<Configure>", self._resize_form_content)
-        self.window.bind("<MouseWheel>", self._on_form_mousewheel, add="+")
-        self.window.bind("<Button-4>", self._on_form_mousewheel, add="+")
-        self.window.bind("<Button-5>", self._on_form_mousewheel, add="+")
+        self.form_content = ttk.Frame(self.form_scroll_host)
+        self.form_content.pack(fill="both", expand=True)
 
-        controls = ttk.LabelFrame(
-            self.form_content,
-            text=f"STEP1 圖層用途分類 — {self.file_path.name}",
-        )
-        controls.pack(fill="x", padx=10, pady=10)
-        ttk.Label(
-            controls,
-            text="測試圖層可能預填用途；使用者可自由修改，辨識時以目前選擇為準。",
-            foreground="#37474f",
-        ).pack(anchor="w", padx=8, pady=(6, 3))
-        classification_body = ttk.Frame(controls)
-        classification_body.pack(fill="x", padx=8, pady=(0, 5))
-        classification_header = ttk.Frame(classification_body)
-        classification_header.pack(fill="x", padx=(0, 16))
-        ttk.Label(
-            classification_header,
-            text="圖層名稱",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=0, padx=8, pady=4, sticky="w")
-        ttk.Label(
-            classification_header,
-            text="DXF 圖元數量",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=1, padx=8, pady=4, sticky="e")
-        ttk.Label(
-            classification_header,
-            text="用途",
-            font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=0, column=2, padx=8, pady=4, sticky="w")
-        classification_header.columnconfigure(0, weight=1)
-        classification_header.columnconfigure(1, minsize=120)
-        classification_header.columnconfigure(2, minsize=150)
-
-        classification_list = ttk.Frame(classification_body)
-        classification_list.pack(fill="x", expand=True)
-        classification_canvas = tk.Canvas(
-            classification_list,
-            height=245,
-            highlightthickness=1,
-            highlightbackground="#b0bec5",
-            yscrollincrement=24,
-        )
-        self.classification_canvas = classification_canvas
-        classification_scroll = ttk.Scrollbar(
-            classification_list,
-            orient="vertical",
-            command=classification_canvas.yview,
-        )
-        classification_canvas.configure(yscrollcommand=classification_scroll.set)
-        classification_canvas.pack(side="left", fill="x", expand=True)
-        classification_scroll.pack(side="right", fill="y")
-        classification_rows = ttk.Frame(classification_canvas)
-        classification_window = classification_canvas.create_window(
-            (0, 0),
-            window=classification_rows,
-            anchor="nw",
-        )
-        classification_rows.bind(
-            "<Configure>",
-            lambda _event: classification_canvas.configure(
-                scrollregion=classification_canvas.bbox("all")
-            ),
-        )
-        classification_canvas.bind(
-            "<Configure>",
-            lambda event: classification_canvas.itemconfigure(
-                classification_window,
-                width=event.width,
-            ),
-        )
         saved_classification = self.initial_state.get("layer_classification", {})
         if not isinstance(saved_classification, Mapping):
             saved_classification = {}
@@ -553,23 +478,8 @@ class DXFImportDialog:
                     for item in assignments
                     if isinstance(item, Mapping) and item.get("layer_name")
                 }
-        layer_counts = {
-            item.name: item.entity_count for item in self.importer.layer_information()
-        }
         self.layer_use_vars: dict[str, Any] = {}
-        names = self.importer.layer_names
-        for row, layer in enumerate(names):
-            ttk.Label(classification_rows, text=layer).grid(
-                row=row,
-                column=0,
-                padx=8,
-                pady=2,
-                sticky="w",
-            )
-            ttk.Label(
-                classification_rows,
-                text=str(layer_counts.get(layer, 0)),
-            ).grid(row=row, column=1, padx=8, pady=2, sticky="e")
+        for layer in self.importer.layer_names:
             variable = tk.StringVar(
                 value=self._initial_layer_use(
                     layer,
@@ -577,59 +487,87 @@ class DXFImportDialog:
                     self.default_layer_mapping,
                 )
             )
-            combo = ttk.Combobox(
-                classification_rows,
-                textvariable=variable,
-                values=self.LAYER_USE_OPTIONS,
-                state="readonly",
-                width=14,
-            )
-            combo.grid(row=row, column=2, padx=8, pady=2, sticky="w")
             self.layer_use_vars[layer] = variable
-        classification_rows.columnconfigure(0, weight=1)
-        classification_rows.columnconfigure(1, minsize=120)
-        classification_rows.columnconfigure(2, minsize=150)
-
-        action_row = ttk.Frame(controls)
-        action_row.pack(fill="x", padx=8, pady=(0, 7))
         self.mode_var = tk.StringVar(value=self.import_mode)
-        ttk.Radiobutton(action_row, text="取代目前工程模型", variable=self.mode_var, value="replace").pack(side="left")
-        ttk.Radiobutton(action_row, text="附加到目前工程模型", variable=self.mode_var, value="append").pack(side="left", padx=12)
-        self.recognize_button = ttk.Button(
-            action_row,
-            text="完成分類並開始辨識／重新辨識",
-            command=self._convert_preview,
+        self.coordinate_mode_var = tk.StringVar(
+            value=("local" if self.selected_origin_world is not None else "world")
         )
-        self.recognize_button.pack(side="right")
-
-        self._build_coordinate_system_settings(self.form_content)
+        self.coordinate_error_var = tk.StringVar(value="")
+        self.coordinate_info_var = tk.StringVar(value="")
+        self.coordinate_example_var = tk.StringVar(value="")
+        self.layer_settings_window = None
+        self.coordinate_settings_window = None
+        self.double_support_settings_window = None
+        self._build_high_impact_settings(self.form_content)
 
         review_frame = ttk.Frame(self.form_content)
-        review_frame.pack(fill="x", padx=10, pady=(0, 8))
+        review_frame.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         self._build_engineering_review(review_frame)
 
-        diagnostics_frame = ttk.LabelFrame(
-            self.form_content,
-            text="STEP7 匯入檢核結果",
-        )
+        diagnostics_frame = ttk.Frame(self.form_content)
         diagnostics_frame.pack(fill="x", padx=10, pady=(0, 10))
         self._build_diagnostics_tab(diagnostics_frame, scrolledtext)
 
         footer = ttk.Frame(self.window)
         footer.pack(side="bottom", fill="x", padx=10, pady=10)
-        self.status_var = tk.StringVar(value="")
-        self.status_label = ttk.Label(footer, textvariable=self.status_var)
-        self.status_label.pack(side="left", fill="x", expand=True)
-        pause_text = "返回主畫面" if self.allow_pause else "取消"
-        pause_command = self._pause if self.allow_pause else self._cancel
-        ttk.Button(footer, text=pause_text, command=pause_command).pack(
-            side="right",
-            padx=(6, 0),
+        self.import_mode_frame = ttk.LabelFrame(
+            footer,
+            text="整批匯入方式",
         )
-        self.apply_button = ttk.Button(footer, text="完成匯入", command=self._apply)
+        self.import_mode_frame.pack(fill="x", pady=(0, 8))
+        import_mode_options = ttk.Frame(self.import_mode_frame)
+        import_mode_options.pack(fill="x", padx=8, pady=(4, 0))
+        ttk.Radiobutton(
+            import_mode_options,
+            text="取代目前工程",
+            variable=self.mode_var,
+            value="replace",
+            command=self._on_import_mode_changed,
+        ).pack(side="left", padx=(0, 12))
+        ttk.Radiobutton(
+            import_mode_options,
+            text="附加到目前工程",
+            variable=self.mode_var,
+            value="append",
+            command=self._on_import_mode_changed,
+        ).pack(side="left")
+        ttk.Label(
+            self.import_mode_frame,
+            text=(
+                "套用於本次所有已辨識構件，不是目前選取的單一構件。"
+                "取代會以本次結果取代主畫面現有工程構件；"
+                "附加會保留現有構件並加入本次結果。"
+            ),
+            foreground="#455a64",
+            justify="left",
+        ).pack(fill="x", padx=8, pady=(2, 5))
+
+        footer_actions = ttk.Frame(footer)
+        footer_actions.pack(fill="x")
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(
+            footer_actions,
+            textvariable=self.status_var,
+        )
+        self.status_label.pack(side="left", fill="x", expand=True)
+        pause_text = "暫停並返回主畫面" if self.allow_pause else "取消"
+        pause_command = self._pause if self.allow_pause else self._cancel
+        pause_button = ttk.Button(
+            footer_actions,
+            text=pause_text,
+            command=pause_command,
+            width=18,
+        )
+        self.apply_button = ttk.Button(
+            footer_actions,
+            text="完成匯入",
+            command=self._apply,
+            width=18,
+        )
         self.apply_button.pack(side="right")
+        pause_button.pack(side="right", padx=(6, 6))
         self.apply_button.configure(state="disabled", text="不可匯入")
-        self.status_var.set("請先完成圖層用途分類，再按下「開始辨識」。")
+        self.status_var.set("請開啟「圖層 ✓」確認用途並開始辨識。")
         self.form_scroll_host.pack(fill="both", expand=True)
         if bool(self.ui_state.get("main_maximized", False)):
             self.window.after_idle(lambda: self._set_maximized(True))
@@ -660,16 +598,38 @@ class DXFImportDialog:
             except self.tk.TclError:
                 return
 
-    def _update_form_scrollregion(self, _event: Any = None) -> None:
-        bounds = self.form_canvas.bbox("all")
+    def _update_review_detail_scrollregion(self, _event: Any = None) -> None:
+        canvas = getattr(self, "review_detail_canvas", None)
+        if canvas is None:
+            return
+        bounds = canvas.bbox("all")
         if bounds is not None:
-            self.form_canvas.configure(scrollregion=bounds)
+            canvas.configure(scrollregion=bounds)
 
-    def _resize_form_content(self, event: Any) -> None:
-        self.form_canvas.itemconfigure(
-            self.form_content_window,
+    def _resize_review_detail_content(self, event: Any) -> None:
+        self.review_detail_canvas.itemconfigure(
+            self.review_detail_content_window,
             width=max(int(event.width), 1),
         )
+
+    def _on_review_detail_mousewheel(self, event: Any) -> str | None:
+        canvas = getattr(self, "review_detail_canvas", None)
+        content = getattr(self, "review_detail_content", None)
+        if canvas is None or content is None:
+            return None
+        widget = getattr(event, "widget", None)
+        if widget is None or not self._widget_is_descendant(widget, content):
+            return None
+        try:
+            if str(widget.winfo_class()) in {"Treeview", "Text", "Listbox"}:
+                return None
+        except Exception:
+            pass
+        units = self._form_wheel_units(event)
+        if units == 0 or not self._widget_can_scroll(canvas, units):
+            return None
+        canvas.yview_scroll(units, "units")
+        return "break"
 
     @staticmethod
     def _form_wheel_units(event: Any) -> int:
@@ -701,40 +661,6 @@ class DXFImportDialog:
                 return True
             current = getattr(current, "master", None)
         return False
-
-    def _on_form_mousewheel(self, event: Any) -> str | None:
-        units = self._form_wheel_units(event)
-        if units == 0:
-            return None
-
-        widget = getattr(event, "widget", None)
-        if widget is not None and widget is not self.form_canvas:
-            classification_canvas = getattr(self, "classification_canvas", None)
-            if (
-                classification_canvas is not None
-                and self._widget_is_descendant(widget, classification_canvas)
-            ):
-                if self._widget_can_scroll(classification_canvas, units):
-                    classification_canvas.yview_scroll(units, "units")
-                    return "break"
-                # At the top or bottom, fall through to the page canvas.
-            try:
-                widget_class = str(widget.winfo_class())
-            except Exception:
-                widget_class = ""
-            if widget_class in {"Treeview", "Text", "Listbox"}:
-                return None
-            if widget_class == "Canvas":
-                if self._widget_can_scroll(widget, units):
-                    widget.yview_scroll(units, "units")
-                    return "break"
-                # The inner list reached its boundary; continue with the
-                # STEP1–STEP7 page instead of trapping the mouse wheel.
-
-        if not self._widget_can_scroll(self.form_canvas, units):
-            return None
-        self.form_canvas.yview_scroll(units, "units")
-        return "break"
 
     def _on_main_window_configure(self, event: Any) -> None:
         if event.widget is not self.window:
@@ -771,10 +697,200 @@ class DXFImportDialog:
         except OSError:
             pass
 
-    def _build_engineering_review(self, parent: Any) -> None:
-        body = self.ttk.Panedwindow(parent, orient="horizontal")
+    def _build_high_impact_settings(self, parent: Any) -> None:
+        settings = self.ttk.Frame(parent)
+        settings.pack(fill="x", padx=10, pady=10)
+        self.layer_settings_button = self.ttk.Button(
+            settings,
+            text="圖層 ✓",
+            command=self._open_layer_settings,
+        )
+        self.layer_settings_button.pack(side="left", padx=(0, 6))
+        self.coordinate_settings_button = self.ttk.Button(
+            settings,
+            text="座標 ✓",
+            command=self._open_coordinate_settings,
+        )
+        self.coordinate_settings_button.pack(side="left", padx=6)
+        self.double_support_settings_button = self.ttk.Button(
+            settings,
+            text="雙路支撐 ✓",
+            command=self._open_double_support_settings,
+        )
+        self.double_support_settings_button.pack(side="left", padx=6)
 
-        member_frame = self.ttk.LabelFrame(body, text="STEP3 工程檢核項目")
+    def _focus_existing_settings_window(self, attribute: str) -> bool:
+        window = getattr(self, attribute, None)
+        if window is None:
+            return False
+        try:
+            if not window.winfo_exists():
+                setattr(self, attribute, None)
+                return False
+            window.deiconify()
+            window.lift()
+            window.focus_force()
+            return True
+        except self.tk.TclError:
+            setattr(self, attribute, None)
+            return False
+
+    def _close_settings_window(self, attribute: str) -> None:
+        window = getattr(self, attribute, None)
+        setattr(self, attribute, None)
+        if window is None:
+            return
+        try:
+            window.destroy()
+        except self.tk.TclError:
+            pass
+
+    def _open_layer_settings(self) -> None:
+        if self._focus_existing_settings_window("layer_settings_window"):
+            return
+        window = self.tk.Toplevel(self.window)
+        self.layer_settings_window = window
+        window.title(f"圖層設定 — {self.file_path.name}")
+        row_count = max(1, len(self.layer_use_vars))
+        window.geometry(f"620x{min(720, max(260, 145 + row_count * 30))}")
+        window.minsize(520, 240)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_settings_window("layer_settings_window"),
+        )
+
+        header = self.ttk.Frame(window)
+        header.pack(fill="x", padx=(12, 30), pady=(10, 4))
+        self.ttk.Label(
+            header,
+            text="圖層名稱",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.ttk.Label(
+            header,
+            text="用途",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).grid(row=0, column=1, sticky="w")
+        header.columnconfigure(0, weight=1)
+        header.columnconfigure(1, minsize=170)
+
+        host = self.ttk.Frame(window)
+        host.pack(fill="both", expand=True, padx=10)
+        canvas = self.tk.Canvas(host, highlightthickness=0, yscrollincrement=24)
+        scrollbar = self.ttk.Scrollbar(host, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        rows = self.ttk.Frame(canvas)
+        rows_window = canvas.create_window((0, 0), window=rows, anchor="nw")
+        rows.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(rows_window, width=event.width),
+        )
+        self.layer_settings_vars = {
+            layer: self.tk.StringVar(value=variable.get())
+            for layer, variable in self.layer_use_vars.items()
+        }
+        for row, (layer, variable) in enumerate(self.layer_settings_vars.items()):
+            self.ttk.Label(rows, text=layer).grid(
+                row=row, column=0, sticky="w", padx=(4, 10), pady=3
+            )
+            self.ttk.Combobox(
+                rows,
+                textvariable=variable,
+                values=self.LAYER_USE_OPTIONS,
+                state="readonly",
+                width=18,
+            ).grid(row=row, column=1, sticky="ew", padx=(0, 4), pady=3)
+        rows.columnconfigure(0, weight=1)
+        rows.columnconfigure(1, minsize=170)
+
+        footer = self.ttk.Frame(window)
+        footer.pack(fill="x", padx=10, pady=10)
+        self.ttk.Button(
+            footer,
+            text="取消",
+            command=lambda: self._close_settings_window("layer_settings_window"),
+        ).pack(side="right", padx=(6, 0))
+        self.ttk.Button(
+            footer,
+            text="套用",
+            command=self._apply_layer_settings_dialog,
+        ).pack(side="right")
+
+    def _commit_layer_settings(self, selected_uses: Mapping[str, str]) -> bool:
+        """Commit all temporary layer rows and start one recognition pass."""
+
+        normalized: dict[str, str] = {}
+        for layer in self.layer_use_vars:
+            selected = str(selected_uses.get(layer, "") or "")
+            if selected not in self.USE_TO_ROLE:
+                raise DXFImportError(
+                    f"圖層「{layer}」使用了不支援的用途：{selected or '空白'}"
+                )
+            normalized[layer] = selected
+        changed = any(
+            self.layer_use_vars[layer].get() != selected
+            for layer, selected in normalized.items()
+        )
+        if not changed and getattr(self, "result", None) is not None:
+            return False
+        for layer, selected in normalized.items():
+            self.layer_use_vars[layer].set(selected)
+        self._close_settings_window("coordinate_settings_window")
+        self._close_settings_window("double_support_settings_window")
+        self._convert_preview()
+        return True
+
+    def _apply_layer_settings_dialog(self) -> None:
+        from tkinter import messagebox
+
+        selected_uses = {
+            layer: variable.get()
+            for layer, variable in getattr(self, "layer_settings_vars", {}).items()
+        }
+        changed = any(
+            self.layer_use_vars[layer].get() != selected_uses.get(layer, "")
+            for layer in self.layer_use_vars
+        )
+        if changed and self._confirmed_item_snapshot():
+            if not messagebox.askyesno(
+                "重新設定圖層",
+                "重新設定圖層會重新辨識工程模型，部分已確認構件可能需要重新檢查。是否繼續？",
+                parent=self.layer_settings_window,
+            ):
+                return
+        try:
+            started = self._commit_layer_settings(selected_uses)
+        except DXFImportError as exc:
+            messagebox.showerror(
+                "圖層設定",
+                str(exc),
+                parent=self.layer_settings_window,
+            )
+            return
+        self._close_settings_window("layer_settings_window")
+        if not started:
+            self.status_var.set("圖層用途沒有變更，沿用目前辨識結果。")
+
+    def _build_engineering_review(self, parent: Any) -> None:
+        """Build the fixed navigator and independently scrolling detail pane."""
+
+        body = self.ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+
+        member_frame = self.ttk.LabelFrame(body, text="構件檢核")
+        member_frame.configure(width=260)
+        member_frame.grid(row=0, column=0, sticky="ns", padx=(0, 8))
+        member_frame.grid_propagate(False)
+        member_frame.rowconfigure(0, weight=1)
+        member_frame.columnconfigure(0, weight=1)
         self.member_tree = self.ttk.Treeview(
             member_frame,
             show="tree",
@@ -793,78 +909,178 @@ class DXFImportDialog:
                 foreground=self.LEVEL_COLORS[level],
             )
         self.member_tree.tag_configure("excluded", foreground="#78909c")
-        self.member_tree.pack(side="left", fill="both", expand=True)
-        member_scroll.pack(side="right", fill="y")
+        self.member_tree.grid(row=0, column=0, sticky="nsew")
+        member_scroll.grid(row=0, column=1, sticky="ns")
         self.member_tree.bind("<<TreeviewSelect>>", self._on_member_selected)
         self.member_tree_selection = TreeSelectionSynchronizer(
             self.member_tree,
             self.window.after_idle,
         )
 
-        detail_frame = self.ttk.LabelFrame(
-            body,
-            text="STEP4 項目明細、問題與既有調整",
+        detail_host = self.ttk.LabelFrame(body, text="詳細資訊")
+        detail_host.grid(row=0, column=1, sticky="nsew")
+        detail_host.rowconfigure(0, weight=1)
+        detail_host.columnconfigure(0, weight=1)
+        detail_background = self.ttk.Style(self.window).lookup(
+            "TFrame", "background"
         )
-        self.member_info_vars = {
+        self.review_detail_canvas = self.tk.Canvas(
+            detail_host,
+            background=detail_background or self.window.cget("background"),
+            borderwidth=0,
+            highlightthickness=0,
+            yscrollincrement=24,
+        )
+        review_scroll = self.ttk.Scrollbar(
+            detail_host,
+            orient="vertical",
+            command=self.review_detail_canvas.yview,
+        )
+        self.review_detail_canvas.configure(yscrollcommand=review_scroll.set)
+        self.review_detail_canvas.grid(row=0, column=0, sticky="nsew")
+        review_scroll.grid(row=0, column=1, sticky="ns")
+        self.review_detail_content = self.ttk.Frame(self.review_detail_canvas)
+        self.review_detail_content_window = self.review_detail_canvas.create_window(
+            (0, 0),
+            window=self.review_detail_content,
+            anchor="nw",
+        )
+        self.review_detail_content.bind(
+            "<Configure>", self._update_review_detail_scrollregion
+        )
+        self.review_detail_canvas.bind(
+            "<Configure>", self._resize_review_detail_content
+        )
+        self.window.bind(
+            "<MouseWheel>", self._on_review_detail_mousewheel, add="+"
+        )
+        self.window.bind(
+            "<Button-4>", self._on_review_detail_mousewheel, add="+"
+        )
+        self.window.bind(
+            "<Button-5>", self._on_review_detail_mousewheel, add="+"
+        )
+        self.review_detail_content.columnconfigure(0, weight=1)
+
+        data_frame = self.ttk.Frame(self.review_detail_content)
+        data_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
+        data_frame.columnconfigure(0, weight=38)
+        data_frame.columnconfigure(2, weight=62)
+        recognition_frame = self.ttk.LabelFrame(
+            data_frame,
+            text="DXF 辨識資料",
+        )
+        recognition_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.ttk.Separator(data_frame, orient="vertical").grid(
+            row=0, column=1, sticky="ns", padx=2
+        )
+        engineering_frame = self.ttk.LabelFrame(
+            data_frame,
+            text="工程資料",
+        )
+        engineering_frame.grid(row=0, column=2, sticky="nsew", padx=(8, 0))
+        engineering_frame.columnconfigure(0, weight=1)
+
+        self.recognition_info_vars = {
             key: self.tk.StringVar(value="—")
             for key in (
-                "id",
-                "status",
+                "display_id",
+                "system_status",
+                "human_status",
                 "role",
                 "layer",
-                "entities",
+                "handles",
+                "entity_types",
                 "method",
-                "reason",
+                "selection_source",
                 "source_width",
-                "start_x",
-                "start_y",
-                "end_x",
-                "end_y",
+                "confidence",
+                "centerline",
+                "engineering_candidate",
+                "warnings",
+                "exclusion_reason",
             )
         }
-        info_rows = (
-            ("構件編號", "id"),
-            ("狀態", "status"),
-            ("構件類型", "role"),
-            ("來源圖層", "layer"),
-            ("來源 DXF 圖元", "entities"),
-            ("辨識方法", "method"),
-            ("排除原因", "reason"),
-            ("圖面寬度 (mm)", "source_width"),
-            ("StartX", "start_x"),
-            ("StartY", "start_y"),
-            ("EndX", "end_x"),
-            ("EndY", "end_y"),
-        )
-        for row, (label, key) in enumerate(info_rows):
-            self.ttk.Label(detail_frame, text=f"{label}：").grid(
-                row=row,
-                column=0,
-                padx=(8, 4),
-                pady=2,
-                sticky="ne",
+        # Preserve the public-ish legacy attribute used by a few integrations.
+        self.member_info_vars = self.recognition_info_vars
+        for row, (label, key) in enumerate(
+            (
+                ("檢核項目", "display_id"),
+                ("系統狀態", "system_status"),
+                ("人工狀態", "human_status"),
+                ("角色", "role"),
+                ("來源圖層", "layer"),
+                ("來源圖元代碼（Handle）", "handles"),
+                ("圖元類型", "entity_types"),
+                ("辨識方法", "method"),
+                ("選擇來源", "selection_source"),
+                ("來源寬度 (mm)", "source_width"),
+                ("辨識信心度", "confidence"),
+                ("中心線", "centerline"),
+                ("工程線候選", "engineering_candidate"),
+                ("辨識警告", "warnings"),
+                ("排除原因", "exclusion_reason"),
+            )
+        ):
+            self.ttk.Label(recognition_frame, text=f"{label}：").grid(
+                row=row, column=0, padx=(7, 4), pady=2, sticky="ne"
             )
             self.ttk.Label(
-                detail_frame,
-                textvariable=self.member_info_vars[key],
-                wraplength=300,
+                recognition_frame,
+                textvariable=self.recognition_info_vars[key],
+                wraplength=240,
                 justify="left",
-            ).grid(row=row, column=1, padx=(0, 8), pady=2, sticky="nw")
+            ).grid(row=row, column=1, padx=(0, 7), pady=2, sticky="nw")
+        recognition_frame.columnconfigure(1, weight=1)
 
-        detail_frame.columnconfigure(1, weight=1)
-
-        material_row = len(info_rows)
-        self.material_spec_frame = self.ttk.LabelFrame(
-            detail_frame,
-            text="材料規格確認",
+        self.engineering_data_rows_frame = self.ttk.Frame(engineering_frame)
+        self.engineering_data_rows_frame.grid(
+            row=0, column=0, sticky="ew", padx=7, pady=(5, 2)
         )
-        self.material_spec_frame.grid(
-            row=material_row + 1,
+        self.engineering_data_rows_frame.columnconfigure(1, weight=1)
+        self.engineering_empty_var = self.tk.StringVar(
+            value="請從左側選擇檢核項目。"
+        )
+        self.engineering_empty_label = self.ttk.Label(
+            self.engineering_data_rows_frame,
+            textvariable=self.engineering_empty_var,
+            foreground="#607d8b",
+        )
+        self.engineering_empty_label.grid(row=0, column=0, sticky="w")
+        self._build_phase3_material_editor(engineering_frame)
+        self._build_phase3_waler_contact_editor(engineering_frame)
+
+        self._build_phase3_issue_section(self.review_detail_content)
+        self._build_phase3_modification_tools(self.review_detail_content)
+        self._build_phase3_candidate_section(self.review_detail_content)
+
+        # Keep the per-member confirmation action outside the scrolling detail
+        # canvas so it remains visible while reviewing long member data.
+        self.review_confirmation_frame = self.ttk.Frame(detail_host)
+        self.review_confirmation_frame.grid(
+            row=1,
             column=0,
             columnspan=2,
             sticky="ew",
             padx=8,
-            pady=(8, 2),
+            pady=(6, 8),
+        )
+        self.review_confirmation_button = self.ttk.Button(
+            self.review_confirmation_frame,
+            text="確認此構件",
+            command=self._confirm_selected_review_item,
+            state="disabled",
+        )
+        self.review_confirmation_button.pack(side="right")
+        self.review_confirmation_frame.grid_remove()
+
+    def _build_phase3_material_editor(self, parent: Any) -> None:
+        self.material_spec_frame = self.ttk.LabelFrame(
+            parent,
+            text="材料規格確認",
+        )
+        self.material_spec_frame.grid(
+            row=1, column=0, sticky="ew", padx=8, pady=(8, 2)
         )
         self.material_spec_var = self.tk.StringVar(value="")
         self.material_spec_status_var = self.tk.StringVar(value="")
@@ -886,23 +1102,19 @@ class DXFImportDialog:
             self.material_spec_frame,
             textvariable=self.material_spec_status_var,
             foreground="#455a64",
-            wraplength=300,
+            wraplength=400,
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 5))
         self.material_spec_frame.columnconfigure(1, weight=1)
         self.material_spec_frame.grid_remove()
 
+    def _build_phase3_waler_contact_editor(self, parent: Any) -> None:
         self.waler_contact_frame = self.ttk.LabelFrame(
-            detail_frame,
-            text="Waler 接觸位置調整",
+            parent,
+            text="圍令接觸位置調整",
         )
         self.waler_contact_frame.grid(
-            row=material_row + 2,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=8,
-            pady=(8, 6),
+            row=2, column=0, sticky="ew", padx=8, pady=(8, 6)
         )
         self.waler_contact_title_var = self.tk.StringVar(value="")
         self.waler_contact_displacement_var = self.tk.StringVar(
@@ -926,16 +1138,8 @@ class DXFImportDialog:
         self.ttk.Label(self.waler_contact_frame, text="採用值").grid(row=1, column=2)
         for row, (label, original_key, adopted_key) in enumerate(
             (
-                (
-                    "背填厚度 (mm)",
-                    "original_backfill_mm",
-                    "adopted_backfill_mm",
-                ),
-                (
-                    "圍令寬度 (mm)",
-                    "original_waler_width_mm",
-                    "adopted_waler_width_mm",
-                ),
+                ("背填厚度 (mm)", "original_backfill_mm", "adopted_backfill_mm"),
+                ("圍令寬度 (mm)", "original_waler_width_mm", "adopted_waler_width_mm"),
             ),
             start=2,
         ):
@@ -960,7 +1164,7 @@ class DXFImportDialog:
         self.ttk.Label(
             self.waler_contact_frame,
             textvariable=self.waler_contact_impact_var,
-            wraplength=300,
+            wraplength=400,
             justify="left",
         ).grid(row=6, column=0, columnspan=3, sticky="w", padx=6, pady=2)
         action = self.ttk.Frame(self.waler_contact_frame)
@@ -981,36 +1185,32 @@ class DXFImportDialog:
             self.waler_contact_frame,
             textvariable=self.waler_contact_status_var,
             foreground="#9a6700",
-            wraplength=300,
+            wraplength=400,
             justify="left",
         ).grid(row=8, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 5))
         self.waler_contact_frame.columnconfigure(1, weight=1)
         self.waler_contact_frame.columnconfigure(2, weight=1)
         self.waler_contact_frame.grid_remove()
 
+    def _build_phase3_issue_section(self, parent: Any) -> None:
         self.review_issue_frame = self.ttk.LabelFrame(
-            detail_frame,
-            text="此項目問題與建議處理方式",
+            parent,
+            text="問題／處理建議",
         )
         self.review_issue_frame.grid(
-            row=material_row,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=8,
-            pady=(8, 2),
+            row=1, column=0, sticky="ew", padx=8, pady=4
         )
         self.detail_problem_tree = self.ttk.Treeview(
             self.review_issue_frame,
             columns=("severity", "code", "description"),
             show="headings",
             selectmode="browse",
-            height=5,
+            height=1,
         )
         for column, title, width, anchor in (
-            ("severity", "等級", 60, "center"),
-            ("code", "代碼", 150, "w"),
-            ("description", "說明", 280, "w"),
+            ("severity", "等級", 70, "center"),
+            ("code", "代碼", 185, "w"),
+            ("description", "說明", 410, "w"),
         ):
             self.detail_problem_tree.heading(column, text=title)
             self.detail_problem_tree.column(
@@ -1024,155 +1224,157 @@ class DXFImportDialog:
                 level,
                 foreground=self.LEVEL_COLORS[level],
             )
-        detail_problem_scroll = self.ttk.Scrollbar(
-            self.review_issue_frame,
-            orient="vertical",
-            command=self.detail_problem_tree.yview,
-        )
-        self.detail_problem_tree.configure(
-            yscrollcommand=detail_problem_scroll.set,
-        )
         self.detail_problem_tree.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(6, 0),
-            pady=(6, 2),
-        )
-        detail_problem_scroll.grid(
-            row=0,
-            column=1,
-            sticky="ns",
-            padx=(0, 6),
-            pady=(6, 2),
+            row=0, column=0, sticky="ew", padx=6, pady=(6, 2)
         )
         self.detail_problem_tree.bind(
-            "<Double-Button-1>",
-            self._on_detail_problem_activated,
+            "<<TreeviewSelect>>", self._on_detail_problem_activated
         )
         self.detail_problem_tree.bind(
-            "<Return>",
-            self._on_detail_problem_activated,
+            "<Double-Button-1>", self._on_detail_problem_activated
         )
-        self.detail_problem_empty_var = self.tk.StringVar(value="請先選取檢核項目。")
+        self.detail_problem_tree.bind("<Return>", self._on_detail_problem_activated)
+        self.detail_problem_empty_var = self.tk.StringVar(
+            value="請先選取檢核項目。"
+        )
         self.ttk.Label(
             self.review_issue_frame,
             textvariable=self.detail_problem_empty_var,
             foreground="#455a64",
-            wraplength=420,
+            wraplength=700,
             justify="left",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(1, 3))
+        ).grid(row=1, column=0, sticky="w", padx=6, pady=(1, 3))
         self.detail_guidance_var = self.tk.StringVar(value="")
         self.ttk.Label(
             self.review_issue_frame,
-            text="建議處理方式",
+            text="處理建議",
             font=("Microsoft JhengHei", 9, "bold"),
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(3, 1))
+        ).grid(row=2, column=0, sticky="w", padx=6, pady=(3, 1))
         self.ttk.Label(
             self.review_issue_frame,
             textvariable=self.detail_guidance_var,
             foreground="#37474f",
-            wraplength=420,
+            wraplength=700,
             justify="left",
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
-        exclusion_action = self.ttk.Frame(self.review_issue_frame)
-        exclusion_action.grid(
-            row=4,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=6,
-            pady=(2, 4),
+        ).grid(row=3, column=0, sticky="ew", padx=6, pady=(0, 6))
+        self.review_issue_frame.columnconfigure(0, weight=1)
+
+    def _build_phase3_modification_tools(self, parent: Any) -> None:
+        self.modification_tools_frame = self.ttk.LabelFrame(
+            parent,
+            text="修改工具",
         )
+        self.modification_tools_frame.grid(
+            row=2, column=0, sticky="ew", padx=8, pady=4
+        )
+        self.modification_tools_frame.columnconfigure(0, weight=1)
+        self.geometry_tools_frame = self.ttk.Frame(self.modification_tools_frame)
+        self.geometry_tools_frame.grid(
+            row=0, column=0, sticky="ew", padx=7, pady=(5, 3)
+        )
+        self.ttk.Label(
+            self.geometry_tools_frame,
+            text="幾何",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).pack(side="left", padx=(0, 10))
+        self.candidate_pick_mode_var = self.tk.StringVar(value="")
+        self.endpoint_tools_frame = self.ttk.Frame(self.geometry_tools_frame)
+        self.endpoint_tools_frame.pack(side="left")
+        self.ttk.Radiobutton(
+            self.endpoint_tools_frame,
+            text="選起點",
+            variable=self.candidate_pick_mode_var,
+            value="pick_start",
+            command=lambda: self._begin_candidate_pick("pick_start"),
+        ).pack(side="left", padx=(0, 5))
+        self.ttk.Radiobutton(
+            self.endpoint_tools_frame,
+            text="選終點",
+            variable=self.candidate_pick_mode_var,
+            value="pick_end",
+            command=lambda: self._begin_candidate_pick("pick_end"),
+        ).pack(side="left", padx=5)
+        self.cad_engineering_line_button = self.ttk.Button(
+            self.geometry_tools_frame,
+            text="從 CAD 指定工程線",
+            command=self._read_cad_engineering_line,
+        )
+        self.cad_engineering_line_button.pack(side="left", padx=(10, 0))
+
+        self.source_tools_frame = self.ttk.Frame(self.modification_tools_frame)
+        self.source_tools_frame.grid(
+            row=1, column=0, sticky="ew", padx=7, pady=(3, 5)
+        )
+        self.ttk.Label(
+            self.source_tools_frame,
+            text="來源",
+            font=("Microsoft JhengHei", 9, "bold"),
+        ).pack(side="left", padx=(0, 10))
         self.source_exclusion_button = self.ttk.Button(
-            exclusion_action,
+            self.source_tools_frame,
             text="排除此 DXF 來源",
             command=self._on_source_exclusion_action,
             state="disabled",
         )
-        self.source_exclusion_button.pack(side="right")
+        self.source_exclusion_button.pack(side="left")
         self.source_exclusion_status_var = self.tk.StringVar(value="")
-        self.ttk.Label(
-            self.review_issue_frame,
+        self.source_exclusion_status_label = self.ttk.Label(
+            self.modification_tools_frame,
             textvariable=self.source_exclusion_status_var,
             foreground="#795548",
-            wraplength=420,
+            wraplength=700,
             justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
-        self.review_issue_frame.columnconfigure(0, weight=1)
-
-        candidate_frame = self.ttk.LabelFrame(
-            body,
-            text="STEP5 候選點（確認後才套用）",
         )
-        self.candidate_filter_var = self.tk.StringVar(value="all")
+        self.source_exclusion_status_label.grid(
+            row=2, column=0, sticky="ew", padx=7, pady=(0, 3)
+        )
+        self.cad_temp_status_label = self.ttk.Label(
+            self.modification_tools_frame,
+            textvariable=self.cad_temp_status_var,
+            foreground="#37474f",
+            wraplength=700,
+            justify="left",
+        )
+        self.cad_temp_status_label.grid(
+            row=3, column=0, sticky="ew", padx=7, pady=(0, 6)
+        )
+
+    def _build_phase3_candidate_section(self, parent: Any) -> None:
+        self.candidate_frame = self.ttk.LabelFrame(parent, text="候選點")
         self.candidate_action_status_var = self.tk.StringVar(
             value="請先選取構件；單擊候選點只會預覽。"
         )
         self.candidate_detail_var = self.tk.StringVar(value="候選點：—")
-        filter_row = self.ttk.Frame(candidate_frame)
-        filter_row.grid(
-            row=0,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=8,
-            pady=(6, 2),
-        )
-        for text, value in (
-            ("全部", "all"),
-            ("起點", "start"),
-            ("終點", "end"),
-            ("推薦", "recommended"),
-        ):
-            self.ttk.Radiobutton(
-                filter_row,
-                text=text,
-                variable=self.candidate_filter_var,
-                value=value,
-                command=self._on_candidate_filter_changed,
-            ).pack(side="left", padx=(0, 5))
         self.candidate_tree = self.ttk.Treeview(
-            candidate_frame,
-            columns=("id", "type", "world", "local", "status"),
+            self.candidate_frame,
+            columns=("point", "x", "y", "status"),
             show="headings",
             selectmode="browse",
-            height=11,
+            height=7,
         )
-        for column, text in (
-            ("id", "點"),
-            ("type", "用途／類型"),
-            ("world", "World X, Y"),
-            ("local", "Local X, Y"),
-            ("status", "狀態"),
+        for column, label, width, anchor in (
+            ("point", "點位", 180, "w"),
+            ("x", "X", 125, "e"),
+            ("y", "Y", 125, "e"),
+            ("status", "狀態", 260, "w"),
         ):
-            self.candidate_tree.heading(column, text=text)
-        self.candidate_tree.column("id", width=54, anchor="center", stretch=False)
-        self.candidate_tree.column("type", width=185, anchor="w")
-        self.candidate_tree.column("world", width=165, anchor="e")
-        self.candidate_tree.column("local", width=155, anchor="e")
-        self.candidate_tree.column("status", width=180, anchor="w")
+            self.candidate_tree.heading(column, text=label)
+            self.candidate_tree.column(column, width=width, anchor=anchor)
         candidate_scroll = self.ttk.Scrollbar(
-            candidate_frame,
+            self.candidate_frame,
             orient="vertical",
             command=self.candidate_tree.yview,
         )
         self.candidate_tree.configure(yscrollcommand=candidate_scroll.set)
         self.candidate_tree.grid(
-            row=1,
-            column=0,
-            sticky="nsew",
-            padx=(8, 0),
-            pady=(6, 5),
+            row=0, column=0, sticky="nsew", padx=(8, 0), pady=(6, 5)
         )
         candidate_scroll.grid(
-            row=1,
-            column=1,
-            sticky="ns",
-            padx=(0, 6),
-            pady=(6, 5),
+            row=0, column=1, sticky="ns", padx=(0, 6), pady=(6, 5)
         )
-        self.candidate_tree.bind("<<TreeviewSelect>>", self._on_candidate_point_selected)
+        self.candidate_tree.bind(
+            "<<TreeviewSelect>>", self._on_candidate_point_selected
+        )
         self.candidate_tree.bind("<Motion>", self._on_candidate_hover)
         self.candidate_tree.bind("<Leave>", self._clear_candidate_hover)
         self.candidate_tree_adapter = CandidateTreeAdapter(
@@ -1180,118 +1382,36 @@ class DXFImportDialog:
             self.window.after_idle,
         )
         self.ttk.Label(
-            candidate_frame,
+            self.candidate_frame,
             textvariable=self.candidate_detail_var,
             foreground="#607d8b",
-            wraplength=680,
+            wraplength=700,
             justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
-        pick_buttons = self.ttk.Frame(candidate_frame)
-        pick_buttons.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=2)
-        self.ttk.Button(
-            pick_buttons,
-            text="重新選擇起點",
-            command=lambda: self._begin_candidate_pick("pick_start"),
-        ).pack(side="left", padx=(0, 4))
-        self.ttk.Button(
-            pick_buttons,
-            text="重新選擇終點",
-            command=lambda: self._begin_candidate_pick("pick_end"),
-        ).pack(side="left", padx=4)
-        self.ttk.Button(
-            pick_buttons,
-            text="交換起終點",
-            command=self._swap_pending_points,
-        ).pack(side="left", padx=4)
-        commit_buttons = self.ttk.Frame(candidate_frame)
-        commit_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=2)
-        self.ttk.Button(
-            commit_buttons,
-            text="恢復系統推薦",
-            command=self._restore_recommended_points,
-        ).pack(side="left", padx=(0, 4))
-        self.ttk.Button(
-            commit_buttons,
-            text="取消修改",
-            command=self._cancel_candidate_changes,
-        ).pack(side="left", padx=4)
-        self.ttk.Button(
-            commit_buttons,
-            text="套用修改",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+        candidate_actions = self.ttk.Frame(self.candidate_frame)
+        candidate_actions.grid(
+            row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 3)
+        )
+        self.candidate_apply_button = self.ttk.Button(
+            candidate_actions,
+            text="套用選取點",
             command=self._apply_candidate_changes,
-        ).pack(side="right", padx=(4, 0))
-        self.ttk.Label(
-            candidate_frame,
-            textvariable=self.candidate_action_status_var,
-            foreground="#37474f",
-            wraplength=680,
-            justify="left",
-        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 6))
-        candidate_frame.rowconfigure(1, weight=1)
-        candidate_frame.columnconfigure(0, weight=1)
-
-        # Candidate picking is now primarily graphical in the independent
-        # preview. Keep this table as a compact precision/overlap fallback.
-        candidate_frame.configure(text="STEP5 候選點明細（精確選擇／備援）")
-        filter_row.grid_remove()
-        pick_buttons.grid_remove()
-        commit_buttons.grid_remove()
-        for widget in candidate_frame.grid_slaves(row=5):
-            widget.grid_remove()
-        self.candidate_tree.configure(
-            displaycolumns=("id", "type", "status"),
-            height=9,
-        )
-        self.candidate_tree.column("type", width=205, anchor="w")
-        self.candidate_tree.column("status", width=145, anchor="w")
-        self.candidate_tree.grid_configure(row=0, pady=(6, 4))
-        candidate_scroll.grid_configure(row=0, pady=(6, 4))
-        for widget in candidate_frame.grid_slaves(row=2):
-            widget.grid_configure(row=1, pady=(2, 6))
-        origin_action = self.ttk.Frame(candidate_frame)
-        origin_action.grid(
-            row=2,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            padx=8,
-            pady=(0, 7),
-        )
-        self.set_origin_button = self.ttk.Button(
-            origin_action,
-            text="以選定點設定局部原點",
-            command=self._set_selected_point_as_origin,
             state="disabled",
         )
-        self.set_origin_button.pack(side="left", padx=(0, 8))
+        self.candidate_apply_button.pack(side="right")
         self.ttk.Label(
-            origin_action,
-            text="此按鈕只使用表格目前選定的候選點，不使用預覽窗格點選。",
-            foreground="#455a64",
-            wraplength=360,
-            justify="left",
-        ).pack(side="left", fill="x", expand=True)
-        candidate_frame.rowconfigure(0, weight=1)
-        candidate_frame.rowconfigure(1, weight=0)
-        candidate_frame.rowconfigure(2, weight=0)
-
-        body.add(member_frame, weight=1)
-        body.add(detail_frame, weight=1)
-        body.add(candidate_frame, weight=1)
-
-        cad_frame = self.ttk.LabelFrame(parent, text="STEP6 從 CAD 重新指定工程線")
-        cad_frame.pack(side="bottom", fill="x", padx=6, pady=(0, 6))
-        self.ttk.Label(
-            cad_frame,
-            textvariable=self.cad_temp_status_var,
+            self.candidate_frame,
+            textvariable=self.candidate_action_status_var,
             foreground="#37474f",
-        ).pack(side="left", fill="x", expand=True, padx=8, pady=6)
-        self.ttk.Button(
-            cad_frame,
-            text="從 CAD 指定工程線",
-            command=self._read_cad_engineering_line,
-        ).pack(side="right", padx=8, pady=5)
-        body.pack(fill="both", expand=True, padx=5, pady=5)
+            wraplength=700,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 6))
+        self.candidate_frame.columnconfigure(0, weight=1)
+        self.candidate_frame.grid(
+            row=3, column=0, sticky="ew", padx=8, pady=4
+        )
+        self.candidate_frame.grid_remove()
+
 
     def _create_preview_canvas(self, parent: Any) -> None:
         old_canvas = getattr(self, "canvas", None)
@@ -1394,65 +1514,28 @@ class DXFImportDialog:
             text="滾輪縮放｜中鍵平移｜雙擊中鍵顯示全部",
             foreground="#555555",
         ).pack(side="right", padx=12)
-        review_toolbar = self.ttk.LabelFrame(
-            preview_window,
-            text="候選點與工程線修正",
-        )
+        review_toolbar = self.ttk.LabelFrame(preview_window, text="目前選取")
         review_toolbar.pack(fill="x", padx=8, pady=(0, 6))
-        review_actions = self.ttk.Frame(review_toolbar)
-        review_actions.pack(fill="x")
         self.ttk.Label(
-            review_actions,
+            review_toolbar,
             textvariable=self.preview_selected_member_var,
             font=("Microsoft JhengHei", 10, "bold"),
-        ).pack(side="left", padx=(8, 12), pady=5)
-        self.ttk.Button(
-            review_actions,
-            text="選起點",
-            command=lambda: self._begin_candidate_pick("pick_start"),
-        ).pack(side="left", padx=3, pady=4)
-        self.ttk.Button(
-            review_actions,
-            text="選終點",
-            command=lambda: self._begin_candidate_pick("pick_end"),
-        ).pack(side="left", padx=3, pady=4)
-        self.ttk.Button(
-            review_actions,
-            text="交換",
-            command=self._swap_pending_points,
-        ).pack(side="left", padx=3, pady=4)
-        self.ttk.Button(
-            review_actions,
-            text="恢復推薦",
-            command=self._restore_recommended_points,
-        ).pack(side="left", padx=(12, 3), pady=4)
-        self.ttk.Button(
-            review_actions,
-            text="取消修改",
-            command=self._cancel_candidate_changes,
-        ).pack(side="left", padx=3, pady=4)
-        self.ttk.Button(
-            review_actions,
-            text="套用修改",
+        ).pack(side="left", padx=8, pady=5)
+        self.preview_apply_candidate_button = self.ttk.Button(
+            review_toolbar,
+            text="套用選取點",
             command=self._apply_candidate_changes,
-        ).pack(side="left", padx=(12, 3), pady=4)
-
-        preview_filter = self.ttk.Frame(review_toolbar)
-        preview_filter.pack(fill="x", padx=8, pady=(0, 4))
-        self.ttk.Label(preview_filter, text="候選點：").pack(side="left")
-        for text, value in (
-            ("全部", "all"),
-            ("起點", "start"),
-            ("終點", "end"),
-            ("推薦", "recommended"),
-        ):
-            self.ttk.Radiobutton(
-                preview_filter,
-                text=text,
-                variable=self.candidate_filter_var,
-                value=value,
-                command=self._on_candidate_filter_changed,
-            ).pack(side="left", padx=2)
+            state="disabled",
+        )
+        self.preview_apply_candidate_button.pack(side="right", padx=(4, 8), pady=4)
+        self.preview_cancel_candidate_button = self.ttk.Button(
+            review_toolbar,
+            text="取消本次選點",
+            command=self._cancel_candidate_changes,
+            state="disabled",
+        )
+        self.preview_cancel_candidate_button.pack(side="right", padx=4, pady=4)
+        self._update_preview_candidate_action_state()
 
         # Keep the instruction on its own line so tool controls remain usable
         # on a single, narrower monitor.
@@ -1484,155 +1567,317 @@ class DXFImportDialog:
         except self.tk.TclError:
             pass
 
-    def _build_coordinate_system_settings(self, parent: Any) -> None:
-        frame = self.ttk.LabelFrame(parent, text="STEP2 座標系統狀態")
-        frame.pack(fill="x", padx=10, pady=(0, 8))
-        self.coordinate_mode_var = self.tk.StringVar(
-            value=("local" if self.selected_origin_world is not None else "world")
-        )
-        self.coordinate_error_var = self.tk.StringVar(value="")
-        self.coordinate_info_var = self.tk.StringVar(value="")
-        self.coordinate_example_var = self.tk.StringVar(value="")
+    def _formal_walers_for_coordinate_picker(self) -> tuple[Waler, ...]:
+        result = getattr(self, "result", None)
+        return tuple(result.walers) if result is not None else ()
 
-        self.ttk.Button(
-            frame,
-            text="使用原始 CAD 座標",
-            command=self._reset_coordinate_settings,
-        ).grid(row=0, column=0, padx=8, pady=(7, 3), sticky="w")
-        self.ttk.Label(
-            frame,
-            text="預設使用原始 CAD 座標。完成構件辨識後，可在 STEP5 候選點明細表格選取一點並設定為局部原點。",
-            foreground="#455a64",
-        ).grid(row=0, column=1, columnspan=4, padx=(12, 8), pady=(7, 3), sticky="w")
+    def _coordinate_candidates_for_waler(
+        self,
+        waler_id: str,
+    ) -> tuple[CandidatePoint, ...]:
+        if not any(
+            waler.id == waler_id
+            for waler in self._formal_walers_for_coordinate_picker()
+        ):
+            return ()
+        return tuple(self.candidate_point_store.component_points(waler_id))
 
-        self.tk.Label(frame, textvariable=self.coordinate_error_var, foreground="#c62828", anchor="w").grid(
-            row=1, column=0, columnspan=2, padx=8, pady=(1, 5), sticky="w"
+    def _open_coordinate_settings(self) -> None:
+        if self._focus_existing_settings_window("coordinate_settings_window"):
+            return
+        window = self.tk.Toplevel(self.window)
+        self.coordinate_settings_window = window
+        window.title("座標設定")
+        window.geometry("680x560")
+        window.minsize(580, 440)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_settings_window("coordinate_settings_window"),
         )
-        self.ttk.Label(frame, textvariable=self.coordinate_info_var).grid(
-            row=1, column=2, columnspan=2, padx=8, pady=(1, 5), sticky="w"
+        self.coordinate_settings_mode_var = self.tk.StringVar(
+            value=self.coordinate_mode_var.get()
         )
-        self.ttk.Label(frame, textvariable=self.coordinate_example_var, foreground="#455a64").grid(
-            row=1, column=4, padx=8, pady=(1, 5), sticky="e"
-        )
-        frame.columnconfigure(4, weight=1)
+        self.coordinate_settings_candidate = None
+        self.coordinate_settings_candidate_by_iid: dict[str, CandidatePoint] = {}
+        self.coordinate_settings_waler_by_iid: dict[str, str] = {}
+        self.coordinate_settings_status_var = self.tk.StringVar(value="")
 
-    def _build_diagnostics_tab(self, parent: Any, scrolledtext: Any) -> None:
-        summary_frame = self.ttk.LabelFrame(parent, text="DXF 匯入摘要")
-        summary_frame.pack(fill="x", padx=6, pady=(6, 3))
-        self.summary_file_var = self.tk.StringVar()
-        self.summary_totals_var = self.tk.StringVar()
-        self.ttk.Label(summary_frame, textvariable=self.summary_file_var, font=("Microsoft JhengHei", 10, "bold")).pack(anchor="w", padx=8, pady=(5, 2))
-        columns = ("role", "layer", "source", "recognized", "skipped")
-        self.summary_tree = self.ttk.Treeview(summary_frame, columns=columns, show="headings", height=7)
-        headings = {"role": "類別", "layer": "選定圖層", "source": "原始 DXF 圖元", "recognized": "辨識成功", "skipped": "略過"}
-        widths = {"role": 75, "layer": 460, "source": 105, "recognized": 105, "skipped": 80}
-        for column in columns:
-            self.summary_tree.heading(column, text=headings[column])
-            self.summary_tree.column(column, width=widths[column], anchor="center" if column != "layer" else "w")
-        self.summary_tree.pack(fill="x", padx=8, pady=2)
-        self.ttk.Label(summary_frame, textvariable=self.summary_totals_var).pack(anchor="w", padx=8, pady=(2, 5))
+        mode_frame = self.ttk.LabelFrame(window, text="座標模式")
+        mode_frame.pack(fill="x", padx=10, pady=(10, 6))
+        self.ttk.Radiobutton(
+            mode_frame,
+            text="世界座標",
+            variable=self.coordinate_settings_mode_var,
+            value="world",
+        ).pack(side="left", padx=10, pady=7)
+        self.ttk.Radiobutton(
+            mode_frame,
+            text="局部座標",
+            variable=self.coordinate_settings_mode_var,
+            value="local",
+        ).pack(side="left", padx=10, pady=7)
 
-        double_support_frame = self.ttk.LabelFrame(
-            parent,
-            text="雙路支撐候選（中心距離約 1000 mm）",
-        )
-        double_support_frame.pack(fill="x", padx=6, pady=3)
-        pair_columns = (
-            "status",
-            "members",
-            "spacing",
-            "angle",
-            "overlap",
-            "confidence",
-        )
-        self.double_support_tree = self.ttk.Treeview(
-            double_support_frame,
-            columns=pair_columns,
+        body = self.ttk.Panedwindow(window, orient="horizontal")
+        body.pack(fill="both", expand=True, padx=10, pady=6)
+        waler_frame = self.ttk.LabelFrame(body, text="① 選擇正式圍令")
+        candidate_frame = self.ttk.LabelFrame(body, text="② 選擇候選點")
+        body.add(waler_frame, weight=1)
+        body.add(candidate_frame, weight=2)
+
+        self.coordinate_settings_waler_tree = self.ttk.Treeview(
+            waler_frame,
+            columns=("waler",),
             show="headings",
             selectmode="browse",
-            height=3,
+            height=14,
         )
-        pair_headings = {
-            "status": "採用",
-            "members": "支撐",
-            "spacing": "中心距離(mm)",
-            "angle": "角度差",
-            "overlap": "重疊率",
-            "confidence": "可信度",
-        }
-        pair_widths = {
-            "status": 70,
-            "members": 180,
-            "spacing": 125,
-            "angle": 95,
-            "overlap": 95,
-            "confidence": 95,
-        }
-        for column in pair_columns:
-            self.double_support_tree.heading(
-                column,
-                text=pair_headings[column],
-            )
-            self.double_support_tree.column(
-                column,
-                width=pair_widths[column],
-                anchor="center",
-            )
-        self.double_support_tree.pack(
-            side="left",
-            fill="x",
-            expand=True,
-            padx=(8, 4),
-            pady=5,
+        self.coordinate_settings_waler_tree.heading("waler", text="正式圍令")
+        self.coordinate_settings_waler_tree.column("waler", width=150, anchor="w")
+        self.coordinate_settings_waler_tree.pack(fill="both", expand=True, padx=6, pady=6)
+        self.coordinate_settings_waler_tree.bind(
+            "<<TreeviewSelect>>",
+            self._on_coordinate_waler_selected,
         )
+        for index, waler in enumerate(self._formal_walers_for_coordinate_picker()):
+            iid = f"coordinate_waler_{index}"
+            self.coordinate_settings_waler_by_iid[iid] = waler.id
+            self.coordinate_settings_waler_tree.insert(
+                "", "end", iid=iid, values=(waler.id,)
+            )
+
+        self.coordinate_settings_candidate_tree = self.ttk.Treeview(
+            candidate_frame,
+            columns=("point", "x", "y"),
+            show="headings",
+            selectmode="browse",
+            height=14,
+        )
+        for column, label, width in (
+            ("point", "點位", 150),
+            ("x", "X", 120),
+            ("y", "Y", 120),
+        ):
+            self.coordinate_settings_candidate_tree.heading(column, text=label)
+            self.coordinate_settings_candidate_tree.column(
+                column,
+                width=width,
+                anchor="e" if column in {"x", "y"} else "w",
+            )
+        self.coordinate_settings_candidate_tree.pack(
+            fill="both", expand=True, padx=6, pady=6
+        )
+        self.coordinate_settings_candidate_tree.bind(
+            "<<TreeviewSelect>>",
+            self._on_coordinate_candidate_selected,
+        )
+
+        self.ttk.Label(
+            window,
+            textvariable=self.coordinate_settings_status_var,
+            foreground="#455a64",
+        ).pack(fill="x", padx=12, pady=(0, 4))
+        footer = self.ttk.Frame(window)
+        footer.pack(fill="x", padx=10, pady=(4, 10))
         self.ttk.Button(
-            double_support_frame,
-            text="切換採用／取消",
-            command=self._toggle_selected_double_support,
-        ).pack(side="right", padx=(4, 8), pady=5)
-        self.double_support_tree.bind(
-            "<Double-1>",
-            lambda _event: self._toggle_selected_double_support(),
+            footer,
+            text="取消",
+            command=lambda: self._close_settings_window(
+                "coordinate_settings_window"
+            ),
+        ).pack(side="right", padx=(6, 0))
+        self.ttk.Button(
+            footer,
+            text="套用",
+            command=self._apply_coordinate_settings_dialog,
+        ).pack(side="right")
+
+    def _on_coordinate_waler_selected(self, _event: Any = None) -> None:
+        tree = self.coordinate_settings_waler_tree
+        selection = tree.selection()
+        if not selection:
+            return
+        waler_id = self.coordinate_settings_waler_by_iid.get(selection[0], "")
+        if not waler_id:
+            return
+        self.coordinate_settings_candidate = None
+        candidate_tree = self.coordinate_settings_candidate_tree
+        candidate_tree.delete(*candidate_tree.get_children())
+        self.coordinate_settings_candidate_by_iid.clear()
+        for index, candidate in enumerate(
+            self._coordinate_candidates_for_waler(waler_id)
+        ):
+            iid = f"coordinate_candidate_{index}"
+            self.coordinate_settings_candidate_by_iid[iid] = candidate
+            candidate_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    candidate.id,
+                    f"{candidate.world_point[0]:.3f}",
+                    f"{candidate.world_point[1]:.3f}",
+                ),
+            )
+        self.coordinate_settings_status_var.set(
+            "請從右側選擇局部座標原點；點選只會暫存候選點，套用後才改座標。"
+        )
+        self._select_member(
+            waler_id,
+            refit=True,
+            clear_problem=True,
+            source="coordinate_dialog",
         )
 
-        validation_frame = self.ttk.LabelFrame(parent, text="驗證結果")
-        validation_frame.pack(fill="x", padx=6, pady=3)
-        self.validation_content = self.ttk.Frame(validation_frame)
-        self.validation_content.pack(fill="x", padx=8, pady=5)
+    def _preview_coordinate_candidate(self, candidate: CandidatePoint) -> None:
+        """Highlight an origin candidate without opening or focusing Preview."""
 
-        problem_frame = self.ttk.LabelFrame(parent, text="錯誤與警告（點選後自動定位）")
-        problem_frame.pack(fill="both", expand=True, padx=6, pady=3)
-        filters = self.ttk.Frame(problem_frame)
+        component_id = candidate.component_id
+        if component_id and component_id != self.selected_member_id:
+            self._select_member(
+                component_id,
+                refit=True,
+                clear_problem=True,
+                source="coordinate_dialog",
+            )
+        previous_bounds = self.preview_view_bounds
+        self._center_candidate_if_hidden(candidate)
+        if self.preview_view_bounds != previous_bounds:
+            self.render_scheduler.request(RenderDirty.FULL_SCENE)
+        self.selection_controller.preview_candidate_point(
+            candidate.id,
+            "coordinate_dialog",
+        )
+
+    def _on_coordinate_candidate_selected(self, _event: Any = None) -> None:
+        selection = self.coordinate_settings_candidate_tree.selection()
+        if not selection:
+            return
+        candidate = self.coordinate_settings_candidate_by_iid.get(selection[0])
+        if candidate is None:
+            return
+        self.coordinate_settings_candidate = candidate
+        self.coordinate_settings_status_var.set(
+            f"已選 {candidate.id}；按「套用」後才更新局部座標原點。"
+        )
+        self._preview_coordinate_candidate(candidate)
+
+    def _apply_coordinate_settings_dialog(self) -> None:
+        from tkinter import messagebox
+
+        mode = self.coordinate_settings_mode_var.get()
+        if mode == "world":
+            self._reset_coordinate_settings()
+        elif mode == "local":
+            candidate = self.coordinate_settings_candidate
+            if candidate is not None:
+                self._set_origin_from_candidate(candidate)
+            elif (
+                self.coordinate_mode_var.get() == "local"
+                and self.selected_origin_world is not None
+            ):
+                self._set_origin_from_world_point(self.selected_origin_world)
+            else:
+                messagebox.showwarning(
+                    "座標設定",
+                    "請先選擇正式圍令，再選擇一個候選點。",
+                    parent=self.coordinate_settings_window,
+                )
+                return
+        else:
+            return
+        self._close_settings_window("coordinate_settings_window")
+
+    def _build_diagnostics_tab(self, parent: Any, scrolledtext: Any) -> None:
+        self.all_problems_expanded = False
+        self.all_problems_button = self.ttk.Button(
+            parent,
+            text="▶ 全部問題清單（錯誤 0／警告 0）",
+            command=self._toggle_all_problems,
+        )
+        self.all_problems_button.pack(fill="x")
+
+        self.all_problems_content = self.ttk.LabelFrame(
+            parent,
+            text="錯誤與警告（點選後自動定位）",
+        )
+        filters = self.ttk.Frame(self.all_problems_content)
         filters.pack(fill="x", padx=6, pady=4)
         self.problem_filter_var = self.tk.StringVar(value="all")
-        for value, label in (("all", "全部"), ("error", "只看 Error"), ("warning", "只看 Warning")):
-            self.ttk.Radiobutton(filters, text=label, variable=self.problem_filter_var, value=value, command=self._refresh_problem_tree).pack(side="left", padx=(0, 8))
+        for value, label in (
+            ("all", "全部"),
+            ("error", "只看錯誤"),
+            ("warning", "只看警告"),
+        ):
+            self.ttk.Radiobutton(
+                filters,
+                text=label,
+                variable=self.problem_filter_var,
+                value=value,
+                command=self._refresh_problem_tree,
+            ).pack(side="left", padx=(0, 8))
         self.selected_only_var = self.tk.BooleanVar(value=False)
-        self.ttk.Checkbutton(filters, text="只看選定構件", variable=self.selected_only_var, command=self._refresh_problem_tree).pack(side="left", padx=8)
+        self.ttk.Checkbutton(
+            filters,
+            text="只看選定構件",
+            variable=self.selected_only_var,
+            command=self._refresh_problem_tree,
+        ).pack(side="left", padx=8)
 
-        problem_container = self.ttk.Frame(problem_frame)
+        problem_container = self.ttk.Frame(self.all_problems_content)
         problem_container.pack(fill="both", expand=True, padx=6, pady=(0, 6))
         problem_container.rowconfigure(0, weight=1)
         problem_container.columnconfigure(0, weight=1)
         columns = ("severity", "code", "component", "description")
-        self.problem_tree = self.ttk.Treeview(problem_container, columns=columns, show="headings", selectmode="browse", height=7)
-        headings = {"severity": "等級", "code": "類型", "component": "構件／來源", "description": "說明"}
-        widths = {"severity": 85, "code": 250, "component": 180, "description": 520}
+        self.problem_tree = self.ttk.Treeview(
+            problem_container,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            height=7,
+        )
+        headings = {
+            "severity": "等級",
+            "code": "類型",
+            "component": "構件／來源",
+            "description": "說明",
+        }
+        widths = {
+            "severity": 85,
+            "code": 250,
+            "component": 180,
+            "description": 520,
+        }
         for column in columns:
             self.problem_tree.heading(column, text=headings[column])
             self.problem_tree.column(column, width=widths[column], anchor="w")
-        self.problem_tree.tag_configure("critical", background="#ffcdd2", foreground="#8e0000")
-        self.problem_tree.tag_configure("error", background="#ffebee", foreground="#b71c1c")
-        self.problem_tree.tag_configure("warning", background="#fff8e1", foreground="#8d6e00")
-        self.problem_tree.tag_configure("info", background="#e3f2fd", foreground="#0d47a1")
+        self.problem_tree.tag_configure(
+            "critical", background="#ffcdd2", foreground="#8e0000"
+        )
+        self.problem_tree.tag_configure(
+            "error", background="#ffebee", foreground="#b71c1c"
+        )
+        self.problem_tree.tag_configure(
+            "warning", background="#fff8e1", foreground="#8d6e00"
+        )
+        self.problem_tree.tag_configure(
+            "info", background="#e3f2fd", foreground="#0d47a1"
+        )
         self.problem_tree.grid(row=0, column=0, sticky="nsew")
-        scrollbar = self.ttk.Scrollbar(problem_container, orient="vertical", command=self.problem_tree.yview)
+        scrollbar = self.ttk.Scrollbar(
+            problem_container,
+            orient="vertical",
+            command=self.problem_tree.yview,
+        )
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.problem_tree.configure(yscrollcommand=scrollbar.set)
         self.problem_tree.bind("<<TreeviewSelect>>", self._on_problem_selected)
 
-        self.developer_button = self.ttk.Button(parent, text="▶ 開發者模式（原始 JSON）", command=self._toggle_developer_mode)
-        self.developer_button.pack(fill="x", padx=6, pady=(3, 6))
+        self.developer_button = self.ttk.Button(
+            parent,
+            text="▶ 開發者模式（原始資料 JSON）",
+            command=self._toggle_developer_mode,
+        )
+        self.developer_button.pack(fill="x", pady=(3, 0))
         self.developer_frame = self.ttk.LabelFrame(parent, text="開發者模式")
         performance_row = self.ttk.Frame(self.developer_frame)
         performance_row.pack(fill="x", padx=5, pady=(5, 0))
@@ -1647,11 +1892,49 @@ class DXFImportDialog:
             textvariable=self.performance_diagnostics_var,
             foreground="#455a64",
         ).pack(side="left", fill="x", expand=True, padx=8)
-        self.debug_text = scrolledtext.ScrolledText(self.developer_frame, wrap="none", height=12, font=("Consolas", 9))
+        self.debug_text = scrolledtext.ScrolledText(
+            self.developer_frame,
+            wrap="none",
+            height=12,
+            font=("Consolas", 9),
+        )
         self.debug_text.pack(fill="both", expand=True, padx=5, pady=5)
 
+    def _toggle_all_problems(self) -> None:
+        self.all_problems_expanded = not self.all_problems_expanded
+        if self.all_problems_expanded:
+            self.all_problems_content.pack(
+                fill="both",
+                expand=True,
+                pady=(3, 0),
+                before=self.developer_button,
+            )
+        else:
+            self.all_problems_content.pack_forget()
+        self._update_all_problems_header()
+
+    def _update_all_problems_header(self) -> None:
+        button = getattr(self, "all_problems_button", None)
+        if button is None:
+            return
+        error_count = sum(
+            record.severity in ERROR_SEVERITIES
+            for record in getattr(self, "problem_records", ())
+        )
+        warning_count = sum(
+            record.severity == "warning"
+            for record in getattr(self, "problem_records", ())
+        )
+        icon = "▼" if getattr(self, "all_problems_expanded", False) else "▶"
+        button.configure(
+            text=(
+                f"{icon} 全部問題清單（錯誤 {error_count}／"
+                f"警告 {warning_count}）"
+            )
+        )
+
+
     def show(self) -> DXFImportDialogOutcome | None:
-        self.window.grab_set()
         self.window.wait_window()
         if self.dialog_action not in {"pause", "complete"}:
             return None
@@ -1669,7 +1952,7 @@ class DXFImportDialog:
         if self.world_result is None:
             return
         self._apply_coordinate_settings(show_error=False)
-        self.status_var.set("已恢復尚未完成的 DXF Review。")
+        self.status_var.set("已恢復尚未完成的 DXF 檢核。")
 
     def _convert_preview(self) -> None:
         self._clear_waler_adjustment_preview()
@@ -1678,7 +1961,13 @@ class DXFImportDialog:
         self.preview_view_bounds = None
         self.preview_fit_all = True
         self.status_var.set("DXF 正在辨識，請稍候……")
-        self.recognize_button.configure(state="disabled", text="辨識中……")
+        layer_button = getattr(
+            self,
+            "layer_settings_button",
+            getattr(self, "recognize_button", None),
+        )
+        if layer_button is not None:
+            layer_button.configure(state="disabled", text="圖層 …")
         self.apply_button.configure(state="disabled", text="不可匯入")
         try:
             self.window.configure(cursor="watch")
@@ -1754,6 +2043,7 @@ class DXFImportDialog:
     def _perform_conversion(self) -> None:
         from tkinter import messagebox
 
+        before_confirmed = self._confirmed_item_snapshot()
         try:
             if self.world_result is not None:
                 overrides = capture_manual_overrides(self.world_result)
@@ -1773,6 +2063,7 @@ class DXFImportDialog:
             self.excluded_sources = staged.excluded_sources
             self.last_manual_replay_report = replay_report
             self._apply_coordinate_settings(show_error=False)
+            self._finish_confirmation_mutation(before_confirmed)
         except Exception as exc:
             if isinstance(exc, DXFImportError):
                 error_text = str(exc)
@@ -1786,60 +2077,33 @@ class DXFImportDialog:
         finally:
             try:
                 self.window.configure(cursor="")
-                self.recognize_button.configure(
-                    state="normal",
-                    text="完成分類並開始辨識／重新辨識",
+                layer_button = getattr(
+                    self,
+                    "layer_settings_button",
+                    getattr(self, "recognize_button", None),
                 )
+                if layer_button is not None:
+                    layer_button.configure(state="normal", text="圖層 ✓")
             except self.tk.TclError:
                 pass
 
     def _reset_coordinate_settings(self) -> None:
-        self.coordinate_mode_var.set("world")
-        self.selected_origin_world = None
-        self._apply_coordinate_settings(show_error=False)
+        self._set_origin_from_world_point(None)
 
-    def _set_selected_point_as_origin(self) -> None:
-        if self.world_result is None:
-            self.coordinate_error_var.set("請先完成 DXF 辨識。")
-            return
-        state = self.selection_state
-        if state.selected_candidate_source != "candidate_tree":
-            self.coordinate_error_var.set(
-                "請在 STEP5 候選點明細表格中選取原點；預覽窗格選點僅用於修正起終點。"
-            )
-            return
-        candidate = self.candidate_point_store.get(
-            state.selected_component_id,
-            state.selected_candidate_point_id,
-        )
-        if candidate is None:
-            self.coordinate_error_var.set(
-                "請先選取構件，再於 STEP5 候選點明細表格選取要作為原點的點。"
-            )
-            return
+    def _set_origin_from_world_point(self, point: Point | None) -> None:
+        before_confirmed = self._confirmed_item_snapshot()
+        self.selected_origin_world = point
+        self.coordinate_mode_var.set("local" if point is not None else "world")
+        self._apply_coordinate_settings(show_error=False)
+        self._finish_confirmation_mutation(before_confirmed)
+
+    def _set_origin_from_candidate(self, candidate: CandidatePoint) -> None:
+        """Commit one explicit DXF-world candidate as the Local origin."""
+
         coordinate_system = coordinate_system_from_candidate(candidate)
-        self.selected_origin_world = (
-            coordinate_system.origin_x,
-            coordinate_system.origin_y,
+        self._set_origin_from_world_point(
+            (coordinate_system.origin_x, coordinate_system.origin_y)
         )
-        self.coordinate_mode_var.set("local")
-        self._apply_coordinate_settings(show_error=False)
-
-    def _update_set_origin_button_state(self) -> None:
-        button = getattr(self, "set_origin_button", None)
-        if button is None:
-            return
-        state = self.selection_state
-        candidate = self.candidate_point_store.get(
-            state.selected_component_id,
-            state.selected_candidate_point_id,
-        )
-        enabled = (
-            self.world_result is not None
-            and state.selected_candidate_source == "candidate_tree"
-            and candidate is not None
-        )
-        button.configure(state="normal" if enabled else "disabled")
 
     def _apply_coordinate_settings(
         self,
@@ -1893,6 +2157,7 @@ class DXFImportDialog:
         self.problem_records = build_problem_records(self.result)
         self.review_items = build_review_items(self.result, self.problem_records)
         self.review_item_by_key = {item.key: item for item in self.review_items}
+        self._prune_review_confirmations()
         selected_member_item = self._review_item_for_member_id(
             self.selected_member_id
         )
@@ -1911,8 +2176,6 @@ class DXFImportDialog:
             and selected_review_item.status in {"unresolved", "excluded"}
         ):
             self.focus_handles.update(selected_review_item.source_handles)
-        self._update_summary()
-        self._update_validation_overview()
         self._refresh_problem_tree()
         self._refresh_member_tree()
         self._update_selected_member_panel(
@@ -1929,19 +2192,19 @@ class DXFImportDialog:
             return
         coordinate = self.result.coordinate_system
         if self.coordinate_valid and coordinate.mode == "local":
-            mode_text = "Local Coordinates"
+            mode_text = "局部座標"
             origin_text = f"({coordinate.origin_x:.3f}, {coordinate.origin_y:.3f})"
         elif self.coordinate_valid:
-            mode_text = "World Coordinates"
+            mode_text = "世界座標"
             origin_text = "(0.000, 0.000)"
         else:
-            mode_text = "尚未套用（目前預覽 World Coordinates）"
+            mode_text = "尚未套用（目前預覽世界座標）"
             origin_text = "—"
         self.coordinate_info_var.set(
-            f"原始：World Coordinates　Origin：{origin_text}　Local = World - Origin"
+            f"原始：世界座標　原點：{origin_text}　局部座標＝世界座標－原點"
         )
         self.preview_coordinate_var.set(
-            f"Coordinate System｜Origin {origin_text}｜Current Mode：{mode_text}"
+            f"座標系統｜原點 {origin_text}｜目前模式：{mode_text}"
         )
 
         members = self._all_members()
@@ -1955,133 +2218,163 @@ class DXFImportDialog:
             else sample_world
         )
         self.coordinate_example_var.set(
-            f"範例 World ({sample_world[0]:.3f}, {sample_world[1]:.3f}) → "
-            f"Local ({sample_local[0]:.3f}, {sample_local[1]:.3f})"
+            f"範例世界座標 ({sample_world[0]:.3f}, {sample_world[1]:.3f}) → "
+            f"局部座標 ({sample_local[0]:.3f}, {sample_local[1]:.3f})"
         )
 
-    def _update_summary(self) -> None:
-        if self.result is None:
-            return
-        self.summary_file_var.set(f"檔名：{self.file_path.name}")
-        self.summary_tree.delete(*self.summary_tree.get_children())
-        recognized = {
-            "strut": len(self.result.struts),
-            "waler": len(self.result.walers),
-            "brace": len(self.result.braces),
-            "column": len(self.result.columns),
-            "beam": len(self.result.beams),
-            "corner_brace": len(self.result.corner_braces),
-            "continuous_wall": "—",
-            "auxiliary": 0,
-        }
-        skipped: Counter[str] = Counter()
-        skipped_keys: set[tuple[str, str, str]] = set()
-        for item in self.result.entity_debug:
-            if item.status not in {"ignored", "unsupported", "error"} or item.entity_type == "TEXT_SUMMARY":
-                continue
-            key = (item.role, item.handle, item.entity_type)
-            if key not in skipped_keys:
-                skipped_keys.add(key)
-                skipped[item.role] += 1
-        role_labels = {
-            "strut": "支撐",
-            "waler": "圍令",
-            "brace": "斜撐",
-            "column": "中間柱",
-            "beam": "托梁",
-            "corner_brace": "角撐",
-            "continuous_wall": "連續壁",
-            "auxiliary": "輔助線",
-        }
-        for role in (
-            "waler",
-            "strut",
-            "brace",
-            "column",
-            "beam",
-            "corner_brace",
-            "continuous_wall",
-            "auxiliary",
+
+    def _open_double_support_settings(self) -> None:
+        if self._focus_existing_settings_window(
+            "double_support_settings_window"
         ):
-            self.summary_tree.insert(
-                "",
-                "end",
-                values=(
-                    role_labels[role],
-                    "、".join(self.result.selected_layers.get(role, ())) or "—",
-                    self.result.source_entity_counts[role],
-                    recognized[role],
-                    skipped[role],
-                ),
-            )
-        counts = Counter(message.severity for message in self.result.messages)
-        self.summary_totals_var.set(
-            f"略過：{sum(skipped.values())}　　Warning：{counts['warning']}　　"
-            f"Error：{counts['error']}　　Critical：{counts['critical']}"
+            return
+        window = self.tk.Toplevel(self.window)
+        self.double_support_settings_window = window
+        window.title("雙路支撐設定")
+        window.geometry("680x420")
+        window.minsize(580, 320)
+        window.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: self._close_settings_window(
+                "double_support_settings_window"
+            ),
         )
-        self._refresh_double_support_tree()
+        self.double_support_settings_candidates = (
+            self._double_support_candidates_for_settings()
+        )
+        self.double_support_settings_tree = self.ttk.Treeview(
+            window,
+            columns=("first", "second", "spacing", "accepted"),
+            show="headings",
+            selectmode="browse",
+            height=12,
+        )
+        for column, label, width in (
+            ("first", "第一支撐", 130),
+            ("second", "第二支撐", 130),
+            ("spacing", "距離", 130),
+            ("accepted", "是否接受", 110),
+        ):
+            self.double_support_settings_tree.heading(column, text=label)
+            self.double_support_settings_tree.column(
+                column,
+                width=width,
+                anchor="center",
+            )
+        self.double_support_settings_tree.pack(
+            fill="both", expand=True, padx=10, pady=(10, 6)
+        )
+        self.double_support_settings_tree.bind(
+            "<Double-1>",
+            lambda _event: self._toggle_double_support_settings_candidate(),
+        )
+        self._refresh_double_support_settings_tree()
 
-    def _refresh_double_support_tree(self) -> None:
-        tree = getattr(self, "double_support_tree", None)
+        footer = self.ttk.Frame(window)
+        footer.pack(fill="x", padx=10, pady=(4, 10))
+        self.ttk.Button(
+            footer,
+            text="切換接受／不接受",
+            command=self._toggle_double_support_settings_candidate,
+        ).pack(side="left")
+        self.ttk.Button(
+            footer,
+            text="取消",
+            command=lambda: self._close_settings_window(
+                "double_support_settings_window"
+            ),
+        ).pack(side="right", padx=(6, 0))
+        self.ttk.Button(
+            footer,
+            text="套用",
+            command=self._apply_double_support_settings,
+        ).pack(side="right")
+
+    def _double_support_candidates_for_settings(self) -> tuple[Any, ...]:
+        result = getattr(self, "result", None)
+        return tuple(result.double_support_candidates) if result is not None else ()
+
+    def _refresh_double_support_settings_tree(self) -> None:
+        tree = getattr(self, "double_support_settings_tree", None)
         if tree is None:
             return
+        selected = tuple(tree.selection())
         tree.delete(*tree.get_children())
-        if self.result is None:
-            return
-        for candidate in self.result.double_support_candidates:
-            status = "採用" if candidate.accepted else "未採用"
-            if candidate.ambiguous:
-                status += "／歧義"
+        for candidate in getattr(
+            self,
+            "double_support_settings_candidates",
+            (),
+        ):
             tree.insert(
                 "",
                 "end",
                 iid=candidate.id,
                 values=(
-                    status,
-                    f"{candidate.first_strut_id} + {candidate.second_strut_id}",
+                    candidate.first_strut_id,
+                    candidate.second_strut_id,
                     f"{candidate.centerline_spacing:.1f}",
-                    f"{candidate.angle_difference_deg:.2f}°",
-                    f"{candidate.overlap_ratio:.1%}",
-                    f"{candidate.confidence:.0%}",
+                    "接受" if candidate.accepted else "不接受",
                 ),
             )
+        if selected and tree.exists(selected[0]):
+            tree.selection_set(selected[0])
 
-    def _toggle_selected_double_support(self) -> None:
-        if self.result is None:
-            return
-        selection = self.double_support_tree.selection()
+    def _toggle_double_support_settings_candidate(self) -> None:
+        selection = self.double_support_settings_tree.selection()
         if not selection:
             return
         candidate_id = str(selection[0])
+        candidates = self.double_support_settings_candidates
         candidate = next(
-            (
-                item
-                for item in self.result.double_support_candidates
-                if item.id == candidate_id
-            ),
+            (item for item in candidates if item.id == candidate_id),
             None,
         )
         if candidate is None:
             return
-        updated = set_double_support_candidate_accepted(
-            self.result.double_support_candidates,
-            candidate_id,
-            not candidate.accepted,
+        self.double_support_settings_candidates = (
+            set_double_support_candidate_accepted(
+                candidates,
+                candidate_id,
+                not candidate.accepted,
+            )
         )
-        identity_result = self.world_result or self.result
+        self._refresh_double_support_settings_tree()
+
+    def _apply_double_support_settings(self) -> None:
+        self._commit_double_support_candidates(
+            self.double_support_settings_candidates
+        )
+        self._close_settings_window("double_support_settings_window")
+
+
+    def _commit_double_support_candidates(
+        self,
+        updated: Sequence[Any],
+    ) -> bool:
+        """Commit all staged pair decisions with one association rebuild."""
+
+        if self.result is None:
+            return False
+        updated = tuple(updated)
+        previous_candidates = self.result.double_support_candidates
+        previous_by_id = {item.id: item for item in previous_candidates}
+        changed = tuple(
+            item
+            for item in updated
+            if item.id in previous_by_id
+            and previous_by_id[item.id].accepted != item.accepted
+        )
+        if not changed:
+            return False
+        before_confirmed = self._confirmed_item_snapshot()
+        identity_result = getattr(self, "world_result", None) or self.result
         if not hasattr(self, "double_support_decisions"):
             self.double_support_decisions = {}
-        previous_by_id = {
-            item.id: item for item in self.result.double_support_candidates
-        }
-        for item in updated:
-            previous = previous_by_id.get(item.id)
-            if previous is None or previous.accepted == item.accepted:
-                continue
+        for item in changed:
             identity = double_support_candidate_identity(identity_result, item)
             if identity is not None:
                 self.double_support_decisions[identity] = item.accepted
-        if self.world_result is not None:
+        if getattr(self, "world_result", None) is not None:
             coordinate_system = self.result.coordinate_system
             self.world_result = rebuild_component_associations(
                 replace(
@@ -2106,43 +2399,12 @@ class DXFImportDialog:
             preview_dirty=RenderDirty.FULL_SCENE,
             rebuild_candidate_tree=False,
         )
-        if self.double_support_tree.exists(candidate_id):
-            self.double_support_tree.selection_set(candidate_id)
+        self._finish_confirmation_mutation(before_confirmed)
+        return True
 
-    def _update_validation_overview(self) -> None:
-        for child in self.validation_content.winfo_children():
-            child.destroy()
-        if self.result is None:
-            return
-        items = list(build_validation_overview(self.result))
-        if not self.coordinate_valid:
-            items = [
-                item
-                for item in items
-                if not item.text.startswith(("使用局部座標", "使用原始 CAD 座標"))
-            ]
-            items.insert(
-                1,
-                ValidationOverviewItem(
-                    "error",
-                    self.coordinate_error_var.get() or "座標系統尚未套用",
-                ),
-            )
-        columns = 2
-        for index, item in enumerate(items):
-            icon = self.LEVEL_ICONS[item.level]
-            label = self.tk.Label(
-                self.validation_content,
-                text=f"{icon}  {item.text}",
-                foreground=self.LEVEL_COLORS[item.level],
-                anchor="w",
-                justify="left",
-            )
-            label.grid(row=index // columns, column=index % columns, sticky="w", padx=(0, 24), pady=2)
-        for column in range(columns):
-            self.validation_content.columnconfigure(column, weight=1)
 
     def _refresh_problem_tree(self) -> None:
+        self._update_all_problems_header()
         if not hasattr(self, "problem_tree"):
             return
         self.problem_tree.delete(*self.problem_tree.get_children())
@@ -2190,7 +2452,7 @@ class DXFImportDialog:
             self._focus_problem_record(record)
 
     def _focus_problem_record(self, record: ProblemRecord) -> None:
-        """Apply the shared STEP4/STEP7 preview-focus behavior."""
+        """Apply the shared detail/global-problem preview-focus behavior."""
 
         self.selected_problem = record
         self.focus_member_ids = set(record.member_ids)
@@ -2213,6 +2475,22 @@ class DXFImportDialog:
         self._open_preview_window()
         self.render_scheduler.request(RenderDirty.FULL_SCENE)
 
+    def _normalized_import_mode(self) -> str:
+        mode = str(self.mode_var.get() or "replace").strip().lower()
+        return mode if mode in {"replace", "append"} else "replace"
+
+    def _import_action_text(self, *, warning: bool = False) -> str:
+        mode_label = "取代" if self._normalized_import_mode() == "replace" else "附加"
+        action = "仍要完成匯入" if warning else "完成匯入"
+        return f"{action}（{mode_label}）"
+
+    def _on_import_mode_changed(self) -> None:
+        """Refresh the global action label when the batch import mode changes."""
+
+        self.import_mode = self._normalized_import_mode()
+        if self.result is not None:
+            self._update_import_controls()
+
     def _update_import_controls(self) -> None:
         if self.result is None:
             return
@@ -2224,24 +2502,41 @@ class DXFImportDialog:
             return
         counts = Counter(message.severity for message in self.result.messages)
         error_count = counts["error"] + counts["critical"]
+        unconfirmed_count = len(self._unconfirmed_formal_review_items())
         if error_count:
             self.apply_button.configure(state="disabled", text="不可匯入")
-            self.status_var.set(f"✗ 發現 {error_count} 項阻擋錯誤，請先修正問題列表中的 Error／Critical。")
-        elif counts["warning"]:
-            self.apply_button.configure(state="normal", text="仍要完成匯入")
-            self.status_var.set(f"⚠ 目前有 {counts['warning']} 項警告；建議先修正警告後再匯入。")
+            self.status_var.set(
+                f"✗ 發現 {error_count} 項阻擋錯誤，"
+                "請先修正問題列表中的錯誤／嚴重錯誤。"
+            )
+        elif counts["warning"] or unconfirmed_count:
+            self.apply_button.configure(
+                state="normal",
+                text=self._import_action_text(warning=True),
+            )
+            reminders = []
+            if counts["warning"]:
+                reminders.append(f"警告 {counts['warning']} 項")
+            if unconfirmed_count:
+                reminders.append(f"未人工確認構件 {unconfirmed_count} 個")
+            self.status_var.set(
+                "⚠ 目前仍有" + "、".join(reminders) + "；完成匯入前會再次確認。"
+            )
         else:
-            self.apply_button.configure(state="normal", text="完成匯入")
-            self.status_var.set("✓ 圖層與工程模型檢核通過，可以匯入 Solver。")
+            self.apply_button.configure(
+                state="normal",
+                text=self._import_action_text(),
+            )
+            self.status_var.set("✓ 圖層與工程模型檢核通過，可以匯入求解器。")
 
     def _toggle_developer_mode(self) -> None:
         self.developer_expanded = not self.developer_expanded
         if self.developer_expanded:
-            self.developer_button.configure(text="▼ 開發者模式（原始 JSON）")
+            self.developer_button.configure(text="▼ 開發者模式（原始資料 JSON）")
             self.developer_frame.pack(fill="both", padx=6, pady=(0, 6))
         else:
             self.developer_frame.pack_forget()
-            self.developer_button.configure(text="▶ 開發者模式（原始 JSON）")
+            self.developer_button.configure(text="▶ 開發者模式（原始資料 JSON）")
 
     def _all_members(
         self,
@@ -2281,6 +2576,98 @@ class DXFImportDialog:
         if item is not None:
             return item
         return self._review_item_for_member_id(self.selected_member_id)
+
+    def _is_review_item_confirmed(self, item: ReviewItem | None) -> bool:
+        confirmations = getattr(self, "review_confirmations", {})
+        result = getattr(self, "result", None)
+        return bool(
+            item is not None
+            and result is not None
+            and confirmations
+            and review_item_is_confirmed(
+                result,
+                item,
+                confirmations,
+            )
+        )
+
+    def _unconfirmed_formal_review_items(self) -> tuple[ReviewItem, ...]:
+        result = getattr(self, "result", None)
+        if result is None:
+            return ()
+        return unconfirmed_formal_review_items(
+            result,
+            getattr(self, "review_items", ()),
+            getattr(self, "review_confirmations", {}),
+        )
+
+    def _prune_review_confirmations(self) -> None:
+        result = getattr(self, "result", None)
+        if result is None:
+            return
+        self.review_confirmations = valid_review_confirmations(
+            result,
+            getattr(self, "review_items", ()),
+            getattr(self, "review_confirmations", {}),
+        )
+
+    def _confirmed_item_snapshot(self) -> dict[str, str]:
+        result = getattr(self, "result", None)
+        if result is None:
+            return {}
+        return {
+            identity: item.display_id
+            for item in getattr(self, "review_items", ())
+            if (identity := review_confirmation_identity(item)) is not None
+            and review_item_is_confirmed(
+                result,
+                item,
+                getattr(self, "review_confirmations", {}),
+            )
+        }
+
+    def _finish_confirmation_mutation(
+        self,
+        before_confirmed: Mapping[str, str],
+        *,
+        initiating_member_ids: Sequence[str] = (),
+    ) -> None:
+        """Prune changed signatures and report only collateral invalidations."""
+
+        self._prune_review_confirmations()
+        after_confirmed = self._confirmed_item_snapshot()
+        initiating = {str(value) for value in initiating_member_ids if str(value)}
+        invalidated = tuple(
+            display_id
+            for identity, display_id in before_confirmed.items()
+            if identity not in after_confirmed and display_id not in initiating
+        )
+        if not invalidated:
+            return
+        from tkinter import messagebox
+
+        messagebox.showinfo(
+            "構件確認已重設",
+            "以下已確認構件因本次修改受影響，已重設為未確認：\n\n"
+            + "、".join(dict.fromkeys(invalidated)),
+            parent=self.window,
+        )
+
+    def _confirm_selected_review_item(self) -> None:
+        item = self._selected_review_item()
+        if self.result is None or item is None or not review_item_can_be_confirmed(item):
+            return
+        try:
+            self.review_confirmations = confirm_review_item(
+                self.result,
+                item,
+                getattr(self, "review_confirmations", {}),
+            )
+        except ValueError:
+            return
+        self._refresh_member_tree()
+        self._update_recognition_data_panel(item, self._selected_member())
+        self._update_review_confirmation_action_state(item)
 
     def _excluded_source_for_review_item(
         self,
@@ -2350,11 +2737,11 @@ class DXFImportDialog:
             layer_roles=self.world_result.layer_classification,
         )
         if staged_world.source_fingerprint != self.world_result.source_fingerprint:
-            raise DXFImportError("Staging 的 DXF source fingerprint 不一致。")
+            raise DXFImportError("暫存檢核的 DXF 來源指紋不一致。")
         if self._source_geometry_signature(staged_world) != self._source_geometry_signature(
             self.world_result
         ):
-            raise DXFImportError("Staging 未完整保留原始 DXF source geometry。")
+            raise DXFImportError("暫存檢核未完整保留原始 DXF 來源幾何。")
         staged_result = apply_coordinate_system(
             staged_world,
             self.result.coordinate_system,
@@ -2423,8 +2810,8 @@ class DXFImportDialog:
             "",
             "重新計算後：",
             f"• 正式構件 {before_members} → {after_members}（{after_members - before_members:+d}）",
-            f"• Warning 變化：{warning_delta:+d}",
-            f"• Error／Critical 變化：{error_delta:+d}",
+            f"• 警告變化：{warning_delta:+d}",
+            f"• 錯誤／嚴重錯誤變化：{error_delta:+d}",
             f"• 人工輸入成功保留：{len(replay.preserved)}",
             f"• 人工輸入需要重新確認：{len(replay.needs_review)}",
             f"• 因來源仍被排除而停用：{len(replay.disabled)}",
@@ -2511,13 +2898,18 @@ class DXFImportDialog:
             identity,
             excluded=not restoring,
         )
+        before_confirmed = self._confirmed_item_snapshot()
         self._commit_source_exclusion_stage(
             stage,
             selected.key if selected is not None else "",
         )
+        self._finish_confirmation_mutation(
+            before_confirmed,
+            initiating_member_ids=((item.member_id,) if item.member_id else ()),
+        )
         action = "復原" if restoring else "排除"
         self.source_exclusion_status_var.set(
-            f"已{action} {item.display_id}；工程關聯與 Validation 已重新計算。"
+            f"已{action} {item.display_id}；工程關聯與檢核結果已重新計算。"
         )
 
     def _member_by_id(
@@ -2631,7 +3023,10 @@ class DXFImportDialog:
                         group_iid,
                         "end",
                         iid=iid,
-                        text=self._review_item_text(item),
+                        text=self._review_item_text(
+                            item,
+                            confirmed=self._is_review_item_confirmed(item),
+                        ),
                         tags=tags,
                     )
                     self.review_item_by_tree_iid[iid] = item.key
@@ -2671,7 +3066,12 @@ class DXFImportDialog:
             self._updating_member_tree = False
 
     @classmethod
-    def _review_item_text(cls, item: ReviewItem) -> str:
+    def _review_item_text(
+        cls,
+        item: ReviewItem,
+        *,
+        confirmed: bool = False,
+    ) -> str:
         if item.status == "excluded":
             return f"✕ {item.display_id}"
         icon = (
@@ -2681,8 +3081,9 @@ class DXFImportDialog:
         )
         manual = " ＊" if item.member_id and item.selection_source != "auto" else ""
         problem_count = f" ({item.problem_count})" if item.problem_count else ""
+        confirmation = " ✓" if confirmed else ""
         prefix = f"{icon} " if icon else ""
-        return f"{prefix}{item.display_id}{manual}{problem_count}"
+        return f"{prefix}{item.display_id}{manual}{problem_count}{confirmation}"
 
     @staticmethod
     def _review_group_text(
@@ -2703,29 +3104,11 @@ class DXFImportDialog:
         suffix = f"｜{' '.join(summary)}" if summary else ""
         return f"{label}（{len(items)}）{suffix}"
 
-    def _candidate_filter_accepts(self, candidate: CandidatePoint) -> bool:
-        member = self._selected_member()
-        if member is None:
-            return False
-        filter_mode = self.candidate_filter_var.get()
-        if filter_mode in {"start", "end"}:
-            return filter_mode in candidate.valid_for
-        if filter_mode == "recommended":
-            return bool(
-                candidate.recommended_for
-                or candidate.id
-                in {
-                    member.recommended_start_point_id,
-                    member.recommended_end_point_id,
-                }
-            )
-        return True
-
     def _candidate_row_values(
         self,
         member: Waler | Strut | Brace | AuxiliaryComponent,
         candidate: CandidatePoint,
-    ) -> tuple[str, str, str, str, str]:
+    ) -> tuple[str, str, str, str]:
         state = self.selection_state
         statuses: list[str] = []
         if candidate.id == member.recommended_start_point_id:
@@ -2733,28 +3116,433 @@ class DXFImportDialog:
         if candidate.id == member.recommended_end_point_id:
             statuses.append("推薦終點")
         if candidate.id == member.selected_start_point_id:
-            statuses.append("正式起點")
+            statuses.append("目前起點")
         if candidate.id == member.selected_end_point_id:
-            statuses.append("正式終點")
+            statuses.append("目前終點")
         if candidate.id == state.pending_start_point_id:
             statuses.append("待套用起點")
         if candidate.id == state.pending_end_point_id:
             statuses.append("待套用終點")
         if candidate.id == state.selected_candidate_point_id:
             statuses.append("目前選取")
-        marker = (
-            "●"
-            if candidate.id
-            in {state.pending_start_point_id, state.pending_end_point_id}
-            else "○"
-        )
         return (
-            f"{marker} {candidate.id}",
-            candidate.label,
-            f"{candidate.world_point[0]:.3f}, {candidate.world_point[1]:.3f}",
-            f"{candidate.local_point[0]:.3f}, {candidate.local_point[1]:.3f}",
+            f"{candidate.id}｜{candidate.label}",
+            f"{candidate.local_point[0]:.3f}",
+            f"{candidate.local_point[1]:.3f}",
             "、".join(statuses) or "候選",
         )
+
+    @staticmethod
+    def _review_role_label(role: str) -> str:
+        return {
+            "waler": "圍令",
+            "strut": "支撐",
+            "brace": "斜撐",
+            "column": "中間柱",
+            "beam": "托梁",
+            "corner_brace": "角撐",
+            "unknown": "未分類來源",
+        }.get(role, role or "未分類來源")
+
+    @staticmethod
+    def _review_display_value(value: Any) -> str:
+        if value is None or value == "":
+            return "—"
+        if isinstance(value, float):
+            return f"{value:.3f}"
+        if isinstance(value, (tuple, list, dict)):
+            if not value:
+                return "—"
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        return str(value)
+
+    @staticmethod
+    def _engineering_path_display(value: Any) -> str:
+        if not isinstance(value, (tuple, list)) or not value:
+            return "—"
+        points = []
+        for point in value:
+            if not isinstance(point, (tuple, list)) or len(point) < 2:
+                continue
+            try:
+                points.append(f"({float(point[0]):.3f}, {float(point[1]):.3f})")
+            except (TypeError, ValueError):
+                continue
+        return " → ".join(points) or "—"
+
+    @classmethod
+    def _engineering_crossings_display(cls, value: Any) -> str:
+        if not isinstance(value, (tuple, list)) or not value:
+            return "—"
+        lines: list[str] = []
+        for index, crossing in enumerate(value, start=1):
+            if not isinstance(crossing, Mapping):
+                continue
+            details = [
+                f"{index}. 支撐 {crossing.get('strut_id') or '—'}",
+                "支撐位置 "
+                + cls._review_display_value(crossing.get("strut_station"))
+                + " mm",
+                "托梁線段 "
+                + cls._review_display_value(crossing.get("beam_segment_index")),
+                "距離 "
+                + cls._review_display_value(crossing.get("distance"))
+                + " mm",
+            ]
+            local_point = crossing.get("local_point")
+            if local_point:
+                details.append("局部座標 " + cls._engineering_path_display((local_point,)))
+            world_point = crossing.get("world_point")
+            if world_point:
+                details.append("世界座標 " + cls._engineering_path_display((world_point,)))
+            method = str(crossing.get("recognition_method") or "")
+            if method:
+                details.append("辨識方式 " + recognition_method_label(method))
+            lines.append("｜".join(details))
+        return "\n".join(lines) or "—"
+
+    @classmethod
+    def _engineering_display_value(
+        cls,
+        member: Waler | Strut | Brace | AuxiliaryComponent,
+        field_name: str,
+        value: Any,
+    ) -> str:
+        if field_name in {"Path", "WorldPath", "LocalPath"}:
+            return cls._engineering_path_display(value)
+        if field_name == "Crossings":
+            return cls._engineering_crossings_display(value)
+        if field_name == "Remark" and member.recognition_method:
+            return (
+                f"DXF {recognition_method_label(member.recognition_method)}"
+                f"（信心度 {member.confidence:.0%}）"
+            )
+        return cls._review_display_value(value)
+
+    def _shared_layout_group_for_strut(self, strut_id: str) -> str:
+        result = getattr(self, "result", None)
+        if result is None:
+            return ""
+        group_number = 1
+        assigned: set[str] = set()
+        for candidate in result.double_support_candidates:
+            if not candidate.accepted:
+                continue
+            if (
+                candidate.first_strut_id in assigned
+                or candidate.second_strut_id in assigned
+            ):
+                continue
+            group_id = f"G{group_number}"
+            group_number += 1
+            assigned.update(
+                (candidate.first_strut_id, candidate.second_strut_id)
+            )
+            if strut_id in {
+                candidate.first_strut_id,
+                candidate.second_strut_id,
+            }:
+                return group_id
+        return ""
+
+    def _associated_strut_ids_for_member(
+        self,
+        member: AuxiliaryComponent,
+    ) -> tuple[str, ...]:
+        """Return every derived Strut relation while keeping primary first."""
+
+        result = getattr(self, "result", None)
+        identifiers: list[str] = []
+
+        def add(identifier: str) -> None:
+            value = str(identifier or "").strip()
+            if value and value not in identifiers:
+                identifiers.append(value)
+
+        add(member.associated_strut_id)
+        if isinstance(member, Beam):
+            for identifier in member.associated_strut_ids:
+                add(identifier)
+        if result is None:
+            return tuple(identifiers)
+        role = "column" if isinstance(member, Column) else "beam"
+        for association in result.component_associations:
+            if (
+                association.component_id == member.id
+                and association.component_role == role
+            ):
+                add(association.strut_id)
+        # The reverse fields are also persisted on Strut and provide a safe
+        # fallback for older restored review snapshots without association
+        # records.
+        for strut in result.struts:
+            associated_ids = (
+                strut.associated_columns
+                if isinstance(member, Column)
+                else strut.associated_beams
+            )
+            if member.id in associated_ids:
+                add(strut.id)
+        return tuple(identifiers)
+
+    def _engineering_data_rows(
+        self,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> tuple[tuple[str, str], ...]:
+        if member is None:
+            return ()
+        row = member.to_project_row()
+        if isinstance(member, Strut):
+            row = {
+                "StrutID": row.get("StrutID"),
+                "SharedLayoutGroup": self._shared_layout_group_for_strut(
+                    member.id
+                ),
+                **{
+                    key: value
+                    for key, value in row.items()
+                    if key != "StrutID"
+                },
+            }
+        elif isinstance(member, Column):
+            primary_id = str(row.pop("AssociatedStrutID", "") or "")
+            row = {
+                **row,
+                "PrimaryAssociatedStrutID": primary_id,
+                "AssociatedStrutIDs": ",".join(
+                    self._associated_strut_ids_for_member(member)
+                ),
+            }
+        role, _role_label = self._member_role(member)
+        rows = [
+            (
+                engineering_field_label(role, key),
+                self._engineering_display_value(member, key, value),
+            )
+            for key, value in row.items()
+        ]
+        rows.append(
+            (
+                engineering_field_label(role, "Length"),
+                f"{_distance(member.start, member.end):.3f}",
+            )
+        )
+        return tuple(rows)
+
+    def _update_engineering_data_panel(
+        self,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        frame = getattr(self, "engineering_data_rows_frame", None)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            child.destroy()
+        rows = self._engineering_data_rows(member)
+        if not rows:
+            self.engineering_empty_label = self.ttk.Label(
+                frame,
+                textvariable=self.engineering_empty_var,
+                foreground="#607d8b",
+            )
+            self.engineering_empty_label.grid(row=0, column=0, sticky="w")
+            return
+        for index, (label, value) in enumerate(rows):
+            self.ttk.Label(frame, text=f"{label}：").grid(
+                row=index, column=0, padx=(0, 5), pady=2, sticky="ne"
+            )
+            self.ttk.Label(
+                frame,
+                text=value,
+                wraplength=420,
+                justify="left",
+            ).grid(row=index, column=1, pady=2, sticky="nw")
+
+    def _update_recognition_data_panel(
+        self,
+        item: ReviewItem | None,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        variables = getattr(self, "recognition_info_vars", None)
+        if variables is None:
+            return
+        severity_labels = {
+            "success": "正常",
+            "info": "正常",
+            "warning": "警告",
+            "error": "錯誤",
+            "critical": "嚴重錯誤",
+        }
+        formal = bool(
+            item is not None
+            and item.status == "recognized"
+            and item.role in FORMAL_REVIEW_ROLES
+            and member is not None
+        )
+        values = {
+            "display_id": (
+                (item.display_id_before_exclusion or item.display_id)
+                if item is not None
+                else "—"
+            ),
+            "system_status": (
+                severity_labels.get(item.highest_severity, item.highest_severity)
+                if item is not None
+                else "—"
+            ),
+            "human_status": (
+                "已確認 ✓"
+                if formal and self._is_review_item_confirmed(item)
+                else ("未確認" if formal else "不適用")
+            ),
+            "role": self._review_role_label(item.role) if item else "—",
+            "layer": "、".join(item.source_layers) if item else "—",
+            "handles": ", ".join(item.source_handles) if item else "—",
+            "entity_types": (
+                "、".join(
+                    dxf_entity_type_label(value)
+                    for value in item.source_entity_types
+                )
+                if item
+                else "—"
+            ),
+            "method": (
+                recognition_method_label(member.recognition_method)
+                if member is not None
+                else (
+                    "已停止參與工程辨識"
+                    if item is not None and item.status == "excluded"
+                    else (
+                        "尚未形成正式工程構件"
+                        if item is not None
+                        else "—"
+                    )
+                )
+            ),
+            "selection_source": (
+                self._selection_source_label(member.selection_source)
+                if member is not None
+                else (
+                    self._selection_source_label(item.selection_source)
+                    if item is not None
+                    else "—"
+                )
+            ),
+            "source_width": (
+                f"{member.source_width:.3f}"
+                if member is not None and member.source_width > 0.0
+                else "—"
+            ),
+            "confidence": (
+                f"{member.confidence:.1%}" if member is not None else "—"
+            ),
+            "centerline": (
+                "已建立" if member is not None and member.centerline_computed
+                else ("未建立" if member is not None else "—")
+            ),
+            "engineering_candidate": (
+                member.selected_candidate_id or "—"
+                if member is not None
+                else "—"
+            ),
+            "warnings": (
+                "\n".join(member.warnings) or "—"
+                if member is not None
+                else "—"
+            ),
+            "exclusion_reason": (
+                item.exclusion_reason or "—" if item is not None else "—"
+            ),
+        }
+        for key, variable in variables.items():
+            variable.set(values.get(key, "—") or "—")
+
+    def _update_modification_tools(
+        self,
+        item: ReviewItem | None,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        frame = getattr(self, "modification_tools_frame", None)
+        if frame is None:
+            return
+        formal = bool(
+            item is not None
+            and item.status == "recognized"
+            and item.role in FORMAL_REVIEW_ROLES
+            and member is not None
+        )
+        has_candidates = bool(
+            formal and getattr(member, "candidate_points", ())
+        )
+        cad_supported = isinstance(member, (Waler, Strut, Brace))
+        source_supported = bool(
+            item is not None and item.role and item.source_handles
+        )
+
+        self.endpoint_tools_frame.pack_forget()
+        self.cad_engineering_line_button.pack_forget()
+        if has_candidates:
+            self.endpoint_tools_frame.pack(side="left")
+        if cad_supported:
+            self.cad_engineering_line_button.pack(side="left", padx=(10, 0))
+            self.cad_temp_status_label.grid()
+        else:
+            self.cad_temp_status_label.grid_remove()
+        if has_candidates or cad_supported:
+            self.geometry_tools_frame.grid()
+        else:
+            self.geometry_tools_frame.grid_remove()
+        if source_supported:
+            self.source_tools_frame.grid()
+            self.source_exclusion_status_label.grid()
+        else:
+            self.source_tools_frame.grid_remove()
+            self.source_exclusion_status_label.grid_remove()
+        if has_candidates or cad_supported or source_supported:
+            frame.grid()
+        else:
+            frame.grid_remove()
+
+    def _update_candidate_section_visibility(
+        self,
+        item: ReviewItem | None,
+        member: Waler | Strut | Brace | AuxiliaryComponent | None,
+    ) -> None:
+        frame = getattr(self, "candidate_frame", None)
+        if frame is None:
+            return
+        visible = bool(
+            item is not None
+            and item.status == "recognized"
+            and item.role in FORMAL_REVIEW_ROLES
+            and member is not None
+            and getattr(member, "candidate_points", ())
+        )
+        if visible:
+            frame.grid()
+        else:
+            frame.grid_remove()
+
+    def _update_preview_candidate_action_state(self) -> None:
+        """Keep candidate commit controls consistent across both windows."""
+
+        state = self.selection_state
+        has_member = self._selected_member() is not None
+        picking = state.mode in {"pick_start", "pick_end"}
+        pending_changed = has_member and (
+            state.pending_start_point_id != state.selected_start_point_id
+            or state.pending_end_point_id != state.selected_end_point_id
+        )
+        apply_state = "normal" if pending_changed and not picking else "disabled"
+        cancel_state = "normal" if pending_changed or picking else "disabled"
+        for attribute, button_state in (
+            ("candidate_apply_button", apply_state),
+            ("preview_apply_candidate_button", apply_state),
+            ("preview_cancel_candidate_button", cancel_state),
+        ):
+            button = getattr(self, attribute, None)
+            if button is not None:
+                button.configure(state=button_state)
 
     def _rebuild_candidate_tree(self) -> None:
         if not hasattr(self, "candidate_tree_adapter"):
@@ -2763,14 +3551,12 @@ class DXFImportDialog:
         if member is None:
             self.candidate_tree_adapter.rebuild("", (), lambda _point: ())
             self.performance_diagnostics.candidate_tree_rebuilds += 1
-            self._update_set_origin_button_state()
             return
         points = self.candidate_point_store.component_points(member.id)
         self.candidate_tree_adapter.rebuild(
             member.id,
             points,
             lambda point: self._candidate_row_values(member, point),
-            self._candidate_filter_accepts,
         )
         self.performance_diagnostics.candidate_tree_rebuilds += 1
         self.candidate_tree_adapter.sync_selection(
@@ -2779,7 +3565,6 @@ class DXFImportDialog:
         self.candidate_tree_adapter.set_hover(
             self.selection_state.hovered_candidate_point_id
         )
-        self._update_set_origin_button_state()
 
     def _update_candidate_tree_rows(self) -> None:
         member = self._selected_member()
@@ -2808,45 +3593,24 @@ class DXFImportDialog:
                 self._update_unresolved_source_panel(review_item)
             else:
                 self.preview_selected_member_var.set("目前構件：—")
-                for variable in self.member_info_vars.values():
-                    variable.set("—")
+                self._update_recognition_data_panel(review_item, None)
+                self.engineering_empty_var.set("此項目沒有正式工程資料。")
+                self._update_engineering_data_panel(None)
             self.candidate_detail_var.set("候選點：—")
             self._update_material_spec_panel(None)
             self._update_waler_contact_panel(None)
             if rebuild_candidates:
                 self._rebuild_candidate_tree()
+            self._update_candidate_section_visibility(review_item, None)
+            self._update_modification_tools(review_item, None)
             self._update_review_issue_panel(review_item)
             return
         _role, role_label = self._member_role(member)
         self.preview_selected_member_var.set(
             f"目前構件：{member.id}｜{role_label}｜圖層 {member.source_layer}"
         )
-        values = {
-            "id": member.id,
-            "status": "正式構件",
-            "role": role_label,
-            "layer": member.source_layer,
-            "entities": (
-                f"{', '.join(member.source_entity_types)}\n"
-                f"Handle: {', '.join(member.source_handles)}"
-            ),
-            "method": (
-                f"{member.recognition_method}｜"
-                f"{self._selection_source_label(member.selection_source)}"
-            ),
-            "reason": "—",
-            "source_width": (
-                f"{member.source_width:.3f}"
-                if member.source_width > 0.0
-                else "—"
-            ),
-            "start_x": f"{member.start[0]:.3f}",
-            "start_y": f"{member.start[1]:.3f}",
-            "end_x": f"{member.end[0]:.3f}",
-            "end_y": f"{member.end[1]:.3f}",
-        }
-        for key, value in values.items():
-            self.member_info_vars[key].set(value)
+        self._update_recognition_data_panel(review_item, member)
+        self._update_engineering_data_panel(member)
         self._update_material_spec_panel(member)
         self._update_waler_contact_panel(member)
         if rebuild_candidates:
@@ -2854,45 +3618,17 @@ class DXFImportDialog:
         else:
             self._update_candidate_tree_rows()
         self._update_candidate_detail_panel()
+        self._update_candidate_section_visibility(review_item, member)
+        self._update_modification_tools(review_item, member)
         self._update_review_issue_panel(review_item)
 
     def _update_unresolved_source_panel(self, item: ReviewItem) -> None:
-        role_labels = {
-            "waler": "圍令",
-            "strut": "支撐",
-            "brace": "斜撐",
-            "column": "中間柱",
-            "beam": "托梁",
-            "corner_brace": "角撐",
-            "unknown": "未分類來源",
-        }
-        layer_text = "、".join(item.source_layers) or "—"
-        entity_text = "、".join(item.source_entity_types) or "—"
-        handle_text = ", ".join(item.source_handles) or "—"
         self.preview_selected_member_var.set(
-            f"目前來源：{item.display_id}｜{role_labels.get(item.role, item.role or '未分類')}"
+            f"目前來源：{item.display_id}｜{self._review_role_label(item.role)}"
         )
-        excluded = item.status == "excluded"
-        values = {
-            "id": item.display_id_before_exclusion or item.display_id,
-            "status": "已排除" if excluded else "待修來源",
-            "role": role_labels.get(item.role, item.role or "未分類來源"),
-            "layer": layer_text,
-            "entities": f"{entity_text}\nHandle: {handle_text}",
-            "method": (
-                "已停止參與工程辨識"
-                if excluded
-                else "尚未形成正式工程構件"
-            ),
-            "reason": item.exclusion_reason or "—",
-            "source_width": "—",
-            "start_x": "—（無 active 正式工程幾何）",
-            "start_y": "—（無 active 正式工程幾何）",
-            "end_x": "—（無 active 正式工程幾何）",
-            "end_y": "—（無 active 正式工程幾何）",
-        }
-        for key, value in values.items():
-            self.member_info_vars[key].set(value)
+        self._update_recognition_data_panel(item, None)
+        self.engineering_empty_var.set("—（無 active 正式工程幾何）")
+        self._update_engineering_data_panel(None)
 
     def _update_review_issue_panel(self, item: ReviewItem | None) -> None:
         if not hasattr(self, "detail_problem_tree"):
@@ -2902,8 +3638,11 @@ class DXFImportDialog:
         )
         self.detail_problem_record_by_iid.clear()
         if item is None:
+            if hasattr(self.detail_problem_tree, "configure"):
+                self.detail_problem_tree.configure(height=1)
             self.detail_problem_empty_var.set("請先選取檢核項目。")
             self.detail_guidance_var.set("")
+            self._update_review_confirmation_action_state(None)
             self._update_source_exclusion_action_state(None)
             return
         for index, record in enumerate(item.problems):
@@ -2920,6 +3659,8 @@ class DXFImportDialog:
                 ),
                 tags=(record.severity,),
             )
+        if hasattr(self.detail_problem_tree, "configure"):
+            self.detail_problem_tree.configure(height=max(1, len(item.problems)))
         if item.problems:
             self.detail_problem_empty_var.set(
                 f"共 {item.problem_count} 項；雙擊問題或按 Enter 可在預覽中定位。"
@@ -2932,7 +3673,38 @@ class DXFImportDialog:
             if guidance
             else "目前不需要額外處理。"
         )
+        self._update_review_confirmation_action_state(item)
         self._update_source_exclusion_action_state(item)
+
+    def _update_review_confirmation_action_state(
+        self,
+        item: ReviewItem | None,
+    ) -> None:
+        button = getattr(self, "review_confirmation_button", None)
+        if button is None:
+            return
+        frame = getattr(self, "review_confirmation_frame", None)
+        visible = bool(
+            item is not None
+            and item.status == "recognized"
+            and item.role in FORMAL_REVIEW_ROLES
+        )
+        if frame is not None:
+            if visible:
+                frame.grid()
+            else:
+                frame.grid_remove()
+        confirmed = self._is_review_item_confirmed(item)
+        button.configure(
+            text="已確認 ✓" if confirmed else "確認此構件",
+            state=(
+                "normal"
+                if visible
+                and review_item_can_be_confirmed(item)
+                and not confirmed
+                else "disabled"
+            ),
+        )
 
     def _update_source_exclusion_action_state(
         self,
@@ -2973,7 +3745,7 @@ class DXFImportDialog:
                 f"已依圖面寬度 {member.source_width:g} mm 自動辨認；可人工改選。"
             )
         elif member.material_spec_source == "manual":
-            self.material_spec_status_var.set("已採用 STEP4 人工選擇。")
+            self.material_spec_status_var.set("已採用人工選擇。")
         elif member.source_width <= 0.0:
             self.material_spec_status_var.set("圖面沒有可靠寬度，請人工選擇。")
         else:
@@ -2985,6 +3757,7 @@ class DXFImportDialog:
         member = self._selected_member()
         if not isinstance(member, (Waler, Strut)) or self.world_result is None:
             return
+        before_confirmed = self._confirmed_item_snapshot()
         try:
             self.world_result = self.import_model_controller.apply_material_spec(
                 self.world_result,
@@ -2998,6 +3771,10 @@ class DXFImportDialog:
             show_error=False,
             preview_dirty=RenderDirty.DETAIL_PANEL,
             rebuild_candidate_tree=False,
+        )
+        self._finish_confirmation_mutation(
+            before_confirmed,
+            initiating_member_ids=(member.id,),
         )
 
     def _update_waler_contact_panel(
@@ -3026,7 +3803,7 @@ class DXFImportDialog:
         self._contact_panel_waler_id = member.id
         self._clear_waler_adjustment_preview()
         if review is None:
-            self.waler_contact_status_var.set("缺少 Waler contact review state。")
+            self.waler_contact_status_var.set("缺少圍令接觸位置檢核資料。")
             return
         for key, variable in self.waler_contact_value_vars.items():
             variable.set(self._dimension_text(getattr(review, key)))
@@ -3037,7 +3814,7 @@ class DXFImportDialog:
         elif review.backfill_recognition_method:
             self.waler_contact_status_var.set(
                 "背填圖面值已由連續壁內側線至圍令外側線量得"
-                f"（Handle: {review.continuous_wall_source_handle}）。"
+                f"（圖元代碼：{review.continuous_wall_source_handle}）。"
             )
         else:
             self.waler_contact_status_var.set(
@@ -3092,15 +3869,15 @@ class DXFImportDialog:
         except DXFImportError as exc:
             self._clear_waler_adjustment_preview()
             self.waler_contact_status_var.set(str(exc))
-            messagebox.showerror("Waler 接觸位置調整", str(exc), parent=self.window)
+            messagebox.showerror("圍令接觸位置調整", str(exc), parent=self.window)
             return
         self.waler_adjustment_preview_plan = plan
         self.waler_contact_displacement_var.set(
             f"接觸位置調整：{plan.contact_displacement:+.3f} mm"
         )
         self.waler_contact_impact_var.set(
-            "影響：Strut {0} 支、Brace {1} 支、CornerBrace {2} 支、"
-            "Column {3} 支、Beam {4} 支".format(
+            "影響：支撐 {0} 支、斜撐 {1} 支、角撐 {2} 支、"
+            "中間柱 {3} 支、托梁 {4} 支".format(
                 len(plan.strut_changes),
                 len(plan.brace_changes),
                 len(plan.corner_brace_changes),
@@ -3119,7 +3896,7 @@ class DXFImportDialog:
             else (
                 "預覽完成；套用時會從最新正式資料重新計算。"
                 if plan.can_apply
-                else "目前 DXF 結果仍有 blocking error，不能套用。"
+                else "目前 DXF 結果仍有阻擋錯誤，不能套用。"
             )
         )
         self.waler_contact_apply_button.configure(
@@ -3152,6 +3929,7 @@ class DXFImportDialog:
         member = self._selected_member()
         if not isinstance(member, Waler) or self.world_result is None:
             return
+        before_confirmed = self._confirmed_item_snapshot()
         try:
             # Deliberately ignore preview coordinates: the controller builds a
             # fresh plan from the current formal world_result before commit.
@@ -3165,12 +3943,16 @@ class DXFImportDialog:
         except DXFImportError as exc:
             self.waler_contact_status_var.set(str(exc))
             self.waler_contact_apply_button.configure(state="disabled")
-            messagebox.showerror("Waler 接觸位置調整", str(exc), parent=self.window)
+            messagebox.showerror("圍令接觸位置調整", str(exc), parent=self.window)
             return
         self._clear_waler_adjustment_preview()
         self._contact_panel_waler_id = ""
         self._apply_coordinate_settings(show_error=False)
         self.selection_controller.synchronize_formal_member()
+        self._finish_confirmation_mutation(
+            before_confirmed,
+            initiating_member_ids=(member.id,),
+        )
         self.waler_contact_status_var.set("已一次套用全部連動幾何與衍生資料。")
 
     def _update_candidate_detail_panel(self) -> None:
@@ -3187,14 +3969,6 @@ class DXFImportDialog:
             self._candidate_detail_text(candidate)
             if candidate is not None
             else "候選點：—"
-        )
-
-    def _on_candidate_filter_changed(self) -> None:
-        self._rebuild_candidate_tree()
-        self.render_scheduler.request(
-            RenderDirty.CANDIDATE_LAYER
-            | RenderDirty.CANDIDATE_SELECTION
-            | RenderDirty.TEMP_LINE
         )
 
     def _on_member_selected(self, _event: Any = None) -> None:
@@ -3245,9 +4019,9 @@ class DXFImportDialog:
         if hasattr(self, "candidate_action_status_var"):
             self.candidate_action_status_var.set(
                 (
-                    "此來源已排除；可於 STEP4 使用「復原此來源」。"
+                    "此來源已排除；可於修改工具使用「復原此來源」。"
                     if item.status == "excluded"
-                    else "此來源尚未形成正式構件；STEP5、STEP6 目前不適用。"
+                    else "此來源尚未形成正式構件；幾何修正工具目前不適用。"
                 )
             )
         self._update_selected_member_panel()
@@ -3281,14 +4055,17 @@ class DXFImportDialog:
             self.selected_review_item_key = review_item.key
         changed = self.selection_controller.select_component(member_id, source)
         if changed and hasattr(self, "candidate_action_status_var"):
+            if hasattr(self, "candidate_pick_mode_var"):
+                self.candidate_pick_mode_var.set("")
             self.candidate_action_status_var.set(
                 "單擊候選點只會預覽；請先選擇要修改起點或終點。"
             )
         if changed or review_changed:
-            # Keep STEP4/STEP5 responsive even when refitting a large DXF such as
+            # Keep the detail and candidate panels responsive when refitting a
+            # large DXF such as
             # Y29.  The scheduled render still updates the preview overlays, but
             # the form must not wait for a full-scene redraw before reflecting
-            # the component selected in STEP3.
+            # the component selected in the Review tree.
             self._update_selected_member_panel()
         if refit and (changed or review_changed):
             self.preview_view_bounds = None
@@ -3298,7 +4075,6 @@ class DXFImportDialog:
             self.candidate_action_status_var.set(
                 "可直接在預覽圖點擊藍色起點或紅色終點，再點選新的黃色候選點。"
             )
-        self._update_set_origin_button_state()
 
     @staticmethod
     def _selection_source_label(source: str) -> str:
@@ -3306,14 +4082,14 @@ class DXFImportDialog:
             "auto": "自動辨識",
             "manual_candidate_points": "人工候選點",
             "cad_manual": "CAD 人工指定",
-            "waler_contact_adjustment": "Waler 接觸位置調整",
+            "waler_contact_adjustment": "圍令接觸位置調整",
         }.get(source, source or "自動辨識")
 
     def _candidate_detail_text(self, candidate: CandidatePoint) -> str:
         return (
             f"{candidate.id}｜{candidate.label}\n"
-            f"World：({candidate.world_point[0]:.3f}, {candidate.world_point[1]:.3f})　"
-            f"Local：({candidate.local_point[0]:.3f}, {candidate.local_point[1]:.3f})"
+            f"世界座標：({candidate.world_point[0]:.3f}, {candidate.world_point[1]:.3f})　"
+            f"局部座標：({candidate.local_point[0]:.3f}, {candidate.local_point[1]:.3f})"
         )
 
     def _on_candidate_point_selected(self, _event: Any = None) -> None:
@@ -3330,7 +4106,6 @@ class DXFImportDialog:
             center_if_hidden=True,
             source="candidate_tree",
         )
-        self._update_set_origin_button_state()
 
     def _select_candidate_point(
         self,
@@ -3355,13 +4130,17 @@ class DXFImportDialog:
             self.render_scheduler.request(RenderDirty.FULL_SCENE)
         if not changed:
             return
+        if previous_mode in {"pick_start", "pick_end"} and hasattr(
+            self, "candidate_pick_mode_var"
+        ):
+            self.candidate_pick_mode_var.set("")
         if previous_mode == "pick_start":
             self.candidate_action_status_var.set(
-                f"已選擇待套用起點 {point_id}；按「套用修改」才會重建模型。"
+                f"已選擇待套用起點 {point_id}；按「套用選取點」才會重建模型。"
             )
         elif previous_mode == "pick_end":
             self.candidate_action_status_var.set(
-                f"已選擇待套用終點 {point_id}；按「套用修改」才會重建模型。"
+                f"已選擇待套用終點 {point_id}；按「套用選取點」才會重建模型。"
             )
 
         if changed and previous_mode == "pick_start":
@@ -3394,10 +4173,10 @@ class DXFImportDialog:
         )
         if not changed:
             return
+        if hasattr(self, "candidate_pick_mode_var"):
+            self.candidate_pick_mode_var.set(mode)
         prompt = "請選擇新的起點" if mode == "pick_start" else "請選擇新的終點"
-        self.candidate_filter_var.set("start" if mode == "pick_start" else "end")
         self.candidate_action_status_var.set(f"{prompt}（Esc 取消本次選點）")
-        self._rebuild_candidate_tree()
         self._open_preview_window()
         try:
             self.canvas.focus_set()
@@ -3414,6 +4193,8 @@ class DXFImportDialog:
     def _cancel_active_pick(self, _event: Any = None) -> str | None:
         if not self.selection_controller.cancel_pick():
             return None
+        if hasattr(self, "candidate_pick_mode_var"):
+            self.candidate_pick_mode_var.set("")
         self.candidate_action_status_var.set("已取消本次選點，待套用值維持不變。")
         return "break"
 
@@ -3425,13 +4206,15 @@ class DXFImportDialog:
     def _cancel_candidate_changes(self) -> None:
         if not self.selection_controller.cancel_pending():
             return
+        if hasattr(self, "candidate_pick_mode_var"):
+            self.candidate_pick_mode_var.set("")
         self.candidate_action_status_var.set("已取消待套用修改；正式模型未變更。")
 
     def _restore_recommended_points(self) -> None:
         if not self.selection_controller.restore_recommended_points():
             return
         self.candidate_action_status_var.set(
-            "已恢復系統推薦至待套用值；仍需按「套用修改」。"
+            "已恢復系統推薦至待套用值；仍需按「套用選取點」。"
         )
 
     def _apply_candidate_changes(self) -> None:
@@ -3467,6 +4250,7 @@ class DXFImportDialog:
             parent=message_parent,
         ):
             return
+        before_confirmed = self._confirmed_item_snapshot()
         try:
             self._clear_waler_adjustment_preview()
             self.world_result = self.import_model_controller.apply_pending(
@@ -3489,8 +4273,12 @@ class DXFImportDialog:
             rebuild_candidate_tree=False,
         )
         self.selection_controller.synchronize_formal_member()
+        self._finish_confirmation_mutation(
+            before_confirmed,
+            initiating_member_ids=(member.id,),
+        )
         self.candidate_action_status_var.set(
-            f"已套用 {member.id}，並重建連接、衍生資料及 Solver 輸入。"
+            f"已套用 {member.id}，並重建連接、衍生資料及求解器輸入。"
         )
 
     def _read_cad_engineering_line(self) -> None:
@@ -3508,13 +4296,14 @@ class DXFImportDialog:
         }
         if role not in supported_roles:
             self.cad_temp_status_var.set(
-                "目前 CAD Temp 僅支援圍令、支撐與斜撐工程線。"
+                "目前 CAD 暫存工程線僅支援圍令、支撐與斜撐。"
             )
             return
+        before_confirmed = self._confirmed_item_snapshot()
         try:
             event = self.cad_event_watcher.check_new_event()
             if event is None:
-                self.cad_temp_status_var.set("目前沒有待讀取的 CAD Temp 工程線。")
+                self.cad_temp_status_var.set("目前沒有待讀取的 CAD 暫存工程線。")
                 return
             operation = str(event.get("operation", "") or "").strip().lower()
             if operation == "update":
@@ -3530,12 +4319,12 @@ class DXFImportDialog:
                 }.get(str(event.get("type", "") or "").strip().lower(), "CAD update")
                 self.cad_temp_status_var.set(
                     f"{command_name} 事件已保留；"
-                    "請關閉 DXF 匯入視窗後由 Main 套用。"
+                    "請關閉 DXF 匯入視窗後由主畫面套用。"
                 )
                 return
             if operation == "cancel":
                 self.cad_temp_status_var.set(
-                    "SUPCLEAR 事件已保留；請關閉 DXF 匯入視窗後由 Main 清除。"
+                    "SUPCLEAR 事件已保留；請關閉 DXF 匯入視窗後由主畫面清除。"
                 )
                 return
             event_type = str(event.get("type", "")).strip().lower()
@@ -3545,7 +4334,7 @@ class DXFImportDialog:
                 )
             data = event.get("data")
             if not isinstance(data, Mapping):
-                raise DXFImportError("CAD Temp 缺少工程線座標資料。")
+                raise DXFImportError("CAD 暫存事件缺少工程線座標資料。")
             start = float(data["StartX"]), float(data["StartY"])
             end = float(data["EndX"]), float(data["EndY"])
             self.world_result, start_id, end_id = add_cad_candidate_points(
@@ -3578,6 +4367,10 @@ class DXFImportDialog:
             start_id,
             end_id,
             "cad_manual",
+        )
+        self._finish_confirmation_mutation(
+            before_confirmed,
+            initiating_member_ids=(member.id,),
         )
 
     def _on_candidate_hover(self, event: Any) -> None:
@@ -3837,6 +4630,7 @@ class DXFImportDialog:
             self._update_candidate_detail_panel()
         elif dirty & RenderDirty.DETAIL_PANEL:
             self._update_candidate_detail_panel()
+        self._update_preview_candidate_action_state()
         self.performance_diagnostics.record("render_flush", started_at)
         self._update_performance_diagnostics_display()
 
@@ -4316,7 +5110,7 @@ class DXFImportDialog:
 
     def _candidate_visible_in_preview(self, candidate: CandidatePoint) -> bool:
         mode = self.selection_state.mode
-        return self._candidate_filter_accepts(candidate) and not (
+        return not (
             mode == "pick_start" and "start" not in candidate.valid_for
             or mode == "pick_end" and "end" not in candidate.valid_for
         )
@@ -4523,32 +5317,43 @@ class DXFImportDialog:
                     continue
                 item_id = self.preview_scene.selection_items.pop(key)
                 self.canvas.delete(item_id)
+
+            def show_association(associated: object) -> None:
+                if not isinstance(
+                    associated,
+                    (Waler, Strut, Brace, AuxiliaryComponent),
+                ):
+                    return
+                associated_points = (
+                    associated.path
+                    if isinstance(associated, Beam) and associated.path
+                    else (associated.start, associated.end)
+                )
+                self.preview_renderer.create_line(
+                    "selection_overlay",
+                    *(
+                        coordinate
+                        for point in associated_points
+                        for coordinate in self._project_preview_point(point)
+                    ),
+                    overlay_key=(
+                        f"associated::{type(associated).__name__}::"
+                        f"{associated.id}"
+                    ),
+                    fill="#1565c0",
+                    width=5,
+                    dash=(3, 2),
+                )
+
             if isinstance(member, Strut):
-                associated_ids = (
+                for associated_id in (
                     *member.associated_columns,
                     *member.associated_beams,
-                )
-                for associated_id in associated_ids:
-                    associated = self._member_by_id(associated_id)
-                    if associated is None:
-                        continue
-                    associated_points = (
-                        associated.path
-                        if isinstance(associated, Beam) and associated.path
-                        else (associated.start, associated.end)
-                    )
-                    self.preview_renderer.create_line(
-                        "selection_overlay",
-                        *(
-                            coordinate
-                            for point in associated_points
-                            for coordinate in self._project_preview_point(point)
-                        ),
-                        overlay_key=f"associated::{associated_id}",
-                        fill="#1565c0",
-                        width=5,
-                        dash=(3, 2),
-                    )
+                ):
+                    show_association(self._member_by_id(associated_id))
+            elif isinstance(member, (Column, Beam)):
+                for strut_id in self._associated_strut_ids_for_member(member):
+                    show_association(self._member_by_id(strut_id))
         point = lambda point_id: self.candidate_point_store.get(
             state.selected_component_id,
             point_id,
@@ -4585,9 +5390,9 @@ class DXFImportDialog:
                     tooltip_id,
                     text=(
                         f"{hovered_point.id}  {hovered_point.label}\n"
-                        f"World ({hovered_point.world_point[0]:.3f}, "
+                        f"世界座標 ({hovered_point.world_point[0]:.3f}, "
                         f"{hovered_point.world_point[1]:.3f})\n"
-                        f"Local ({hovered_point.local_point[0]:.3f}, "
+                        f"局部座標 ({hovered_point.local_point[0]:.3f}, "
                         f"{hovered_point.local_point[1]:.3f})"
                         f"{endpoint_hint}"
                     ),
@@ -4602,7 +5407,23 @@ class DXFImportDialog:
             else:
                 width = max(self.canvas.winfo_width(), 100)
                 _role, role_label = self._member_role(hovered_member)
-                self.canvas.coords(bg_id, width - 330, 10, width - 10, 75)
+                association_text = ""
+                if isinstance(hovered_member, (Column, Beam)):
+                    associated_strut_ids = self._associated_strut_ids_for_member(
+                        hovered_member
+                    )
+                    if associated_strut_ids:
+                        association_text = (
+                            "\n關聯支撐：" + "、".join(associated_strut_ids)
+                        )
+                tooltip_bottom = 94 if association_text else 75
+                self.canvas.coords(
+                    bg_id,
+                    width - 330,
+                    10,
+                    width - 10,
+                    tooltip_bottom,
+                )
                 self.canvas.coords(text_id, width - 320, 17)
                 self.canvas.itemconfigure(bg_id, state="normal")
                 self.canvas.itemconfigure(
@@ -4612,6 +5433,7 @@ class DXFImportDialog:
                         f"圖層：{hovered_member.source_layer}\n"
                         "工程線來源："
                         f"{self._selection_source_label(hovered_member.selection_source)}"
+                        f"{association_text}"
                     ),
                     state="normal",
                 )
@@ -4762,7 +5584,7 @@ class DXFImportDialog:
                 "coordinate_axis",
                 x_end[0] - 4,
                 x_end[1] - 10,
-                text="X Axis",
+                text="X 軸",
                 fill="#000000",
                 anchor="e",
                 font=("Arial", 9, "bold"),
@@ -4771,21 +5593,21 @@ class DXFImportDialog:
                 "coordinate_axis",
                 y_end[0] + 7,
                 y_end[1] + 4,
-                text="Y Axis",
+                text="Y 軸",
                 fill="#000000",
                 anchor="nw",
                 font=("Arial", 9, "bold"),
             )
         coordinate_mode = (
-            "Local Coordinates"
+            "局部座標"
             if coordinate_system.mode == "local"
-            else "World Coordinates"
+            else "世界座標"
         )
         information = (
-            f"Coordinate System: {coordinate_mode}\n"
-            f"Origin: ({coordinate_system.origin_x:.3f}, "
+            f"座標系統：{coordinate_mode}\n"
+            f"原點：({coordinate_system.origin_x:.3f}, "
             f"{coordinate_system.origin_y:.3f})\n"
-            f"Zoom: {getattr(self, 'preview_zoom_factor', 1.0):.2f}x"
+            f"縮放：{getattr(self, 'preview_zoom_factor', 1.0):.2f}x"
         )
         renderer.create_rectangle(
             "coordinate_axis",
@@ -4888,6 +5710,7 @@ class DXFImportDialog:
     def _build_review_state(self) -> dict[str, Any]:
         """Capture JSON-safe review inputs plus an optional diagnostics snapshot."""
 
+        self._prune_review_confirmations()
         if self.result is not None:
             state = self.result.to_debug_dict()
         elif self._initial_state_matches_source:
@@ -4909,7 +5732,7 @@ class DXFImportDialog:
         )
         state.update(
             {
-                "review_state_version": 1,
+                "review_state_version": 2,
                 "source_path": str(self.file_path.resolve()),
                 "source_fingerprint": self.importer.source_fingerprint,
                 "layer_names": list(self.importer.layer_names),
@@ -4934,6 +5757,9 @@ class DXFImportDialog:
                         self.double_support_decisions
                     )
                 ),
+                "review_confirmations": serialize_review_confirmations(
+                    getattr(self, "review_confirmations", {})
+                ),
             }
         )
         return state
@@ -4953,18 +5779,29 @@ class DXFImportDialog:
             if not messagebox.askyesno(
                 "尚有未套用的工程線修正",
                 "目前起終點只存在於待套用狀態。\n"
-                "若繼續，Solver 將使用原本正式工程線。\n\n"
+                "若繼續，求解器將使用原本正式工程線。\n\n"
                 "確定不套用本次修改並繼續匯入嗎？",
                 parent=self.window,
             ):
                 return
-        warning_count = sum(message.severity == "warning" for message in self.result.messages)
-        if warning_count and not messagebox.askyesno(
-            "仍有警告",
-            f"目前仍有 {warning_count} 項警告。\n建議先修正警告後再匯入。\n\n確定仍要匯入嗎？",
-            parent=self.window,
-        ):
-            return
+        warning_count = sum(
+            message.severity == "warning" for message in self.result.messages
+        )
+        unconfirmed_count = len(self._unconfirmed_formal_review_items())
+        if warning_count or unconfirmed_count:
+            reminders = []
+            if warning_count:
+                reminders.append(f"• 警告：{warning_count} 項")
+            if unconfirmed_count:
+                reminders.append(f"• 未人工確認構件：{unconfirmed_count} 個")
+            if not messagebox.askyesno(
+                "完成匯入前確認",
+                "目前仍有：\n"
+                + "\n".join(reminders)
+                + "\n\n是否仍要完成匯入？",
+                parent=self.window,
+            ):
+                return
         self.import_mode = self.mode_var.get()
         self.review_state = self._build_review_state()
         self.dialog_action = "complete"

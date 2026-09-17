@@ -19,6 +19,7 @@ from bracing_optimizer.infrastructure.excel_result_export import (
 )
 from bracing_optimizer.application.optimize_support_zone import OptimizeSupportZone
 from bracing_optimizer.application.optimize_waler import OptimizeWaler
+from bracing_optimizer.application.optimize_waler_global import OptimizeWalerGlobal
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
     DxfCompatibilityChecker,
@@ -28,6 +29,7 @@ from bracing_optimizer.application.solver_input_builder import (
     SupportInputBuilder,
     WalerInputBuilder,
 )
+from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
 
 
 RESOURCE_DIR = Path(__file__).resolve().parent
@@ -69,6 +71,7 @@ def build_dependencies(
     inventory_path = resource_path / "data" / "inventory.json"
 
     project_service = build_project_service()
+    waler_solver_guard = WalerSolverBusyGuard()
 
     return AppDependencies(
         inventory_repository=JsonInventoryRepository(inventory_path),
@@ -79,9 +82,11 @@ def build_dependencies(
         cad_event_mapper=CadEventMapper(),
         excel_result_exporter=ExcelResultExporter(),
         make_waler_optimizer=OptimizeWaler,
+        make_waler_global_optimizer=lambda: OptimizeWalerGlobal(OptimizeWaler),
         make_support_optimizer=lambda cache: OptimizeSupportZone(cache),
         default_inventory_path=inventory_path,
         project_cases_dir=app_path / "project_cases",
+        waler_solver_guard=waler_solver_guard,
     )
 
 

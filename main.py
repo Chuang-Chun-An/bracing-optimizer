@@ -1,11 +1,13 @@
 import copy
 import json
+import logging
 import math
 import os
 import shutil
 import sys
 from collections import Counter
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
@@ -53,9 +55,11 @@ from dxf_import import (
     review_state_matches_source,
     source_file_fingerprint,
 )
+from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
 from bracing_optimizer.presentation.cad_view_interaction import (
     CADViewInteractionController,
 )
+from bracing_optimizer.presentation.field_labels import build_table_column_labels
 from bracing_optimizer.infrastructure.dxf_result_export import (
     DXFResultExportError,
     ExportPiece,
@@ -89,6 +93,7 @@ from bracing_optimizer.presentation import (
     SupportSolverDialog,
     TextRedirector,
     WalerSelectionDialog,
+    WalerGlobalSolverDialog,
     WalerSolverDialog,
     ZoningSelectionDialog,
     format_result_list,
@@ -104,6 +109,19 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else RESOURCE_DIR
 )
+LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class WalerGlobalApplyOutcome:
+    """Distinguish data commit from best-effort UI refresh."""
+
+    committed: bool
+    refreshed: bool
+    error: str = ""
+    refresh_error: str = ""
+
+
 def point_on_line_by_station(start_x, start_y, end_x, end_y, station):
     """
     根據起點、終點與沿線 station 距離，回傳該點的 X,Y 座標。
@@ -346,6 +364,19 @@ class SupportInputApp:
         except AttributeError as exc:
             raise RuntimeError("Solver Input Builder 尚未由 bootstrap 注入。") from exc
 
+    def _ensure_waler_solver_guard(self):
+        guard = getattr(self, "waler_solver_guard", None)
+        if guard is None:
+            guard = WalerSolverBusyGuard()
+            self.waler_solver_guard = guard
+        return guard
+
+    def _show_waler_solver_busy(self, workflow):
+        LOGGER.warning("%s Waler blocked by busy guard", workflow)
+        message = "目前已有圍令計算正在執行，請等待完成後再試。"
+        messagebox.showwarning("圍令計算中", message, parent=self.root)
+        self.show_result(message)
+
     def _apply_dependencies(self, dependencies: AppDependencies) -> None:
         """Attach one dependency graph without constructing implementations."""
 
@@ -364,6 +395,8 @@ class SupportInputApp:
         self.cad_event_mapper = dependencies.cad_event_mapper
         self.excel_result_exporter = dependencies.excel_result_exporter
         self.make_waler_optimizer = dependencies.make_waler_optimizer
+        self.make_waler_global_optimizer = dependencies.make_waler_global_optimizer
+        self.waler_solver_guard = dependencies.waler_solver_guard
         self.make_support_optimizer = dependencies.make_support_optimizer
         self.default_inventory_path = Path(dependencies.default_inventory_path)
         self.data_dir = self.default_inventory_path.parent
@@ -501,63 +534,7 @@ class SupportInputApp:
         }
         self.settings_tab_label = self.workspace_tab_labels["materials"]
 
-        self.table_column_labels = {
-            "walers": {
-                "No": "列號",
-                "WalerID": "圍令編號",
-                "StartX": "起點X",
-                "StartY": "起點Y",
-                "EndX": "終點X",
-                "EndY": "終點Y",
-                "material_spec": "材料規格",
-                "Remark": "備註",
-            },
-            "struts": {
-                "No": "列號",
-                "StrutID": "支撐編號",
-                "SharedLayoutGroup": "雙路群組",
-                "FromWaler": "起點圍令",
-                "ToWaler": "終點圍令",
-                "StartX": "起點X",
-                "StartY": "起點Y",
-                "EndX": "終點X",
-                "EndY": "終點Y",
-                "material_spec": "材料規格",
-                "BeamPositions": "托梁位置(mm)",
-                "ColumnPositions": "中間柱位置(mm)",
-                "AssociatedColumnIDs": "關聯中間柱",
-                "AssociatedBeamIDs": "關聯托梁",
-                "FromBraceToWalerStartLen": "起點角撐長度(往圍令起點)",
-                "FromBraceToWalerEndLen": "起點角撐長度(往圍令終點)",
-                "ToBraceToWalerStartLen": "終點角撐長度(往圍令起點)",
-                "ToBraceToWalerEndLen": "終點角撐長度(往圍令終點)",
-                "TargetJackRegion": "目標千斤頂區域",
-                "Zoning": "分區",
-            },
-            "braces": {
-                "No": "列號",
-                "BraceID": "斜撐編號",
-                "FromWaler": "起點圍令",
-                "ToWaler": "終點圍令",
-                "StartX": "起點X",
-                "StartY": "起點Y",
-                "EndX": "終點X",
-                "EndY": "終點Y",
-            },
-            "inventory": {
-                "No": "列號",
-                "ItemCode": "機料編號",
-                "Spec": "規格",
-                "Usage": "用途",
-                "Length": "料長(mm)",
-                "Qty": "庫存數量",
-            },
-            "material_specs": {
-                "No": "列號",
-                "Usage": "用途",
-                "Spec": "材料規格",
-            },
-        }
+        self.table_column_labels = build_table_column_labels()
 
         self.numeric_columns = {
             "walers": ["StartX", "StartY", "EndX", "EndY"],
@@ -700,6 +677,11 @@ class SupportInputApp:
         add_context_button("validate", "驗證資料", self.validate_data)
         add_context_button("redraw", "更新圖面", self.update_preview)
         add_context_button("waler_solver", "執行圍令配置", self._open_waler_solver)
+        add_context_button(
+            "waler_global_solver",
+            "全部圍令最佳化",
+            self._open_waler_global_solver,
+        )
         self.run_support_solver_button = ttk.Button(
             self.context_toolbar,
             text="支撐配置",
@@ -4147,18 +4129,24 @@ class SupportInputApp:
         result = item.get("result")
 
         if result_type == "waler":
-            waler_id = ""
+            waler_id = ProjectResultModel.waler_result_identity(
+                result_id,
+                item,
+            )
             option_index = None
             if isinstance(result, dict):
-                waler_id = str(result.get("waler_id", "")).strip()
                 option_index = result.get("option_index")
-            if not waler_id:
-                waler_id = str(result_id).split("-方案", 1)[0]
-            child_label = (
-                f"方案{option_index}"
-                if option_index is not None
-                else str(result_id).replace(f"{waler_id}-", "")
-            )
+            if option_index is None:
+                child_label = str(result_id).replace(f"{waler_id}-", "")
+            elif isinstance(result, dict) and result.get("global_selected"):
+                child_label = f"全域方案{option_index}"
+            elif (
+                isinstance(result, dict)
+                and result.get("result_series") == "single"
+            ):
+                child_label = f"單支方案{option_index}"
+            else:
+                child_label = f"方案{option_index}"
             if isinstance(result, dict) and result.get("manual_modified"):
                 plan = result.get("selected_plan") or {}
                 legality = plan.get("legality") or {}
@@ -4168,13 +4156,24 @@ class SupportInputApp:
                 option_sort = int(option_index)
             except (TypeError, ValueError):
                 option_sort = 9999
+            series_sort = (
+                0
+                if isinstance(result, dict) and result.get("global_selected")
+                else 1
+            )
             return {
                 "group_iid": self._result_group_iid("waler", waler_id),
                 "group_id": waler_id,
                 "group_label": waler_id,
                 "child_label": child_label,
                 "type_label": "圍令",
-                "sort_key": (0, waler_id, option_sort, str(result_id)),
+                "sort_key": (
+                    0,
+                    waler_id,
+                    series_sort,
+                    option_sort,
+                    str(result_id),
+                ),
             }
 
         group_id = str(result_id).split("-方案", 1)[0]
@@ -6214,7 +6213,8 @@ class SupportInputApp:
             self.context_toolbar_context_var.set(f"目前區域：{context_name}")
         actions = {
             "walers": (
-                "add", "delete", "up", "down", "validate", "redraw", "waler_solver"
+                "add", "delete", "up", "down", "validate", "redraw",
+                "waler_solver", "waler_global_solver"
             ),
             "struts": (
                 "add", "delete", "up", "down", "validate", "redraw", "support_solver"
@@ -7623,17 +7623,25 @@ class SupportInputApp:
                 zorder=15,
             )
 
-    def _has_modified_waler_results(self, waler_id):
+    def _has_modified_waler_results(self, waler_id, *, include_global=True):
         return any(
             item.get("type") == "waler"
             and isinstance(item.get("result"), dict)
-            and str(item["result"].get("waler_id", "") or "").strip()
+            and ProjectResultModel.waler_result_identity(result_id, item)
             == str(waler_id or "").strip()
             and bool(item["result"].get("manual_modified"))
-            for item in self.result_items.values()
+            and (
+                include_global
+                or not bool(item["result"].get("global_selected"))
+            )
+            for result_id, item in self.result_items.items()
         )
 
     def _open_waler_solver(self):
+        waler_solver_guard = self._ensure_waler_solver_guard()
+        if waler_solver_guard.is_busy:
+            self._show_waler_solver_busy("Single")
+            return
         if not self.validate_data():
             return
 
@@ -7652,12 +7660,16 @@ class SupportInputApp:
         selected_waler = dialog.open()
         if selected_waler is None:
             return
-        if self._has_modified_waler_results(selected_waler):
+        if self._has_modified_waler_results(
+            selected_waler,
+            include_global=False,
+        ):
             confirmed = messagebox.askyesno(
                 "重新計算圍令",
                 (
                     f"圍令 {selected_waler} 有已修改的方案。\n"
-                    "重新計算會以新的五個方案取代目前結果，是否繼續？"
+                    "重新計算會以新的五個方案取代先前的單支方案；"
+                    "全域方案會保留。是否繼續？"
                 ),
                 parent=self.root,
             )
@@ -7677,8 +7689,249 @@ class SupportInputApp:
             self.solver_memory,
             self._store_waler_result,
             optimize_waler=self.make_waler_optimizer(),
+            waler_solver_guard=waler_solver_guard,
         )
         solver_dialog.open()
+
+    def _open_waler_global_solver(self):
+        """Open the project-wide exact selector without changing local scoring."""
+
+        waler_solver_guard = self._ensure_waler_solver_guard()
+        if waler_solver_guard.is_busy:
+            self._show_waler_solver_busy("Global")
+            return
+        if not self.validate_data():
+            return
+
+        _, waler_builder = self._ensure_solver_input_builders()
+        try:
+            waler_inputs = waler_builder.build_all(self.project_data)
+        except SolverInputBuildError as exc:
+            self.show_result(f"無法建立全部圍令最佳化輸入：\n{exc}")
+            return
+        if not waler_inputs:
+            self.show_result("錯誤：找不到圍令輸入資料")
+            return
+
+        missing_inventory = [
+            waler_id
+            for waler_id, waler_input in waler_inputs.items()
+            if waler_input.material_spec and not waler_input.purchasable_lengths
+        ]
+        if missing_inventory:
+            self.show_result(
+                "錯誤：下列圍令所選規格沒有可用庫存料長："
+                + "、".join(missing_inventory)
+            )
+            return
+
+        modified_waler_ids = [
+            waler_id
+            for waler_id in waler_inputs
+            if self._has_modified_waler_results(waler_id)
+        ]
+        if modified_waler_ids:
+            confirmed = messagebox.askyesno(
+                "全部圍令最佳化",
+                (
+                    "下列圍令有已人工修改的成果方案：\n"
+                    + "、".join(modified_waler_ids)
+                    + "\n\n套用全域結果時會取代這些方案，是否繼續計算？"
+                ),
+                parent=self.root,
+            )
+            if not confirmed:
+                return
+
+        dialog = WalerGlobalSolverDialog(
+            self.root,
+            tuple(waler_inputs.values()),
+            self._apply_waler_global_result,
+            optimize_waler_global=self.make_waler_global_optimizer(),
+            waler_solver_guard=waler_solver_guard,
+        )
+        dialog.open()
+
+    def _apply_waler_global_result(self, global_result):
+        """Commit selected Waler data, then refresh the UI independently."""
+
+        solution = getattr(global_result, "solution", None)
+        diagnostics = getattr(global_result, "diagnostics", None)
+        try:
+            if solution is None or not bool(getattr(solution, "valid", False)):
+                raise ValueError("全域圍令結果無效，未套用任何成果。")
+
+            selected_candidates = tuple(
+                getattr(solution, "selected_candidates", ()) or ()
+            )
+            selected_ids = [
+                str(candidate.waler_id or "").strip()
+                for candidate in selected_candidates
+            ]
+            if (
+                not selected_candidates
+                or any(not waler_id for waler_id in selected_ids)
+                or len(selected_ids) != len(set(selected_ids))
+            ):
+                raise ValueError("全域圍令結果未對每支圍令提供唯一候選。")
+
+            targets = dict(getattr(diagnostics, "target_ratio", {}) or {})
+            raw_global_diagnostics = (
+                diagnostics.to_dict()
+                if diagnostics is not None and hasattr(diagnostics, "to_dict")
+                else copy.deepcopy(diagnostics)
+            )
+            global_diagnostics = (
+                dict(raw_global_diagnostics)
+                if isinstance(raw_global_diagnostics, Mapping)
+                else {}
+            )
+            changed_ids = tuple(
+                getattr(solution, "changed_waler_ids", ()) or ()
+            )
+            global_diagnostics["solution_summary"] = {
+                "total_short": solution.total_short,
+                "total_mid": solution.total_mid,
+                "total_long": solution.total_long,
+                "total_out": solution.total_out,
+                "short_ratio": solution.short_ratio,
+                "mid_ratio": solution.mid_ratio,
+                "long_ratio": solution.long_ratio,
+                "ratio_deviation": solution.ratio_deviation,
+                "total_out_distance_mm": solution.total_out_distance_mm,
+                "changed_waler_count": solution.changed_waler_count,
+                "changed_waler_ids": list(changed_ids),
+            }
+
+            staged_items = copy.deepcopy(self.result_items)
+            selected_id_set = set(selected_ids)
+            for result_id in list(staged_items):
+                if ProjectResultModel.waler_result_identity(
+                    result_id,
+                    staged_items[result_id],
+                ) in selected_id_set:
+                    staged_items.pop(result_id)
+
+            for candidate in selected_candidates:
+                record = global_result.local_result_for(candidate.waler_id)
+                if record is None:
+                    raise ValueError(
+                        f"全域結果缺少圍令 {candidate.waler_id} 的單支求解資料。"
+                    )
+                waler_input = record.waler_input
+                plan = copy.deepcopy(dict(candidate.payload))
+                plan["ratio_targets"] = dict(targets)
+                plan["segment_counts"] = {
+                    "short": candidate.short_count,
+                    "mid": candidate.mid_count,
+                    "long": candidate.long_count,
+                }
+                plan["global_candidate_rank"] = candidate.candidate_rank
+                plan["global_local_regret"] = candidate.local_regret
+                plan["global_material_counts"] = {
+                    "short": candidate.short_count,
+                    "mid": candidate.mid_count,
+                    "long": candidate.long_count,
+                    "out": candidate.out_count,
+                }
+                plan["global_out_distance_mm"] = candidate.out_distance_mm
+                local_diagnostics = getattr(record.result, "diagnostics", None)
+                result_id = (
+                    f"{candidate.waler_id}-方案{candidate.candidate_rank}"
+                )
+                staged_items[result_id] = {
+                    "type": "waler",
+                    "result": {
+                        "waler_id": candidate.waler_id,
+                        "option_index": candidate.candidate_rank,
+                        "selected_plan": plan,
+                        "ratio_targets": dict(targets),
+                        "required_length": int(round(waler_input.total_length)),
+                        "forbidden_points": list(waler_input.forbidden_points),
+                        "joint_clearance": 300,
+                        "min_piece_length": 1000,
+                        "max_piece_length": 10000,
+                        "material_spec": waler_input.material_spec,
+                        "search_diagnostics": (
+                            local_diagnostics.to_dict()
+                            if local_diagnostics is not None
+                            and hasattr(local_diagnostics, "to_dict")
+                            else copy.deepcopy(local_diagnostics)
+                        ),
+                        "global_search_diagnostics": copy.deepcopy(
+                            global_diagnostics
+                        ),
+                        "global_selected": True,
+                        "result_series": "global",
+                    },
+                    "visible": True,
+                }
+        except Exception as exc:
+            LOGGER.exception("Global Waler apply staging failed")
+            return WalerGlobalApplyOutcome(
+                committed=False,
+                refreshed=False,
+                error=str(exc),
+            )
+
+        previous_items = copy.deepcopy(self.result_items)
+        previous_project_result = copy.deepcopy(self.project_result)
+        previous_calculated_time = self.last_calculated_time
+        previous_dirty = bool(getattr(self, "project_dirty", False))
+        previous_dirty_reason = str(
+            getattr(self, "project_dirty_reason", "") or ""
+        )
+        try:
+            self.result_items = staged_items
+            self._mark_results_updated()
+        except Exception as exc:
+            self.result_items = previous_items
+            self.project_result = previous_project_result
+            self.last_calculated_time = previous_calculated_time
+            self.project_dirty = previous_dirty
+            self.project_dirty_reason = previous_dirty_reason
+            LOGGER.exception("Global Waler apply commit failed")
+            return WalerGlobalApplyOutcome(
+                committed=False,
+                refreshed=False,
+                error=str(exc),
+            )
+
+        LOGGER.info("Global Waler apply commit success")
+        try:
+            first_id = selected_candidates[0].waler_id
+            self._refresh_results_tree(
+                selected_id=self._result_group_iid("waler", first_id),
+            )
+            self._select_results_tab()
+            self.update_preview()
+            changed_text = (
+                "、".join(changed_ids)
+                if changed_ids
+                else "無（皆採用單支 #1）"
+            )
+            self.show_result(
+                "已一次套用全部圍令最佳化結果。\n"
+                f"短／中／長／非目標材料：{solution.total_short}／"
+                f"{solution.total_mid}／{solution.total_long}／"
+                f"{solution.total_out}\n"
+                f"比例：{solution.short_ratio:.2%}／"
+                f"{solution.mid_ratio:.2%}／{solution.long_ratio:.2%}\n"
+                f"全域比例偏差：{solution.ratio_deviation:.6f}\n"
+                f"非目標距離合計："
+                f"{solution.total_out_distance_mm} mm\n"
+                f"改用非 #1 的圍令：{changed_text}\n"
+                "注意：第一版未進行全場共用庫存扣除。"
+            )
+        except Exception as exc:
+            LOGGER.exception("Global Waler apply UI refresh failed")
+            return WalerGlobalApplyOutcome(
+                committed=True,
+                refreshed=False,
+                refresh_error=str(exc),
+            )
+
+        return WalerGlobalApplyOutcome(committed=True, refreshed=True)
 
     def _open_support_solver(self):
         if not self.validate_data():
@@ -7781,19 +8034,32 @@ class SupportInputApp:
                 if str(row.get("WalerID", "") or "").strip() == waler_id:
                     material_spec = str(row.get("material_spec", "") or "").strip()
                     break
+        existing_waler_results = [
+            (result_id, item)
+            for result_id, item in self.result_items.items()
+            if ProjectResultModel.waler_result_identity(
+                result_id,
+                item,
+            )
+            == waler_id
+        ]
+        has_global_result = any(
+            bool(item["result"].get("global_selected"))
+            for _result_id, item in existing_waler_results
+        )
         old_result_ids = [
             result_id
-            for result_id, item in self.result_items.items()
-            if (
-                item.get("type") == "waler"
-                and isinstance(item.get("result"), dict)
-                and item["result"].get("waler_id") == waler_id
-            )
+            for result_id, item in existing_waler_results
+            if not bool(item["result"].get("global_selected"))
         ]
         for result_id in old_result_ids:
             self.result_items.pop(result_id, None)
         for index, plan in enumerate(top_results, start=1):
-            result_id = f"{waler_id}-方案{index}"
+            result_id = (
+                f"{waler_id}-單支方案{index}"
+                if has_global_result
+                else f"{waler_id}-方案{index}"
+            )
             self.result_items[result_id] = {
                 "type": "waler",
                 "result": {
@@ -7808,6 +8074,9 @@ class SupportInputApp:
                     "max_piece_length": max_piece_length,
                     "material_spec": material_spec,
                     "search_diagnostics": search_diagnostics,
+                    "result_series": (
+                        "single" if has_global_result else ""
+                    ),
                 },
                 "visible": False,
             }
@@ -7818,7 +8087,12 @@ class SupportInputApp:
         )
         self.update_preview()
         self.show_result(
-            f"已產生 {waler_id} 前 {len(top_results)} 名方案並加入結果。"
+            f"已產生 {waler_id} 前 {len(top_results)} 名單支方案並加入結果。"
+            + (
+                "原全域方案已保留。"
+                if has_global_result
+                else ""
+            )
             + (
                 "搜尋已穩定。"
                 if stored_diagnostics and stored_diagnostics.result_is_stable
