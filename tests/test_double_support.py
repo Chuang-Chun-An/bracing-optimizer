@@ -29,6 +29,7 @@ from dxf_import.models import (
     GeometryTolerances,
     Strut,
 )
+from dxf_import.review_workflow import DXFReviewWorkflow
 from dxf_import.support_pairing import (
     apply_double_support_decisions,
     detect_double_support_candidates,
@@ -760,15 +761,19 @@ class DoubleSupportDXFTests(unittest.TestCase):
         staged_auto = rebuild_component_associations(
             dxf_result(struts, (column,), detected)
         )
-        dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.world_result = current
-        dialog.material_specs = ()
-        dialog.importer = SimpleNamespace(
+        importer = SimpleNamespace(
             tolerances=GeometryTolerances(),
             convert=lambda **_options: staged_auto,
+            source_fingerprint=current.source_fingerprint,
+            layer_names=current.layer_names,
+        )
+        workflow = DXFReviewWorkflow(
+            importer,
+            "double-support.dxf",
+            initial_world_result=current,
         )
 
-        staged, report = dialog._recognize_staged_result(
+        staged, report = workflow.recognize_staged(
             (),
             layer_roles={"STRUT": "strut"},
         )

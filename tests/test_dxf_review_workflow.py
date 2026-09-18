@@ -19,15 +19,19 @@ from bracing_optimizer.infrastructure.project_persistence import (
     ProjectSerializer,
     dxf_workflow_status_from_payload,
 )
-from dxf_import import (
-    CoordinateSystem,
+from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
+)
+from dxf_import.models import (
+    CoordinateSystem,
     DXFImportError,
     DXFImportResult,
     ValidationMessage,
-    source_file_fingerprint,
 )
+from dxf_import.models import GeometryTolerances
+from dxf_import.review_workflow import DXFReviewWorkflow
+from dxf_import.source_exclusion import source_file_fingerprint
 from main import SupportInputApp
 
 
@@ -204,24 +208,27 @@ class DxfReviewWorkflowTests(unittest.TestCase):
     def test_pause_captures_layer_coordinate_and_mode(self):
         result = empty_result(self.source)
         dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.result = result
-        dialog.world_result = result
         dialog.file_path = self.source
         dialog.importer = SimpleNamespace(
             source_fingerprint=result.source_fingerprint,
             layer_names=("0", "GRID"),
+            tolerances=GeometryTolerances(),
+        )
+        dialog.review_workflow = DXFReviewWorkflow(
+            dialog.importer,
+            self.source,
+            initial_world_result=result,
         )
         dialog.layer_use_vars = {
             "0": FakeVariable("忽略"),
             "GRID": FakeVariable("輔助線"),
         }
         dialog.coordinate_mode_var = FakeVariable("local")
-        dialog.selected_origin_world = (12.5, -8.0)
         dialog.mode_var = FakeVariable("append")
-        dialog.excluded_sources = ()
-        dialog.double_support_decisions = {}
         dialog.initial_state = {}
         dialog._initial_state_matches_source = False
+        dialog.review_workflow.set_coordinate_origin((12.5, -8.0))
+        dialog._sync_review_workflow_state()
 
         state = dialog._build_review_state()
 
@@ -482,7 +489,7 @@ class DxfReviewWorkflowTests(unittest.TestCase):
     def test_project_commit_failure_rolls_back_and_stays_review(self):
         app = self.app()
         before = app.project_data
-        app._handle_input_data_changed = lambda **_kwargs: (_ for _ in ()).throw(
+        app._refresh_results_tree = lambda **_kwargs: (_ for _ in ()).throw(
             ValueError("commit failed")
         )
 

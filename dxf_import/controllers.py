@@ -1,21 +1,12 @@
-"""Selection and formal-model controllers for the DXF dialog."""
+"""Presentation selection controller for the DXF dialog."""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
-from .candidate_points import CandidatePointStore, apply_candidate_point_selection
-from .waler_contact_adjustment import (
-    WalerContactAdjustmentPlan,
-    apply_waler_contact_adjustment,
-    plan_waler_contact_adjustment,
-)
-from .material_recognition import set_member_material_spec
+from .candidate_points import CandidatePointStore
 from .models import (
     CandidatePoint,
-    DXFImportError,
-    DXFImportResult,
-    GeometryTolerances,
     SelectionState,
 )
 from .preview import PerformanceDiagnostics, RenderDirty
@@ -368,74 +359,3 @@ class SelectionController:
             | RenderDirty.DETAIL_PANEL
             | RenderDirty.TREE_SELECTION,
         )
-
-
-class ImportModelController:
-    """The only UI controller allowed to commit pending endpoint choices."""
-
-    def __init__(
-        self,
-        tolerances: GeometryTolerances,
-        candidate_store: CandidatePointStore | None = None,
-    ) -> None:
-        self.tolerances = tolerances
-        self.candidate_store = candidate_store
-
-    def apply_pending(
-        self,
-        result: DXFImportResult,
-        state: SelectionState,
-    ) -> DXFImportResult:
-        if self.candidate_store is not None:
-            start = self.candidate_store.get(
-                state.selected_component_id,
-                state.pending_start_point_id,
-            )
-            end = self.candidate_store.get(
-                state.selected_component_id,
-                state.pending_end_point_id,
-            )
-            if start is None or end is None:
-                raise DXFImportError("待套用候選點不在 CandidatePointStore 中。")
-        return apply_candidate_point_selection(
-            result,
-            state.selected_component_id,
-            state.pending_start_point_id,
-            state.pending_end_point_id,
-            self.tolerances,
-            selection_source=state.pending_selection_source,
-        )
-
-    def preview_waler_contact_adjustment(
-        self,
-        result: DXFImportResult,
-        waler_id: str,
-        **dimensions,
-    ) -> WalerContactAdjustmentPlan:
-        return plan_waler_contact_adjustment(
-            result,
-            waler_id,
-            tolerances=self.tolerances,
-            **dimensions,
-        )
-
-    def apply_waler_contact_adjustment(
-        self,
-        result: DXFImportResult,
-        waler_id: str,
-        **dimensions,
-    ) -> DXFImportResult:
-        return apply_waler_contact_adjustment(
-            result,
-            waler_id,
-            tolerances=self.tolerances,
-            **dimensions,
-        )
-
-    def apply_material_spec(
-        self,
-        result: DXFImportResult,
-        member_id: str,
-        material_spec: str,
-    ) -> DXFImportResult:
-        return set_member_material_spec(result, member_id, material_spec)

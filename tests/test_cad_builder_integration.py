@@ -18,7 +18,8 @@ from main import SupportInputApp
 from bracing_optimizer.application.project_data import TABLE_COLUMNS, ProjectDataModel
 from bracing_optimizer.infrastructure.project_persistence import ProjectPersistenceError
 from bracing_optimizer.infrastructure.project_persistence import DxfCompatibilityChecker
-from dxf_import import CoordinateSystem, DXFImportDialog
+from dxf_import.dialog import DXFImportDialog
+from dxf_import.models import CoordinateSystem
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]

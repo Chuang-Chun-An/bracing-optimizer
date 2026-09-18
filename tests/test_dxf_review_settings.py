@@ -17,6 +17,7 @@ from dxf_import.models import (
     Strut,
     Waler,
 )
+from dxf_import.review_workflow import DXFReviewWorkflow, ReviewMutation
 
 
 class _Variable:
@@ -265,18 +266,23 @@ class DxfReviewSettingsTests(unittest.TestCase):
         )
         result = _result(struts=struts, double_support_candidates=(candidate,))
         dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.result = result
-        dialog.world_result = result
-        dialog.double_support_decisions = {}
         dialog.importer = SimpleNamespace(tolerances=GeometryTolerances())
-        dialog.review_items = ()
-        dialog.review_confirmations = {}
+        dialog.review_workflow = DXFReviewWorkflow(
+            SimpleNamespace(
+                tolerances=GeometryTolerances(),
+                source_fingerprint=result.source_fingerprint,
+                layer_names=result.layer_names,
+            ),
+            "settings.dxf",
+            initial_world_result=result,
+        )
+        dialog._sync_review_workflow_state()
         refreshes = []
         dialog._refresh_result_views = lambda **kwargs: refreshes.append(kwargs)
-        dialog._finish_confirmation_mutation = lambda *_args, **_kwargs: None
+        dialog._show_workflow_confirmation_invalidations = lambda *_args: None
 
         with patch(
-            "dxf_import.dialog.rebuild_component_associations",
+            "dxf_import.review_workflow.rebuild_component_associations",
             side_effect=lambda staged, _tolerances: staged,
         ) as rebuild:
             changed = dialog._commit_double_support_candidates(
@@ -305,19 +311,33 @@ class DxfReviewSettingsTests(unittest.TestCase):
         dialog = DXFImportDialog.__new__(DXFImportDialog)
         dialog.coordinate_mode_var = _Variable("world")
         dialog.selected_origin_world = None
-        before = {"waler:HW1": "W1"}
         finished = []
-        dialog._confirmed_item_snapshot = lambda: before
-        dialog._apply_coordinate_settings = lambda **_kwargs: None
-        dialog._finish_confirmation_mutation = lambda snapshot: finished.append(
-            snapshot
+        mutation = ReviewMutation(True, ("W2",))
+        dialog.review_workflow = SimpleNamespace(
+            set_coordinate_origin=lambda point: (
+                finished.append(("command", point)) or mutation
+            )
+        )
+        dialog.coordinate_error_var = _Variable()
+        dialog._sync_review_workflow_state = lambda: setattr(
+            dialog, "selected_origin_world", candidate.world_point
+        )
+        dialog._refresh_result_views = lambda **_kwargs: None
+        dialog._show_workflow_confirmation_invalidations = (
+            lambda value: finished.append(("invalidations", value))
         )
 
         dialog._set_origin_from_candidate(candidate)
 
         self.assertEqual(dialog.selected_origin_world, (10.0, 20.0))
         self.assertEqual(dialog.coordinate_mode_var.get(), "local")
-        self.assertEqual(finished, [before])
+        self.assertEqual(
+            finished,
+            [
+                ("command", (10.0, 20.0)),
+                ("invalidations", mutation),
+            ],
+        )
 
 
 if __name__ == "__main__":

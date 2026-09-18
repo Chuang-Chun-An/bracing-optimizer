@@ -5,10 +5,94 @@ from __future__ import annotations
 import copy
 import math
 from collections import Counter
+from dataclasses import dataclass
+from typing import Any, Sequence
 
 from bracing_optimizer.algorithms import support, wales
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.solver_input_builder import InventoryLookup
+
+
+_SUPPORT_JACK_REGION_PENALTY_WEIGHT = 3000
+
+
+@dataclass(frozen=True)
+class SupportEditOptions:
+    """Engineering options exposed to the support-plan editor."""
+
+    piece_types: tuple[str, ...]
+    steel_lengths: tuple[int, ...]
+    shim_lengths: tuple[int, ...]
+    jack_length: int
+    default_steel_length: int
+    default_shim_length: int
+
+
+@dataclass(frozen=True)
+class SupportPieceValidation:
+    """Validation outcome for one ordered support-piece layout."""
+
+    valid: bool
+    issue_code: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class SupportPlanAnalysis:
+    """Solver-derived facts needed to present one support plan."""
+
+    short_count: int
+    short_steel_threshold: int
+    short_penalty_weight: float
+    joint_count: int
+    joint_penalty_weight: float
+    target_gap: int
+    gap_penalty_weight: float
+    quality_score: float
+    region_group_penalty: float
+    material_ratio_penalty: float
+    group_penalty: float
+    ranking_score: float
+    minimum_jack_distance: float
+    jack_region_penalty_weight: float
+
+
+@dataclass(frozen=True)
+class SupportGlobalAnalysis:
+    """Solver-derived facts needed to present one global support result."""
+
+    counts: dict[str, object]
+    ratios: dict[str, object]
+    targets: dict[str, object]
+    classified_total: int
+    ratio_deviation: float
+    material_ratio_weight: float
+    material_ratio_penalty: float
+    jack_region_penalty: float
+    min_jack_distance: float | None
+    minimum_jack_distance: float
+    jack_distance_ok: bool
+
+
+@dataclass(frozen=True)
+class SupportEditContext:
+    """Read-only data required to open the support-plan editor."""
+
+    plan: Any
+    config: Any
+    options: SupportEditOptions
+
+
+@dataclass(frozen=True)
+class SupportPlanEditResult:
+    """Staged replacement produced by one support-plan edit."""
+
+    solution: Any
+    plan: Any
+    updated_support_ids: tuple[str, ...]
+    validation: SupportPieceValidation
+    neighbor_checks: tuple[dict, ...]
+    analysis: SupportPlanAnalysis
 
 
 def _number(value):
@@ -33,6 +117,285 @@ def _format_number(value) -> str:
 
 class SupportPlanEditing:
     """Re-evaluate a manually edited support plan or support group."""
+
+    def __init__(self, project_data=None, support_input_builder=None):
+        self.project_data = project_data
+        self.support_input_builder = support_input_builder
+
+    def config_by_id(self, support_id: str):
+        if self.project_data is None or self.support_input_builder is None:
+            raise RuntimeError("支撐方案編輯服務缺少 ProjectDataModel 或 SupportInputBuilder。")
+        return self.support_input_builder.build_one(
+            self.project_data,
+            support_id,
+        )
+
+    @staticmethod
+    def edit_options(config) -> SupportEditOptions:
+        steel_lengths = tuple(support.configured_steel_lengths(config))
+        shim_lengths = tuple(int(value) for value in support.SHIM_LENGTHS)
+        default_shim_length = (
+            150
+            if 150 in shim_lengths
+            else next((value for value in shim_lengths if value > 0), 0)
+        )
+        return SupportEditOptions(
+            piece_types=("steel", "shim", "jack"),
+            steel_lengths=steel_lengths,
+            shim_lengths=shim_lengths,
+            jack_length=int(support.JACK_LENGTH),
+            default_steel_length=(steel_lengths[0] if steel_lengths else 5000),
+            default_shim_length=default_shim_length,
+        )
+
+    def edit_context(self, solution, support_id: str) -> SupportEditContext:
+        support_id = str(support_id or "")
+        plan = next(
+            (
+                item
+                for item in list(getattr(solution, "plans", []) or [])
+                if str(getattr(item, "support_id", "")) == support_id
+            ),
+            None,
+        )
+        config = self.config_by_id(support_id)
+        if plan is None or config is None:
+            raise ValueError("找不到支撐方案或支撐設定資料。")
+        return SupportEditContext(
+            plan=plan,
+            config=config,
+            options=self.edit_options(config),
+        )
+
+    @staticmethod
+    def validate_pieces(config, pieces: Sequence[tuple[str, int]]) -> SupportPieceValidation:
+        try:
+            normalized = [
+                (str(kind).strip().lower(), int(round(float(length))))
+                for kind, length in pieces
+            ]
+        except (TypeError, ValueError):
+            return SupportPieceValidation(
+                valid=False,
+                issue_code="invalid_piece_format",
+                message="❌ 類型或長度格式錯誤",
+            )
+
+        if any(
+            kind not in ("steel", "shim", "jack") or length <= 0
+            for kind, length in normalized
+        ):
+            return SupportPieceValidation(
+                valid=False,
+                issue_code="invalid_piece_format",
+                message="❌ 類型或長度格式錯誤",
+            )
+
+        jack_count = sum(1 for kind, _length in normalized if kind == "jack")
+        if jack_count != 1:
+            return SupportPieceValidation(
+                valid=False,
+                issue_code="invalid_jack_count",
+                message="❌ 千斤頂數量不是 1",
+            )
+
+        allowed_steel_lengths = support.configured_steel_lengths(config)
+        for kind, length in normalized:
+            if kind == "steel" and length not in allowed_steel_lengths:
+                return SupportPieceValidation(
+                    valid=False,
+                    issue_code="invalid_steel_length",
+                    message=f"❌ 鋼材長度不合法：{length} mm",
+                )
+            if kind == "shim" and length not in support.SHIM_LENGTHS:
+                return SupportPieceValidation(
+                    valid=False,
+                    issue_code="invalid_shim_length",
+                    message=f"❌ 調整塊長度不合法：{length} mm",
+                )
+            if kind == "jack" and length != support.JACK_LENGTH:
+                return SupportPieceValidation(
+                    valid=False,
+                    issue_code="invalid_jack_length",
+                    message=f"❌ 千斤頂長度必須固定為 {support.JACK_LENGTH} mm",
+                )
+        return SupportPieceValidation(valid=True)
+
+    def stage_edit(
+        self,
+        solution,
+        support_id: str,
+        pieces: Sequence[tuple[str, int]],
+    ) -> SupportPlanEditResult:
+        """Stage one manual edit without mutating the source solution."""
+
+        support_id = str(support_id or "")
+        context = self.edit_context(solution, support_id)
+        validation = self.validate_pieces(context.config, pieces)
+        if validation.issue_code == "invalid_piece_format":
+            raise ValueError(validation.message)
+
+        normalized_pieces = [
+            (str(kind).strip().lower(), int(round(float(length))))
+            for kind, length in pieces
+        ]
+        source_plans = list(getattr(solution, "plans", []) or [])
+        shared_group = str(
+            getattr(context.plan, "shared_layout_group", "") or ""
+        ).strip()
+        target_ids = (
+            [
+                str(getattr(plan, "support_id", "") or "")
+                for plan in source_plans
+                if str(
+                    getattr(plan, "shared_layout_group", "") or ""
+                ).strip() == shared_group
+            ]
+            if shared_group
+            else [support_id]
+        )
+        configs = {}
+        for member_id in target_ids:
+            config = self.config_by_id(member_id)
+            if config is None:
+                raise ValueError(f"找不到支撐 {member_id} 的設定資料。")
+            configs[member_id] = config
+
+        staged_solution = copy.deepcopy(solution)
+        staged_plans = list(getattr(staged_solution, "plans", []) or [])
+        updated_ids = []
+        for index, plan in enumerate(staged_plans):
+            member_id = str(getattr(plan, "support_id", "") or "")
+            if member_id not in configs:
+                continue
+            staged_plans[index] = support.evaluate_single_support(
+                configs[member_id],
+                list(normalized_pieces),
+            )
+            updated_ids.append(member_id)
+        if not updated_ids:
+            raise ValueError(f"找不到支撐方案 {support_id}。")
+
+        staged_solution.plans = staged_plans
+        self.recalculate_global_solution(staged_solution)
+        edited_plan = next(
+            plan
+            for plan in staged_solution.plans
+            if str(getattr(plan, "support_id", "")) == support_id
+        )
+        neighbor_checks = tuple(
+            self.neighbor_checks(staged_solution, support_id)
+        )
+        return SupportPlanEditResult(
+            solution=staged_solution,
+            plan=edited_plan,
+            updated_support_ids=tuple(updated_ids),
+            validation=validation,
+            neighbor_checks=neighbor_checks,
+            analysis=self.analyze_plan(
+                edited_plan,
+                neighbor_checks,
+                staged_solution,
+            ),
+        )
+
+    @staticmethod
+    def analyze_plan(plan, neighbor_checks=None, solution=None) -> SupportPlanAnalysis:
+        breakdown = dict(getattr(plan, "breakdown", {}) or {})
+        short_penalty = float(breakdown.get("short_penalty", 0.0) or 0.0)
+        joint_penalty = float(breakdown.get("joint_penalty", 0.0) or 0.0)
+        gap_penalty = float(breakdown.get("gap_penalty", 0.0) or 0.0)
+        jack_edge_penalty = float(
+            breakdown.get("jack_edge_penalty", 0.0) or 0.0
+        )
+        invalid_penalty = float(
+            breakdown.get("invalid_penalty", 0.0) or 0.0
+        )
+        short_count = sum(
+            1
+            for kind, length in list(getattr(plan, "pieces", []) or [])
+            if kind == "steel"
+            and length < support.SUPPORT_SHORT_STEEL_THRESHOLD
+        )
+        joint_count = len(getattr(plan, "joints", []) or [])
+        quality_score = (
+            short_penalty
+            + joint_penalty
+            + gap_penalty
+            + jack_edge_penalty
+        )
+        region_group_penalty = sum(
+            float(item.get("penalty", 0.0) or 0.0)
+            for item in neighbor_checks or []
+        )
+        material_ratio_penalty = (
+            float(
+                getattr(solution, "material_ratio_penalty", 0.0) or 0.0
+            )
+            if solution is not None
+            else 0.0
+        )
+        group_penalty = region_group_penalty + material_ratio_penalty
+        return SupportPlanAnalysis(
+            short_count=short_count,
+            short_steel_threshold=int(support.SUPPORT_SHORT_STEEL_THRESHOLD),
+            short_penalty_weight=float(
+                support.SUPPORT_SHORT_STEEL_PENALTY_WEIGHT
+            ),
+            joint_count=joint_count,
+            joint_penalty_weight=float(support.SUPPORT_JOINT_PENALTY_WEIGHT),
+            target_gap=int(support.TARGET_GAP),
+            gap_penalty_weight=float(support.SUPPORT_GAP_PENALTY_WEIGHT),
+            quality_score=quality_score,
+            region_group_penalty=region_group_penalty,
+            material_ratio_penalty=material_ratio_penalty,
+            group_penalty=group_penalty,
+            ranking_score=quality_score + invalid_penalty + group_penalty,
+            minimum_jack_distance=float(
+                support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+            ),
+            jack_region_penalty_weight=float(
+                _SUPPORT_JACK_REGION_PENALTY_WEIGHT
+            ),
+        )
+
+    @staticmethod
+    def global_analysis(solution) -> SupportGlobalAnalysis:
+        analysis = dict(
+            getattr(solution, "material_ratio_analysis", {}) or {}
+        )
+        min_distance = getattr(solution, "min_jack_distance", None)
+        minimum_distance = float(
+            support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+        )
+        return SupportGlobalAnalysis(
+            counts=dict(analysis.get("counts", {}) or {}),
+            ratios=dict(analysis.get("ratios", {}) or {}),
+            targets=dict(analysis.get("targets", {}) or {}),
+            classified_total=int(analysis.get("classified_total", 0) or 0),
+            ratio_deviation=float(
+                analysis.get("ratio_deviation", 0.0) or 0.0
+            ),
+            material_ratio_weight=float(
+                analysis.get(
+                    "weight",
+                    support.SUPPORT_MATERIAL_RATIO_WEIGHT,
+                )
+                or 0.0
+            ),
+            material_ratio_penalty=float(
+                analysis.get("penalty", 0.0) or 0.0
+            ),
+            jack_region_penalty=float(
+                getattr(solution, "jack_region_penalty", 0.0) or 0.0
+            ),
+            min_jack_distance=min_distance,
+            minimum_jack_distance=minimum_distance,
+            jack_distance_ok=(
+                min_distance is None
+                or float(min_distance) >= minimum_distance
+            ),
+        )
 
     @staticmethod
     def recalculate_global_solution(solution):
@@ -158,6 +521,12 @@ class SupportPlanEditing:
         neighbor = first if current_is_second else second
         current_region = getattr(current, "jack_region_id", "無資料")
         neighbor_region = getattr(neighbor, "jack_region_id", "無資料")
+        region_difference = (
+            abs(neighbor_region - current_region)
+            if isinstance(current_region, (int, float))
+            and isinstance(neighbor_region, (int, float))
+            else 0
+        )
         return {
             "relation": relation,
             "support_id": getattr(neighbor, "support_id", ""),
@@ -169,9 +538,15 @@ class SupportPlanEditing:
             "penalty": float(penalty),
             "current_region": current_region,
             "neighbor_region": neighbor_region,
+            "minimum_distance": float(
+                support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+            ),
+            "region_penalty_weight": float(
+                _SUPPORT_JACK_REGION_PENALTY_WEIGHT
+            ),
             "region_penalty": (
-                3000 * abs(neighbor_region - current_region)
-                if ok and neighbor_region != current_region
+                _SUPPORT_JACK_REGION_PENALTY_WEIGHT * region_difference
+                if ok and region_difference
                 else 0
             ),
         }
@@ -528,4 +903,13 @@ class WalerPlanEditing:
         }
 
 
-__all__ = ["SupportPlanEditing", "WalerPlanEditing"]
+__all__ = [
+    "SupportEditContext",
+    "SupportEditOptions",
+    "SupportGlobalAnalysis",
+    "SupportPieceValidation",
+    "SupportPlanAnalysis",
+    "SupportPlanEditing",
+    "SupportPlanEditResult",
+    "WalerPlanEditing",
+]

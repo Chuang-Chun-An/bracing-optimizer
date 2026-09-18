@@ -133,6 +133,63 @@ class WalerGlobalApplyTests(unittest.TestCase):
         self.assertTrue(outcome.committed)
         self.assertTrue(outcome.refreshed)
 
+    def test_project_result_model_stages_global_apply_without_mutating_source(self):
+        model = ProjectResultModel(result_items={
+            "W1-方案1": {
+                "type": "waler",
+                "result": {
+                    "waler_id": "W1",
+                    "selected_plan": {"segments": [5_000]},
+                },
+                "visible": True,
+            },
+            "Z1": {
+                "type": "support",
+                "result": SimpleNamespace(plans=[]),
+                "visible": True,
+            },
+        })
+        result = FakeGlobalResult((
+            make_candidate("W1", 2, [5_000, 7_000], score=12),
+        ))
+
+        staged = model.stage_waler_global_result(result)
+
+        self.assertIn("W1-方案1", model.result_items)
+        self.assertNotIn("W1-方案1", staged.result_items)
+        self.assertIn("W1-方案2", staged.result_items)
+        self.assertIn("Z1", staged.result_items)
+        self.assertEqual(staged.selected_candidates[0].candidate_rank, 2)
+
+    def test_project_result_model_stages_single_batch_without_mutating_source(self):
+        global_item = {
+            "type": "waler",
+            "result": {
+                "waler_id": "W1",
+                "option_index": 2,
+                "selected_plan": {"segments": [5_000, 7_000]},
+                "global_selected": True,
+            },
+            "visible": True,
+        }
+        model = ProjectResultModel(result_items={
+            "W1-方案2": copy.deepcopy(global_item),
+        })
+
+        staged = model.stage_single_waler_result(
+            {
+                "waler_id": "W1",
+                "top_results": [{"segments": [6_000, 6_000]}],
+                "required_length": 12_000,
+            },
+            (),
+        )
+
+        self.assertEqual(model.result_items, {"W1-方案2": global_item})
+        self.assertIn("W1-方案2", staged.result_items)
+        self.assertIn("W1-單支方案1", staged.result_items)
+        self.assertTrue(staged.preserved_global_result)
+
     def test_missing_staged_record_leaves_existing_results_unchanged(self):
         app = self.make_app()
         before = copy.deepcopy(app.result_items)

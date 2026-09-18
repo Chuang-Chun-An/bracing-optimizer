@@ -8,7 +8,6 @@ import sys
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -16,7 +15,6 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, scrolledtext, simpledialog, ttk
 
 import ezdxf
-from bracing_optimizer.algorithms import solver_search, support, wales
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -32,7 +30,6 @@ from bracing_optimizer.infrastructure.cad_builder import (
     POLL_INTERVAL_MS,
 )
 from bracing_optimizer.application.project_data import (
-    DEFAULT_MATERIAL_SPECS,
     GEOMETRY_TABLES,
     REQUIRED_RC_SPEC,
     ProjectDataModel,
@@ -45,13 +42,15 @@ from bracing_optimizer.application.solver_input_builder import (
     SolverInputBuildError,
     UNLIMITED_INVENTORY_QTY,
 )
-from dxf_import import (
-    CoordinateSystem,
+from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
+)
+from dxf_import.models import (
+    CoordinateSystem,
     DXFImportError,
-    _active_monitor_work_areas,
-    fit_window_geometry_to_work_areas,
+)
+from dxf_import.source_exclusion import (
     review_state_matches_source,
     source_file_fingerprint,
 )
@@ -73,11 +72,12 @@ from bracing_optimizer.infrastructure.excel_result_export import (
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfStatus,
     DxfWorkflowStatus,
-    PROJECT_SCHEMA_VERSION,
     ProjectPersistenceError,
-    dxf_workflow_status_from_payload,
 )
 from bracing_optimizer.application.project_service import (
+    ApplyDxfReviewRequest,
+    BuildProjectPayloadRequest,
+    PROJECT_DXF_BINDING_FIELDS,
     RelinkDxfRequest,
     SaveProjectRequest,
 )
@@ -100,7 +100,11 @@ from bracing_optimizer.presentation import (
     format_result_value,
     format_waler_score_breakdown,
 )
-from window_layout import configure_responsive_dialog
+from window_layout import (
+    _active_monitor_work_areas,
+    configure_responsive_dialog,
+    fit_window_geometry_to_work_areas,
+)
 
 
 RESOURCE_DIR = Path(__file__).resolve().parent
@@ -207,33 +211,7 @@ class SupportInputApp:
         "walers": ("No", "WalerID", "material_spec"),
         "braces": ("No", "BraceID", "FromWaler", "ToWaler"),
     }
-    DXF_BINDING_FIELDS = {
-        "walers": frozenset(
-            ("WalerID", "StartX", "StartY", "EndX", "EndY")
-        ),
-        "struts": frozenset(
-            (
-                "StrutID",
-                "FromWaler",
-                "ToWaler",
-                "StartX",
-                "StartY",
-                "EndX",
-                "EndY",
-            )
-        ),
-        "braces": frozenset(
-            (
-                "BraceID",
-                "FromWaler",
-                "ToWaler",
-                "StartX",
-                "StartY",
-                "EndX",
-                "EndY",
-            )
-        ),
-    }
+    DXF_BINDING_FIELDS = PROJECT_DXF_BINDING_FIELDS
     DXF_BINDING_STALE_KEY = "project_binding_stale"
     DXF_BINDING_STALE_REASON_KEY = "project_binding_stale_reason"
 
@@ -2654,9 +2632,12 @@ class SupportInputApp:
         if path is None or not path.is_file():
             raise FileNotFoundError(f"找不到專案：{project_name}")
 
-        result = self._ensure_project_service().load_project(path)
+        result = self._ensure_project_service().load_project(
+            path,
+            default_inventory=self._load_default_inventory(),
+        )
         payload = result.payload
-        self._apply_project_payload(payload, result.project_path)
+        self._adopt_hydrated_project(result.hydrated_project)
         self.dxf_asset_status_report = result.dxf_status_report
         self.last_dxf_compatibility_report = None
         self._clear_project_dirty()
@@ -2708,16 +2689,14 @@ class SupportInputApp:
         return ProjectResultModel.deserialize_result_item(payload)
 
     def _build_project_result_payload(self):
-        model = ProjectResultModel(
-            result_items=self.result_items,
-            last_calculated_time=self.last_calculated_time,
-            persisted_payload=self.project_result,
+        return self._ensure_project_results().to_payload(
+            self._build_material_summary_payload()
         )
-        return model.to_payload(self._build_material_summary_payload())
 
     def _mark_results_updated(self):
-        self.last_calculated_time = datetime.now().isoformat(timespec="seconds")
-        self.project_result = self._build_project_result_payload()
+        self._ensure_project_results().mark_updated(
+            self._build_material_summary_payload()
+        )
         self._mark_project_dirty("成果配置已變更")
 
     def _build_project_payload(self, path=None):
@@ -2726,68 +2705,42 @@ class SupportInputApp:
             if path
             else "未命名專案"
         )
-        return {
-            "schema_version": PROJECT_SCHEMA_VERSION,
-            "project_information": {
-                "project_name": project_name,
-                "saved_at": datetime.now().isoformat(timespec="seconds"),
-                "application": "SupportSolver",
-            },
-            "input_data": self._ensure_project_data().to_case_data(),
-            "dxf_workflow_status": self._current_dxf_workflow_status().value,
-            "dxf_import_state": copy.deepcopy(
-                getattr(self, "dxf_last_import_debug", None)
-            ),
-            "dxf_asset": copy.deepcopy(getattr(self, "dxf_asset", None)),
-            "result": self._build_project_result_payload(),
-        }
+        return self._ensure_project_service().build_project_payload(
+            BuildProjectPayloadRequest(
+                project_name=project_name,
+                project_data=self._ensure_project_data(),
+                project_results=self._ensure_project_results(),
+                workflow_status=self._current_dxf_workflow_status(),
+                dxf_import_state=getattr(
+                    self,
+                    "dxf_last_import_debug",
+                    None,
+                ),
+                dxf_asset=getattr(self, "dxf_asset", None),
+            )
+        )
 
     def _apply_project_payload(self, payload, path=None):
-        input_data = payload["input_data"]
-        result_payload = payload.get("result", None)
-        dxf_import_state = payload.get("dxf_import_state")
-        dxf_asset = payload.get("dxf_asset")
-        self.dxf_workflow_status = dxf_workflow_status_from_payload(payload)
+        hydrated = self._ensure_project_service().hydrate_project(
+            payload,
+            project_path=path,
+            default_inventory=self._load_default_inventory(),
+        )
+        self._adopt_hydrated_project(hydrated)
+
+    def _adopt_hydrated_project(self, hydrated):
+        """Adopt an already validated application state, then refresh the UI."""
+
+        self.project_data = hydrated.project_data
+        self._project_results = hydrated.project_results
+        self.dxf_workflow_status = hydrated.workflow_status
         self.dxf_review_session = None
-        self.dxf_last_import_debug = (
-            copy.deepcopy(dxf_import_state)
-            if isinstance(dxf_import_state, dict)
-            else None
-        )
-        self.dxf_asset = (
-            copy.deepcopy(dxf_asset)
-            if isinstance(dxf_asset, dict)
-            else None
-        )
-
-        self.walers = copy.deepcopy(input_data["walers"])
-        self.struts = copy.deepcopy(input_data["struts"])
-        self.braces = copy.deepcopy(input_data["braces"])
-        self.inventory = copy.deepcopy(
-            input_data.get("inventory", self._load_default_inventory())
-        )
-        self.material_specs = copy.deepcopy(
-            input_data.get("material_specs", DEFAULT_MATERIAL_SPECS)
-        )
-
-        self.result_items.clear()
-        if isinstance(result_payload, dict):
-            best_solution = result_payload.get("best_solution", {})
-            for item_payload in list(best_solution.get("result_items", []) or []):
-                if not isinstance(item_payload, dict):
-                    continue
-                result_id = str(item_payload.get("id", "") or "").strip()
-                if result_id:
-                    self.result_items[result_id] = self._deserialize_result_item(item_payload)
-            self.project_result = copy.deepcopy(result_payload)
-            self.last_calculated_time = result_payload.get("last_calculated_time")
-        else:
-            self.project_result = None
-            self.last_calculated_time = None
+        self.dxf_last_import_debug = hydrated.dxf_import_state
+        self.dxf_asset = hydrated.dxf_asset
 
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
-        self.current_project_path = path
+        self.current_project_path = hydrated.project_path
         for table_name in (
             "walers",
             "struts",
@@ -3274,9 +3227,12 @@ class SupportInputApp:
             parent=self.root,
         )
 
-    def _support_config_by_id(self, support_id):
+    def _support_plan_editing(self):
         support_builder, _ = self._ensure_solver_input_builders()
-        return support_builder.build_one(self.project_data, support_id)
+        return SupportPlanEditing(
+            self._ensure_project_data(),
+            support_builder,
+        )
 
     @staticmethod
     def _support_plan_piece_rows(plan):
@@ -3305,52 +3261,6 @@ class SupportInputApp:
             "jack": "jack",
             "千斤頂": "jack",
         }.get(text, "")
-
-    def _replace_support_plan(self, zoning, support_id, new_plan):
-        item = self.result_items.get(zoning)
-        solution = item.get("result") if isinstance(item, dict) else None
-        plans = list(getattr(solution, "plans", []) or [])
-        original = next(
-            (
-                plan
-                for plan in plans
-                if str(getattr(plan, "support_id", "")) == str(support_id)
-            ),
-            None,
-        )
-        shared_group = str(
-            getattr(original, "shared_layout_group", "") or ""
-        ).strip()
-        if shared_group:
-            pieces = self._support_plan_piece_rows(new_plan)
-            replaced = False
-            for index, plan in enumerate(plans):
-                if str(getattr(plan, "shared_layout_group", "") or "").strip() != shared_group:
-                    continue
-                member_id = str(getattr(plan, "support_id", "") or "")
-                config = self._support_config_by_id(member_id)
-                if config is None:
-                    return False
-                plans[index] = support.evaluate_single_support(config, pieces)
-                replaced = True
-            if replaced:
-                solution.plans = plans
-                self._recalculate_support_global_solution(solution)
-                self._mark_results_updated()
-                return True
-            return False
-        for index, plan in enumerate(plans):
-            if str(getattr(plan, "support_id", "")) == str(support_id):
-                plans[index] = new_plan
-                solution.plans = plans
-                self._recalculate_support_global_solution(solution)
-                self._mark_results_updated()
-                return True
-        return False
-
-    @staticmethod
-    def _recalculate_support_global_solution(solution):
-        return SupportPlanEditing.recalculate_global_solution(solution)
 
     @staticmethod
     def _find_support_forbidden_zone_hit(plan, config):
@@ -3381,27 +3291,25 @@ class SupportInputApp:
             ])
         return "\n".join(lines)
 
-    def _format_support_plan_breakdown(self, plan, config, neighbor_checks=None, solution=None):
+    def _format_support_plan_breakdown(
+        self,
+        plan,
+        config,
+        neighbor_checks=None,
+        solution=None,
+        analysis=None,
+    ):
         breakdown = dict(getattr(plan, "breakdown", {}) or {})
         short_penalty = breakdown.get("short_penalty", 0.0)
         joint_penalty = breakdown.get("joint_penalty", 0.0)
         gap_penalty = breakdown.get("gap_penalty", 0.0)
         jack_edge_penalty = breakdown.get("jack_edge_penalty", 0.0)
         invalid_penalty = breakdown.get("invalid_penalty", 0.0)
-        steel_lengths = [length for kind, length in getattr(plan, "pieces", []) if kind == "steel"]
-        short_count = sum(1 for length in steel_lengths if length < 4000)
-        joint_count = len(getattr(plan, "joints", []) or [])
-        gap_delta = abs(getattr(plan, "gap", 0) - support.TARGET_GAP)
-        quality_score = (
-            float(short_penalty)
-            + float(joint_penalty)
-            + float(gap_penalty)
-            + float(jack_edge_penalty)
+        analysis = analysis or SupportPlanEditing.analyze_plan(
+            plan,
+            neighbor_checks,
+            solution,
         )
-        region_group_penalty = sum(float(item.get("penalty", 0.0) or 0.0) for item in neighbor_checks or [])
-        material_ratio_penalty = float(getattr(solution, "material_ratio_penalty", 0.0) or 0.0) if solution is not None else 0.0
-        group_penalty = region_group_penalty + material_ratio_penalty
-        ranking_score = quality_score + float(invalid_penalty) + group_penalty
         lines = [
             f"支撐：{getattr(plan, 'support_id', '')}",
             f"總長：{self._format_result_value(getattr(config, 'total_length', '無資料'))} mm",
@@ -3415,12 +3323,12 @@ class SupportInputApp:
             f"餘長(mm)：{self._format_result_value(getattr(plan, 'gap', '無資料'))}",
             "",
             "【品質評分】",
-            f"短鋼材：{short_count} × 8000 = {self._format_result_value(short_penalty)}",
-            f"接頭數：{joint_count} × 1200 = {self._format_result_value(joint_penalty)}",
-            f"餘長：|{self._format_result_value(getattr(plan, 'gap', 0))} - {support.TARGET_GAP}| × 20 = {self._format_result_value(gap_penalty)}",
+            f"短鋼材：{analysis.short_count} × {self._format_result_value(analysis.short_penalty_weight)} = {self._format_result_value(short_penalty)}",
+            f"接頭數：{analysis.joint_count} × {self._format_result_value(analysis.joint_penalty_weight)} = {self._format_result_value(joint_penalty)}",
+            f"餘長：|{self._format_result_value(getattr(plan, 'gap', 0))} - {analysis.target_gap}| × {self._format_result_value(analysis.gap_penalty_weight)} = {self._format_result_value(gap_penalty)}",
             f"千斤頂靠近端部：{self._format_result_value(jack_edge_penalty)}",
             "-" * 50,
-            f"品質分數：{self._format_result_value(quality_score)}",
+            f"品質分數：{self._format_result_value(analysis.quality_score)}",
             "",
             "【群組檢查】",
         ]
@@ -3430,9 +3338,9 @@ class SupportInputApp:
                 lines.extend([
                     f"與{relation}：{item.get('support_id', '')}",
                     f"千斤頂距離：{self._format_result_value(item.get('distance', '無資料'))} mm",
-                    "✅ 合法" if item.get("ok") else f"❌ 小於規定 {support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm",
+                    "✅ 合法" if item.get("ok") else f"❌ 小於規定 {self._format_result_value(item.get('minimum_distance', analysis.minimum_jack_distance))} mm",
                     (
-                        f"區域差異：|{item.get('current_region')} - {item.get('neighbor_region')}| × 3000 "
+                        f"區域差異：|{item.get('current_region')} - {item.get('neighbor_region')}| × {self._format_result_value(item.get('region_penalty_weight', analysis.jack_region_penalty_weight))} "
                         f"= {self._format_result_value(item.get('region_penalty', 0))}"
                     ),
                     "",
@@ -3442,45 +3350,31 @@ class SupportInputApp:
             lines.append("")
         lines.extend([
             "【求解器排序分數】",
-            f"品質分數：{self._format_result_value(quality_score)}",
+            f"品質分數：{self._format_result_value(analysis.quality_score)}",
             f"不合法懲罰：{self._format_result_value(invalid_penalty)}",
-            f"Jack Region 群組懲罰：{self._format_result_value(region_group_penalty)}",
-            f"材料比例懲罰：{self._format_result_value(material_ratio_penalty)}",
-            f"群組懲罰合計：{self._format_result_value(group_penalty)}",
+            f"Jack Region 群組懲罰：{self._format_result_value(analysis.region_group_penalty)}",
+            f"材料比例懲罰：{self._format_result_value(analysis.material_ratio_penalty)}",
+            f"群組懲罰合計：{self._format_result_value(analysis.group_penalty)}",
             "-" * 50,
-            f"排序用總分：{self._format_result_value(ranking_score)}",
+            f"排序用總分：{self._format_result_value(analysis.ranking_score)}",
         ])
         if solution is not None:
             lines.extend(self._format_support_global_analysis_lines(solution))
         return "\n".join(lines)
 
-    def _support_neighbor_penalty_for_plan(self, zoning, support_id):
-        item = self.result_items.get(zoning)
-        solution = item.get("result") if isinstance(item, dict) else None
-        plans = list(getattr(solution, "plans", []) or [])
-        if not any(
-            str(getattr(plan, "support_id", "")) == str(support_id)
-            for plan in plans
-        ):
-            return 0.0, []
-        return SupportPlanEditing.neighbor_checks(solution, support_id)
-
     def _open_support_plan_editor(self, zoning, support_id):
         item = self.result_items.get(zoning)
         solution = item.get("result") if isinstance(item, dict) else None
-        plan = next(
-            (
-                plan
-                for plan in list(getattr(solution, "plans", []) or [])
-                if str(getattr(plan, "support_id", "")) == str(support_id)
-            ),
-            None,
-        )
-        config = self._support_config_by_id(support_id)
-        if plan is None or config is None:
-            messagebox.showwarning("支撐編輯器", "找不到支撐方案或支撐設定資料。")
+        editing_service = self._support_plan_editing()
+        try:
+            context = editing_service.edit_context(solution, support_id)
+        except ValueError as exc:
+            messagebox.showwarning("支撐編輯器", str(exc))
             return
-        allowed_steel_lengths = support.configured_steel_lengths(config)
+        plan = context.plan
+        config = context.config
+        options = context.options
+        allowed_steel_lengths = list(options.steel_lengths)
 
         editor = tk.Toplevel(self.root)
         editor.title(f"支撐配置編輯器 - {zoning} / {support_id}")
@@ -3575,7 +3469,7 @@ class SupportInputApp:
                 if kind not in ("steel", "shim", "jack") or length <= 0:
                     return None
                 if kind == "jack":
-                    length = support.JACK_LENGTH
+                    length = options.jack_length
                     tree.set(child, "length", length)
                 data.append((kind, length))
             return data
@@ -3589,22 +3483,8 @@ class SupportInputApp:
             for index, child in enumerate(tree.get_children(""), start=1):
                 tree.set(child, "index", index)
 
-        def validate_piece_inputs(piece_rows):
-            if piece_rows is None:
-                return "❌ 類型或長度格式錯誤"
-            jack_count = sum(1 for kind, _length in piece_rows if kind == "jack")
-            if jack_count != 1:
-                return "❌ 千斤頂數量不是 1"
-            for kind, length in piece_rows:
-                if kind == "steel" and length not in allowed_steel_lengths:
-                    return f"❌ 鋼材長度不合法：{length} mm"
-                if kind == "shim" and length not in support.SHIM_LENGTHS:
-                    return f"❌ 調整塊長度不合法：{length} mm"
-                if kind == "jack" and length != support.JACK_LENGTH:
-                    return f"❌ 千斤頂長度必須固定為 {support.JACK_LENGTH} mm"
-            return None
-
         def evaluate_and_refresh():
+            nonlocal solution, plan
             piece_rows = rows()
             if piece_rows is None:
                 status_var.set("狀態：❌ 類型或長度格式錯誤")
@@ -3613,10 +3493,31 @@ class SupportInputApp:
                 summary_text.insert("1.0", "❌ 類型或長度格式錯誤，請修正表格內容。")
                 summary_text.configure(state="disabled")
                 return
-            input_error = validate_piece_inputs(piece_rows)
-            new_plan = support.evaluate_single_support(config, piece_rows)
-            self._replace_support_plan(zoning, support_id, new_plan)
-            neighbor_checks = self._support_neighbor_penalty_for_plan(zoning, support_id)
+            try:
+                staged = editing_service.stage_edit(
+                    solution,
+                    support_id,
+                    piece_rows,
+                )
+            except ValueError as exc:
+                status_var.set(f"狀態：❌ {exc}")
+                summary_text.configure(state="normal")
+                summary_text.delete("1.0", "end")
+                summary_text.insert("1.0", str(exc))
+                summary_text.configure(state="disabled")
+                return
+
+            solution = staged.solution
+            plan = staged.plan
+            item["result"] = solution
+            self._mark_results_updated()
+            new_plan = staged.plan
+            input_error = (
+                None
+                if staged.validation.valid
+                else staged.validation.message
+            )
+            neighbor_checks = list(staged.neighbor_checks)
 
             valid = bool(getattr(new_plan, "valid", False)) and not getattr(new_plan, "reason", "") and not input_error
             if valid:
@@ -3632,6 +3533,7 @@ class SupportInputApp:
                 config,
                 neighbor_checks,
                 solution=solution,
+                analysis=staged.analysis,
             ))
             summary_text.configure(state="disabled")
             self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
@@ -3643,7 +3545,7 @@ class SupportInputApp:
         def add_piece(kind, length):
             index = len(tree.get_children("")) + 1
             if kind == "jack":
-                length = support.JACK_LENGTH
+                length = options.jack_length
             tree.insert("", "end", iid=f"piece_{index}", values=(index, self._support_kind_label(kind), length))
             evaluate_and_refresh()
 
@@ -3669,14 +3571,14 @@ class SupportInputApp:
             renumber()
             evaluate_and_refresh()
 
-        default_steel_length = allowed_steel_lengths[0] if allowed_steel_lengths else 5000
+        default_steel_length = options.default_steel_length
         ttk.Button(
             button_frame,
             text="新增鋼材",
             command=lambda: add_piece("steel", default_steel_length),
         ).pack(side="left", padx=(0, 5))
-        ttk.Button(button_frame, text="新增調整塊", command=lambda: add_piece("shim", 150)).pack(side="left", padx=5)
-        ttk.Button(button_frame, text="新增千斤頂", command=lambda: add_piece("jack", support.JACK_LENGTH)).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="新增調整塊", command=lambda: add_piece("shim", options.default_shim_length)).pack(side="left", padx=5)
+        ttk.Button(button_frame, text="新增千斤頂", command=lambda: add_piece("jack", options.jack_length)).pack(side="left", padx=5)
         ttk.Button(button_frame, text="刪除構件", command=delete_piece).pack(side="left", padx=5)
         ttk.Button(button_frame, text="上移", command=lambda: move_piece(-1)).pack(side="left", padx=5)
         ttk.Button(button_frame, text="下移", command=lambda: move_piece(1)).pack(side="left", padx=5)
@@ -3694,15 +3596,15 @@ class SupportInputApp:
                     return
                 tree.set(row_id, "type", self._support_kind_label(normalized))
                 if normalized == "jack":
-                    tree.set(row_id, "length", support.JACK_LENGTH)
+                    tree.set(row_id, "length", options.jack_length)
                 elif normalized == "shim":
                     current_length = self._to_number(tree.set(row_id, "length"))
-                    if current_length not in support.SHIM_LENGTHS:
-                        tree.set(row_id, "length", support.SHIM_LENGTHS[0])
+                    if current_length not in options.shim_lengths:
+                        tree.set(row_id, "length", options.shim_lengths[0])
             elif column == "length":
                 kind = normalize_kind(tree.set(row_id, "type"))
                 if kind == "jack":
-                    tree.set(row_id, "length", support.JACK_LENGTH)
+                    tree.set(row_id, "length", options.jack_length)
                     evaluate_and_refresh()
                     return
                 try:
@@ -3720,10 +3622,10 @@ class SupportInputApp:
                         parent=editor,
                     )
                     return
-                if kind == "shim" and length not in support.SHIM_LENGTHS:
+                if kind == "shim" and length not in options.shim_lengths:
                     messagebox.showerror(
                         "輸入錯誤",
-                        f"調整塊長度必須存在於可用調整塊長度：{support.SHIM_LENGTHS}",
+                        f"調整塊長度必須存在於可用調整塊長度：{list(options.shim_lengths)}",
                         parent=editor,
                     )
                     return
@@ -3739,7 +3641,7 @@ class SupportInputApp:
             if not row_id or column not in ("type", "length"):
                 return
             if column == "length" and normalize_kind(tree.set(row_id, "type")) == "jack":
-                messagebox.showinfo("千斤頂長度固定", f"千斤頂長度固定為 {support.JACK_LENGTH} mm，不可修改。", parent=editor)
+                messagebox.showinfo("千斤頂長度固定", f"千斤頂長度固定為 {options.jack_length} mm，不可修改。", parent=editor)
                 return
             bbox = tree.bbox(row_id, column_id)
             if not bbox:
@@ -3751,7 +3653,7 @@ class SupportInputApp:
                 widget = ttk.Combobox(tree, values=("鋼材", "調整塊", "千斤頂"), state="readonly")
                 widget.set(tree.set(row_id, column))
             elif normalize_kind(tree.set(row_id, "type")) == "shim":
-                widget = ttk.Combobox(tree, values=[str(value) for value in support.SHIM_LENGTHS], state="readonly")
+                widget = ttk.Combobox(tree, values=[str(value) for value in options.shim_lengths], state="readonly")
                 widget.set(tree.set(row_id, column))
             else:
                 widget = tk.Entry(tree)
@@ -4381,32 +4283,23 @@ class SupportInputApp:
 
     @staticmethod
     def _format_support_global_analysis_lines(solution):
-        analysis = dict(getattr(solution, "material_ratio_analysis", {}) or {})
-        counts = dict(analysis.get("counts", {}) or {})
-        ratios = dict(analysis.get("ratios", {}) or {})
-        targets = dict(analysis.get("targets", {}) or {})
-        total = int(analysis.get("classified_total", 0) or 0)
-        deviation = float(analysis.get("ratio_deviation", 0.0) or 0.0)
-        weight = float(analysis.get("weight", support.SUPPORT_MATERIAL_RATIO_WEIGHT) or 0.0)
-        penalty = float(analysis.get("penalty", 0.0) or 0.0)
-        min_distance = getattr(solution, "min_jack_distance", None)
-        jack_distance_ok = (
-            min_distance is None
-            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
-        )
+        analysis = SupportPlanEditing.global_analysis(solution)
+        counts = analysis.counts
+        ratios = analysis.ratios
+        targets = analysis.targets
+        total = analysis.classified_total
+        deviation = analysis.ratio_deviation
+        weight = analysis.material_ratio_weight
+        penalty = analysis.material_ratio_penalty
 
         def percent(value):
             return f"{float(value):.2%}"
 
-        min_distance = getattr(solution, "min_jack_distance", None)
+        min_distance = analysis.min_jack_distance
         min_distance_text = (
             SupportInputApp._format_result_value(min_distance)
             if min_distance is not None
             else "無資料"
-        )
-        jack_distance_ok = (
-            min_distance is None
-            or float(min_distance) >= support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
         )
         lines = [
             "",
@@ -4431,21 +4324,21 @@ class SupportInputApp:
             f"{deviation:.4f} × {weight:.0f} = {penalty:.2f}",
             "",
             "群組評分",
-            f"Jack Region 懲罰：{SupportInputApp._format_result_value(getattr(solution, 'jack_region_penalty', 0.0), decimals=2)}",
+            f"Jack Region 懲罰：{SupportInputApp._format_result_value(analysis.jack_region_penalty, decimals=2)}",
             f"材料比例懲罰：{SupportInputApp._format_result_value(penalty, decimals=2)}",
-            f"群組懲罰合計：{SupportInputApp._format_result_value(getattr(solution, 'jack_region_penalty', 0.0) + penalty, decimals=2)}",
+            f"群組懲罰合計：{SupportInputApp._format_result_value(analysis.jack_region_penalty + penalty, decimals=2)}",
             "",
             "Jack 距離檢查：",
             f"最小相鄰 Jack 距離：{min_distance_text} mm",
-            f"規定最小距離：{support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS} mm",
-            f"狀態：{'合法' if jack_distance_ok else '不合法'}",
+            f"規定最小距離：{SupportInputApp._format_result_value(analysis.minimum_jack_distance)} mm",
+            f"狀態：{'合法' if analysis.jack_distance_ok else '不合法'}",
             f"Material Ratio Weight：{weight:.0f}",
         ])
         return lines
 
     @staticmethod
     def _solver_diagnostic_summary_lines(value):
-        diagnostics = solver_search.SolverDiagnostics.from_dict(value)
+        diagnostics = ProjectResultModel.solver_diagnostic_view(value)
         if diagnostics is None:
             return ["搜尋狀態：舊版結果，無診斷資料"]
         lines = [
@@ -4728,7 +4621,7 @@ class SupportInputApp:
                 legality = plan.get("legality") or {}
                 is_valid = legality.get("valid", plan.get("valid", False))
                 modified_text = f"[已修改] {'✅' if is_valid else '❌'}；"
-            diagnostics = solver_search.SolverDiagnostics.from_dict(
+            diagnostics = ProjectResultModel.solver_diagnostic_view(
                 result.get("search_diagnostics") if isinstance(result, dict) else None
             )
             search_text = (
@@ -4750,7 +4643,7 @@ class SupportInputApp:
         plans = getattr(result, "plans", [])
         total_score = getattr(result, "total_score", 0.0)
         valid = getattr(result, "valid", False)
-        diagnostics = solver_search.SolverDiagnostics.from_dict(
+        diagnostics = ProjectResultModel.solver_diagnostic_view(
             getattr(result, "search_diagnostics", None)
         )
         search_text = (
@@ -4824,14 +4717,13 @@ class SupportInputApp:
             )
 
     def _store_result_item(self, result_id, result_type, result):
-        result_id = str(result_id).strip()
-        if not result_id:
+        if not self._ensure_project_results().store_item(
+            result_id,
+            result_type,
+            result,
+        ):
             return
-        self.result_items[result_id] = {
-            "type": result_type,
-            "result": result,
-            "visible": True,
-        }
+        result_id = str(result_id).strip()
         self._mark_results_updated()
         group_iid = self._get_result_tree_info(result_id, self.result_items[result_id])["group_iid"]
         self._refresh_results_tree(selected_id=group_iid)
@@ -5561,36 +5453,38 @@ class SupportInputApp:
 
     def _complete_dxf_review(self, outcome, file_path):
         result = outcome.result
-        mode = outcome.import_mode
-        existing = self._project_rows_by_table() if mode == "append" else None
-        imported = result.to_project_rows(existing)
-
         previous_project_data = self._ensure_project_data()
         previous_results = copy.deepcopy(self._ensure_project_results())
         previous_solver_memory = copy.deepcopy(self.solver_memory)
         previous_support_cache = copy.deepcopy(self.support_candidate_cache)
-        case_data = previous_project_data.to_case_data()
-        if mode == "append":
-            walers = [*case_data["walers"], *imported["walers"]]
-            struts = [*case_data["struts"], *imported["struts"]]
-            braces = [*case_data["braces"], *imported["braces"]]
-        else:
-            walers = imported["walers"]
-            struts = imported["struts"]
-            braces = imported["braces"]
-        staged_project_data = ProjectDataModel(
-            walers=walers,
-            struts=struts,
-            braces=braces,
-            inventory=case_data["inventory"],
-            material_specs=case_data["material_specs"],
+        had_result = (
+            bool(previous_results.result_items)
+            or previous_results.persisted_payload is not None
         )
+        transition = self._ensure_project_service().stage_dxf_review_apply(
+            ApplyDxfReviewRequest(
+                current_project_data=previous_project_data,
+                current_workflow_status=self._current_dxf_workflow_status(),
+                import_mode=outcome.import_mode,
+                review_result=result,
+            )
+        )
+        imported = transition.imported_rows
 
         try:
-            self.project_data = staged_project_data
+            self.project_data = transition.project_data
+            self._project_results = transition.project_results
+            if transition.clear_solver_memory:
+                self.solver_memory.clear()
+            if transition.clear_support_candidate_cache:
+                self.support_candidate_cache.clear()
             for table_name in ("walers", "struts", "braces"):
                 self._refresh_tree(table_name)
-            self._handle_input_data_changed(preserve_view=False)
+            self._refresh_results_tree()
+            if had_result and hasattr(self, "result_text"):
+                self.show_result("結果已失效，請重新計算")
+            self._mark_project_dirty(transition.dirty_reason)
+            self.update_preview(preserve_view=False)
         except Exception:
             self.project_data = previous_project_data
             self._project_results = previous_results
@@ -5601,7 +5495,7 @@ class SupportInputApp:
             self.update_preview(preserve_view=False)
             raise
 
-        self._transition_dxf_workflow(DxfWorkflowStatus.COMPLETED)
+        self._transition_dxf_workflow(transition.workflow_status)
         self.dxf_review_session = None
         self._set_dxf_import_status(
             f"DXF 匯入成功：圍令 {len(imported['walers'])}、"
@@ -5759,10 +5653,12 @@ class SupportInputApp:
         return report.compatible and not self._dxf_binding_is_stale(), report
 
     def _invalidate_solver_state_after_input_change(self):
-        had_result = bool(self.result_items) or self.project_result is not None
-        self.result_items.clear()
-        self.project_result = None
-        self.last_calculated_time = None
+        result_model = self._ensure_project_results()
+        had_result = (
+            bool(result_model.result_items)
+            or result_model.persisted_payload is not None
+        )
+        result_model.clear()
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
         self._refresh_results_tree()
@@ -5777,27 +5673,20 @@ class SupportInputApp:
         field_name=None,
         dxf_binding_changed=None,
     ):
-        if dxf_binding_changed is None:
-            dxf_binding_changed = self._project_field_affects_dxf_binding(
-                table_name,
-                field_name,
-            )
-        if dxf_binding_changed:
+        change_plan = self._ensure_project_service().plan_input_change(
+            table_name=table_name,
+            field_name=field_name,
+            dxf_binding_changed=dxf_binding_changed,
+        )
+        if change_plan.mark_dxf_binding_stale:
             self._mark_dxf_binding_stale(
                 f"{table_name or 'project'}.{field_name or 'member'} 已修改"
             )
-        metadata_only = table_name == "material_specs"
-        if not metadata_only and table_name in (
-            None,
-            "walers",
-            "struts",
-            "braces",
-            "inventory",
-        ):
+        if change_plan.invalidate_solver_results:
             self._invalidate_solver_state_after_input_change()
-        if table_name == "inventory":
+        if change_plan.update_material_summary:
             self._update_material_summary()
-        self._mark_project_dirty("輸入資料已變更")
+        self._mark_project_dirty(change_plan.dirty_reason)
         self.update_preview(preserve_view=preserve_view)
 
     def _select_input_row(self, table_name, index):
@@ -7755,117 +7644,10 @@ class SupportInputApp:
     def _apply_waler_global_result(self, global_result):
         """Commit selected Waler data, then refresh the UI independently."""
 
-        solution = getattr(global_result, "solution", None)
-        diagnostics = getattr(global_result, "diagnostics", None)
         try:
-            if solution is None or not bool(getattr(solution, "valid", False)):
-                raise ValueError("全域圍令結果無效，未套用任何成果。")
-
-            selected_candidates = tuple(
-                getattr(solution, "selected_candidates", ()) or ()
+            staged = self._ensure_project_results().stage_waler_global_result(
+                global_result
             )
-            selected_ids = [
-                str(candidate.waler_id or "").strip()
-                for candidate in selected_candidates
-            ]
-            if (
-                not selected_candidates
-                or any(not waler_id for waler_id in selected_ids)
-                or len(selected_ids) != len(set(selected_ids))
-            ):
-                raise ValueError("全域圍令結果未對每支圍令提供唯一候選。")
-
-            targets = dict(getattr(diagnostics, "target_ratio", {}) or {})
-            raw_global_diagnostics = (
-                diagnostics.to_dict()
-                if diagnostics is not None and hasattr(diagnostics, "to_dict")
-                else copy.deepcopy(diagnostics)
-            )
-            global_diagnostics = (
-                dict(raw_global_diagnostics)
-                if isinstance(raw_global_diagnostics, Mapping)
-                else {}
-            )
-            changed_ids = tuple(
-                getattr(solution, "changed_waler_ids", ()) or ()
-            )
-            global_diagnostics["solution_summary"] = {
-                "total_short": solution.total_short,
-                "total_mid": solution.total_mid,
-                "total_long": solution.total_long,
-                "total_out": solution.total_out,
-                "short_ratio": solution.short_ratio,
-                "mid_ratio": solution.mid_ratio,
-                "long_ratio": solution.long_ratio,
-                "ratio_deviation": solution.ratio_deviation,
-                "total_out_distance_mm": solution.total_out_distance_mm,
-                "changed_waler_count": solution.changed_waler_count,
-                "changed_waler_ids": list(changed_ids),
-            }
-
-            staged_items = copy.deepcopy(self.result_items)
-            selected_id_set = set(selected_ids)
-            for result_id in list(staged_items):
-                if ProjectResultModel.waler_result_identity(
-                    result_id,
-                    staged_items[result_id],
-                ) in selected_id_set:
-                    staged_items.pop(result_id)
-
-            for candidate in selected_candidates:
-                record = global_result.local_result_for(candidate.waler_id)
-                if record is None:
-                    raise ValueError(
-                        f"全域結果缺少圍令 {candidate.waler_id} 的單支求解資料。"
-                    )
-                waler_input = record.waler_input
-                plan = copy.deepcopy(dict(candidate.payload))
-                plan["ratio_targets"] = dict(targets)
-                plan["segment_counts"] = {
-                    "short": candidate.short_count,
-                    "mid": candidate.mid_count,
-                    "long": candidate.long_count,
-                }
-                plan["global_candidate_rank"] = candidate.candidate_rank
-                plan["global_local_regret"] = candidate.local_regret
-                plan["global_material_counts"] = {
-                    "short": candidate.short_count,
-                    "mid": candidate.mid_count,
-                    "long": candidate.long_count,
-                    "out": candidate.out_count,
-                }
-                plan["global_out_distance_mm"] = candidate.out_distance_mm
-                local_diagnostics = getattr(record.result, "diagnostics", None)
-                result_id = (
-                    f"{candidate.waler_id}-方案{candidate.candidate_rank}"
-                )
-                staged_items[result_id] = {
-                    "type": "waler",
-                    "result": {
-                        "waler_id": candidate.waler_id,
-                        "option_index": candidate.candidate_rank,
-                        "selected_plan": plan,
-                        "ratio_targets": dict(targets),
-                        "required_length": int(round(waler_input.total_length)),
-                        "forbidden_points": list(waler_input.forbidden_points),
-                        "joint_clearance": 300,
-                        "min_piece_length": 1000,
-                        "max_piece_length": 10000,
-                        "material_spec": waler_input.material_spec,
-                        "search_diagnostics": (
-                            local_diagnostics.to_dict()
-                            if local_diagnostics is not None
-                            and hasattr(local_diagnostics, "to_dict")
-                            else copy.deepcopy(local_diagnostics)
-                        ),
-                        "global_search_diagnostics": copy.deepcopy(
-                            global_diagnostics
-                        ),
-                        "global_selected": True,
-                        "result_series": "global",
-                    },
-                    "visible": True,
-                }
         except Exception as exc:
             LOGGER.exception("Global Waler apply staging failed")
             return WalerGlobalApplyOutcome(
@@ -7882,7 +7664,7 @@ class SupportInputApp:
             getattr(self, "project_dirty_reason", "") or ""
         )
         try:
-            self.result_items = staged_items
+            self.result_items = staged.result_items
             self._mark_results_updated()
         except Exception as exc:
             self.result_items = previous_items
@@ -7899,7 +7681,9 @@ class SupportInputApp:
 
         LOGGER.info("Global Waler apply commit success")
         try:
-            first_id = selected_candidates[0].waler_id
+            solution = staged.solution
+            changed_ids = staged.changed_waler_ids
+            first_id = staged.selected_candidates[0].waler_id
             self._refresh_results_tree(
                 selected_id=self._result_group_iid("waler", first_id),
             )
@@ -7987,7 +7771,7 @@ class SupportInputApp:
 
     def _store_support_solution(self, zoning, solution):
         self._store_result_item(zoning, "support", solution)
-        diagnostics = solver_search.SolverDiagnostics.from_dict(
+        diagnostics = ProjectResultModel.solver_diagnostic_view(
             getattr(solution, "search_diagnostics", None)
         )
         search_status = ""
@@ -8004,82 +7788,20 @@ class SupportInputApp:
         )
 
     def _store_waler_result(self, result):
-        waler_id = str(result.get("waler_id", "")).strip()
-        if not waler_id:
-            self.show_result("錯誤：圍令結果缺少圍令編號")
+        try:
+            staged = self._ensure_project_results().stage_single_waler_result(
+                result,
+                self.walers,
+            )
+        except ValueError as exc:
+            self.show_result(str(exc))
             return
 
-        top_results = result.get("top_results")
-        if top_results is None:
-            selected_plan = result.get("selected_plan")
-            top_results = [selected_plan] if selected_plan else []
-        top_results = list(top_results or [])[:5]
-        if not top_results:
-            self.show_result(f"錯誤：{waler_id} 沒有可儲存的圍令方案")
-            return
-
-        ratio_targets = result.get("ratio_targets")
-        required_length = result.get("required_length")
-        forbidden_points = list(result.get("forbidden_points") or [])
-        joint_clearance = result.get("joint_clearance", 300)
-        min_piece_length = result.get("min_piece_length", 1000)
-        max_piece_length = result.get("max_piece_length", 10000)
-        search_diagnostics = copy.deepcopy(result.get("search_diagnostics"))
-        stored_diagnostics = solver_search.SolverDiagnostics.from_dict(
-            search_diagnostics
+        waler_id = staged.waler_id
+        stored_diagnostics = ProjectResultModel.solver_diagnostic_view(
+            staged.search_diagnostics
         )
-        material_spec = str(result.get("material_spec", "") or "").strip()
-        if not material_spec:
-            for row in self.walers:
-                if str(row.get("WalerID", "") or "").strip() == waler_id:
-                    material_spec = str(row.get("material_spec", "") or "").strip()
-                    break
-        existing_waler_results = [
-            (result_id, item)
-            for result_id, item in self.result_items.items()
-            if ProjectResultModel.waler_result_identity(
-                result_id,
-                item,
-            )
-            == waler_id
-        ]
-        has_global_result = any(
-            bool(item["result"].get("global_selected"))
-            for _result_id, item in existing_waler_results
-        )
-        old_result_ids = [
-            result_id
-            for result_id, item in existing_waler_results
-            if not bool(item["result"].get("global_selected"))
-        ]
-        for result_id in old_result_ids:
-            self.result_items.pop(result_id, None)
-        for index, plan in enumerate(top_results, start=1):
-            result_id = (
-                f"{waler_id}-單支方案{index}"
-                if has_global_result
-                else f"{waler_id}-方案{index}"
-            )
-            self.result_items[result_id] = {
-                "type": "waler",
-                "result": {
-                    "waler_id": waler_id,
-                    "option_index": index,
-                    "selected_plan": plan,
-                    "ratio_targets": ratio_targets or plan.get("ratio_targets"),
-                    "required_length": required_length,
-                    "forbidden_points": forbidden_points,
-                    "joint_clearance": joint_clearance,
-                    "min_piece_length": min_piece_length,
-                    "max_piece_length": max_piece_length,
-                    "material_spec": material_spec,
-                    "search_diagnostics": search_diagnostics,
-                    "result_series": (
-                        "single" if has_global_result else ""
-                    ),
-                },
-                "visible": False,
-            }
+        self.result_items = staged.result_items
 
         self._mark_results_updated()
         self._refresh_results_tree(
@@ -8087,10 +7809,10 @@ class SupportInputApp:
         )
         self.update_preview()
         self.show_result(
-            f"已產生 {waler_id} 前 {len(top_results)} 名單支方案並加入結果。"
+            f"已產生 {waler_id} 前 {staged.result_count} 名單支方案並加入結果。"
             + (
                 "原全域方案已保留。"
-                if has_global_result
+                if staged.preserved_global_result
                 else ""
             )
             + (

@@ -31,6 +31,7 @@ from dxf_import.review_confirmation import (
     unconfirmed_formal_review_items,
     valid_review_confirmations,
 )
+from dxf_import.review_workflow import DXFReviewWorkflow, ReviewMutation
 from dxf_import.validation import build_review_items
 
 
@@ -317,33 +318,12 @@ class ReviewConfirmationTests(unittest.TestCase):
         )
 
     def test_only_collateral_confirmation_reset_shows_popup(self):
-        result = _result()
-        items = build_review_items(result)
-        confirmations = {}
-        for member_id in ("W1", "S1"):
-            confirmations = confirm_review_item(
-                result,
-                _item(result, member_id),
-                confirmations,
-            )
         dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.result = result
-        dialog.review_items = items
-        dialog.review_confirmations = confirmations
         dialog.window = object()
-        before = dialog._confirmed_item_snapshot()
-        changed = replace(
-            result,
-            walers=(replace(result.walers[0], material_spec="RC"),),
-            struts=(replace(result.struts[0], material_spec="H400x400"),),
-        )
-        dialog.result = changed
-        dialog.review_items = build_review_items(changed)
 
         with patch("tkinter.messagebox.showinfo") as showinfo:
-            dialog._finish_confirmation_mutation(
-                before,
-                initiating_member_ids=("S1",),
+            dialog._show_workflow_confirmation_invalidations(
+                ReviewMutation(True, ("W1",)),
             )
 
         showinfo.assert_called_once()
@@ -352,25 +332,12 @@ class ReviewConfirmationTests(unittest.TestCase):
         self.assertNotIn("S1", message)
 
     def test_current_member_only_reset_is_silent(self):
-        result = _result()
-        item = _item(result, "S1")
         dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.result = result
-        dialog.review_items = build_review_items(result)
-        dialog.review_confirmations = confirm_review_item(result, item)
         dialog.window = object()
-        before = dialog._confirmed_item_snapshot()
-        changed = replace(
-            result,
-            struts=(replace(result.struts[0], material_spec="H400x400"),),
-        )
-        dialog.result = changed
-        dialog.review_items = build_review_items(changed)
 
         with patch("tkinter.messagebox.showinfo") as showinfo:
-            dialog._finish_confirmation_mutation(
-                before,
-                initiating_member_ids=("S1",),
+            dialog._show_workflow_confirmation_invalidations(
+                ReviewMutation(True),
             )
 
         showinfo.assert_not_called()
@@ -385,6 +352,12 @@ class ImportCompletionGateTests(unittest.TestCase):
         dialog.coordinate_valid = True
         dialog.review_items = build_review_items(result)
         dialog.review_confirmations = dict(confirmations or {})
+        workflow = DXFReviewWorkflow.__new__(DXFReviewWorkflow)
+        workflow.result = dialog.result
+        workflow.review_items = dialog.review_items
+        workflow.review_confirmations = dialog.review_confirmations
+        workflow.coordinate_valid = dialog.coordinate_valid
+        dialog.review_workflow = workflow
         dialog._selected_member = lambda: None
         dialog.mode_var = _Variable("replace")
         dialog.window = SimpleNamespace(destroy=lambda: destroyed.append(True))

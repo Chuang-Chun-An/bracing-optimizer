@@ -10,8 +10,16 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Protocol, Sequence
+
+from bracing_optimizer.application.project_data import ProjectDataModel
+from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.solver_input_builder import (
+    InventoryLookup,
+    UNLIMITED_INVENTORY_QTY,
+)
 
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
@@ -19,9 +27,91 @@ from bracing_optimizer.infrastructure.project_persistence import (
     DxfCompatibilityChecker,
     DxfCompatibilityReport,
     DxfStatus,
+    DxfWorkflowStatus,
+    PROJECT_SCHEMA_VERSION,
     ProjectPersistenceError,
     ProjectSerializer,
+    dxf_workflow_status_from_payload,
 )
+
+
+PROJECT_DXF_BINDING_FIELDS = {
+    "walers": frozenset(("WalerID", "StartX", "StartY", "EndX", "EndY")),
+    "struts": frozenset((
+        "StrutID",
+        "FromWaler",
+        "ToWaler",
+        "StartX",
+        "StartY",
+        "EndX",
+        "EndY",
+    )),
+    "braces": frozenset((
+        "BraceID",
+        "FromWaler",
+        "ToWaler",
+        "StartX",
+        "StartY",
+        "EndX",
+        "EndY",
+    )),
+}
+
+
+class ProjectRowsSource(Protocol):
+    """Port implemented by a reviewed DXF result without importing its adapter."""
+
+    def to_project_rows(
+        self,
+        existing_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, list[dict[str, Any]]]: ...
+
+
+@dataclass(frozen=True)
+class ApplyDxfReviewRequest:
+    current_project_data: ProjectDataModel
+    current_workflow_status: DxfWorkflowStatus
+    import_mode: str
+    review_result: ProjectRowsSource
+
+
+@dataclass(frozen=True)
+class ApplyDxfReviewResult:
+    project_data: ProjectDataModel
+    project_results: ProjectResultModel
+    imported_rows: dict[str, list[dict[str, Any]]]
+    workflow_status: DxfWorkflowStatus
+    clear_solver_memory: bool
+    clear_support_candidate_cache: bool
+    dirty_reason: str
+
+
+@dataclass(frozen=True)
+class HydratedProject:
+    project_path: Path | None
+    project_data: ProjectDataModel
+    project_results: ProjectResultModel
+    workflow_status: DxfWorkflowStatus
+    dxf_import_state: dict[str, Any] | None
+    dxf_asset: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class BuildProjectPayloadRequest:
+    project_name: str
+    project_data: ProjectDataModel
+    project_results: ProjectResultModel
+    workflow_status: DxfWorkflowStatus
+    dxf_import_state: Mapping[str, Any] | None
+    dxf_asset: Mapping[str, Any] | None
+
+
+@dataclass(frozen=True)
+class ProjectInputChangePlan:
+    mark_dxf_binding_stale: bool
+    invalidate_solver_results: bool
+    update_material_summary: bool
+    dirty_reason: str = "輸入資料已變更"
 
 
 @dataclass(frozen=True)
@@ -49,6 +139,7 @@ class LoadProjectResult:
     payload: dict[str, Any]
     dxf_status_report: DxfAssetStatusReport
     legacy_no_state: bool
+    hydrated_project: HydratedProject
 
 
 @dataclass(frozen=True)
@@ -72,7 +163,7 @@ class RelinkDxfResult:
 
 
 class ProjectService:
-    """Coordinate project persistence without depending on GUI state."""
+    """Coordinate project use cases without depending on GUI state."""
 
     def __init__(
         self,
@@ -109,6 +200,156 @@ class ProjectService:
         """Describe a DXF imported into memory before the project is saved."""
 
         return self.dxf_asset_manager.runtime_report(source_path)
+
+    def stage_dxf_review_apply(
+        self,
+        request: ApplyDxfReviewRequest,
+    ) -> ApplyDxfReviewResult:
+        """Build the next Project state for one completed DXF review."""
+
+        try:
+            workflow_status = (
+                request.current_workflow_status
+                if isinstance(request.current_workflow_status, DxfWorkflowStatus)
+                else DxfWorkflowStatus(
+                    str(request.current_workflow_status).strip().upper()
+                )
+            )
+        except ValueError as exc:
+            raise ValueError("DXF workflow 狀態無效。") from exc
+        if workflow_status != DxfWorkflowStatus.REVIEW:
+            raise ValueError("只有 REVIEW 狀態可以完成 DXF 匯入。")
+
+        import_mode = str(request.import_mode or "").strip().lower()
+        if import_mode not in {"replace", "append"}:
+            raise ValueError(f"不支援的 DXF 匯入方式：{request.import_mode}")
+
+        current = request.current_project_data
+        case_data = current.to_case_data()
+        existing_rows = current.geometry_rows() if import_mode == "append" else None
+        imported = request.review_result.to_project_rows(existing_rows)
+
+        if import_mode == "append":
+            walers = [*case_data["walers"], *imported["walers"]]
+            struts = [*case_data["struts"], *imported["struts"]]
+            braces = [*case_data["braces"], *imported["braces"]]
+        else:
+            walers = imported["walers"]
+            struts = imported["struts"]
+            braces = imported["braces"]
+
+        staged_project_data = ProjectDataModel(
+            walers=walers,
+            struts=struts,
+            braces=braces,
+            inventory=case_data["inventory"],
+            material_specs=case_data["material_specs"],
+        )
+        return ApplyDxfReviewResult(
+            project_data=staged_project_data,
+            project_results=ProjectResultModel(),
+            imported_rows=copy.deepcopy(imported),
+            workflow_status=DxfWorkflowStatus.COMPLETED,
+            clear_solver_memory=True,
+            clear_support_candidate_cache=True,
+            dirty_reason="輸入資料已變更",
+        )
+
+    def hydrate_project(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        project_path: str | Path | None = None,
+        default_inventory: Sequence[Mapping[str, Any]] = (),
+    ) -> HydratedProject:
+        """Create all application models before the caller adopts project state."""
+
+        project_data = ProjectDataModel.from_case_data(
+            payload["input_data"],
+            default_inventory=default_inventory,
+        )
+        project_results = ProjectResultModel.from_payload(payload.get("result"))
+        import_state = payload.get("dxf_import_state")
+        asset = payload.get("dxf_asset")
+        return HydratedProject(
+            project_path=(
+                Path(project_path).resolve()
+                if project_path is not None
+                else None
+            ),
+            project_data=project_data,
+            project_results=project_results,
+            workflow_status=dxf_workflow_status_from_payload(payload),
+            dxf_import_state=(
+                copy.deepcopy(dict(import_state))
+                if isinstance(import_state, Mapping)
+                else None
+            ),
+            dxf_asset=(
+                copy.deepcopy(dict(asset))
+                if isinstance(asset, Mapping)
+                else None
+            ),
+        )
+
+    def build_project_payload(
+        self,
+        request: BuildProjectPayloadRequest,
+        *,
+        now: Callable[[], datetime] = datetime.now,
+    ) -> dict[str, Any]:
+        """Build the current persisted project schema from application models."""
+
+        usage = request.project_results.collect_visible_material_usage()
+        inventory = InventoryLookup(request.project_data.inventory)
+        material_summary = ProjectResultModel.build_material_summary(
+            usage,
+            inventory.quantity,
+            unlimited_quantity=UNLIMITED_INVENTORY_QTY,
+        )
+        return {
+            "schema_version": PROJECT_SCHEMA_VERSION,
+            "project_information": {
+                "project_name": str(request.project_name),
+                "saved_at": now().isoformat(timespec="seconds"),
+                "application": "SupportSolver",
+            },
+            "input_data": request.project_data.to_case_data(),
+            "dxf_workflow_status": request.workflow_status.value,
+            "dxf_import_state": copy.deepcopy(request.dxf_import_state),
+            "dxf_asset": copy.deepcopy(request.dxf_asset),
+            "result": request.project_results.to_payload(
+                material_summary,
+                now=now,
+            ),
+        }
+
+    @staticmethod
+    def plan_input_change(
+        *,
+        table_name: str | None,
+        field_name: str | None,
+        dxf_binding_changed: bool | None = None,
+    ) -> ProjectInputChangePlan:
+        """Describe application-state invalidation caused by one input edit."""
+
+        if dxf_binding_changed is None:
+            dxf_binding_changed = field_name in PROJECT_DXF_BINDING_FIELDS.get(
+                table_name,
+                (),
+            )
+        invalidate_solver_results = table_name in {
+            None,
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+        }
+        return ProjectInputChangePlan(
+            mark_dxf_binding_stale=bool(dxf_binding_changed),
+            invalidate_solver_results=invalidate_solver_results,
+            update_material_summary=table_name == "inventory",
+        )
 
     def save_project(self, request: SaveProjectRequest) -> SaveProjectResult:
         path = Path(request.project_path).resolve()
@@ -163,7 +404,12 @@ class ProjectService:
                 )
         return None
 
-    def load_project(self, project_path: str | Path) -> LoadProjectResult:
+    def load_project(
+        self,
+        project_path: str | Path,
+        *,
+        default_inventory: Sequence[Mapping[str, Any]] = (),
+    ) -> LoadProjectResult:
         path = Path(project_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(f"找不到專案：{path}")
@@ -182,7 +428,18 @@ class ProjectService:
             legacy_no_state=legacy_no_state,
             repair=True,
         )
-        return LoadProjectResult(path, payload, status, legacy_no_state)
+        hydrated = self.hydrate_project(
+            payload,
+            project_path=path,
+            default_inventory=default_inventory,
+        )
+        return LoadProjectResult(
+            path,
+            payload,
+            status,
+            legacy_no_state,
+            hydrated,
+        )
 
     @staticmethod
     def _payload_has_solver_result(payload: Mapping[str, Any]) -> bool:
@@ -302,8 +559,14 @@ class ProjectService:
 
 
 __all__ = [
+    "ApplyDxfReviewRequest",
+    "ApplyDxfReviewResult",
+    "BuildProjectPayloadRequest",
+    "HydratedProject",
     "LoadProjectResult",
+    "PROJECT_DXF_BINDING_FIELDS",
     "ProjectService",
+    "ProjectInputChangePlan",
     "RelinkDxfRequest",
     "RelinkDxfResult",
     "SaveProjectRequest",

@@ -2,6 +2,7 @@ import unittest
 from collections import Counter
 
 from bracing_optimizer.algorithms import support
+from bracing_optimizer.algorithms.solver_search import SolverDiagnostics
 from bracing_optimizer.application.project_results import (
     MaterialDetailBuildError,
     MaterialDetailRow,
@@ -10,6 +11,29 @@ from bracing_optimizer.application.project_results import (
 
 
 class ProjectResultModelTests(unittest.TestCase):
+    def test_solver_diagnostic_view_normalizes_algorithm_result(self):
+        diagnostics = SolverDiagnostics(
+            solver_type="support",
+            legal_solution_found=True,
+            search_was_escalated=True,
+            result_is_stable=True,
+            affected_component_ids=["S1"],
+            component_candidate_counts={"S1": 3},
+        )
+
+        view = ProjectResultModel.solver_diagnostic_view(
+            diagnostics.to_dict()
+        )
+
+        self.assertTrue(view.legal_solution_found)
+        self.assertTrue(view.search_was_escalated)
+        self.assertTrue(view.result_is_stable)
+        self.assertEqual(view.affected_component_ids, ("S1",))
+        self.assertEqual(view.component_candidate_counts, {"S1": 3})
+
+    def test_solver_diagnostic_view_supports_legacy_missing_data(self):
+        self.assertIsNone(ProjectResultModel.solver_diagnostic_view(None))
+
     def test_modified_waler_marker_survives_project_round_trip(self):
         source = {
             "type": "waler",

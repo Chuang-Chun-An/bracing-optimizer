@@ -273,6 +273,28 @@ class ProjectDataModel:
         self.replace_table("inventory", inventory)
         self.replace_table("material_specs", material_specs)
 
+    @classmethod
+    def from_case_data(
+        cls,
+        input_data: Mapping[str, Any],
+        *,
+        default_inventory: Sequence[Mapping[str, Any]] = (),
+    ) -> "ProjectDataModel":
+        """Build a complete project model from one persisted input payload."""
+
+        if not isinstance(input_data, Mapping):
+            raise ValueError("input_data 必須是物件。")
+        return cls(
+            walers=input_data.get("walers", ()),
+            struts=input_data.get("struts", ()),
+            braces=input_data.get("braces", ()),
+            inventory=input_data.get("inventory", default_inventory),
+            material_specs=input_data.get(
+                "material_specs",
+                DEFAULT_MATERIAL_SPECS,
+            ),
+        )
+
     def rows(self, table_name: str) -> list[dict[str, Any]]:
         if table_name not in TABLE_SPECS:
             raise ValueError(f"不支援的資料表：{table_name}")

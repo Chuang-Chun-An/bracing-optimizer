@@ -28,6 +28,27 @@ def imports_any(module_name: str, forbidden: set[str]) -> bool:
 
 
 class ApplicationDomainBoundaryTests(unittest.TestCase):
+    def test_main_does_not_import_solver_algorithms(self):
+        self.assertFalse(
+            imports_any("main.py", {"bracing_optimizer.algorithms"})
+        )
+
+    def test_project_service_does_not_import_gui_or_dxf_adapters(self):
+        forbidden = {
+            "dxf_import",
+            "main",
+            "presentation",
+            "bracing_optimizer.presentation",
+            "tkinter",
+        }
+
+        self.assertFalse(
+            imports_any(
+                "bracing_optimizer/application/project_service.py",
+                forbidden,
+            )
+        )
+
     def test_solver_core_and_use_cases_do_not_import_external_adapters(self):
         forbidden = {
             "cad_builder",

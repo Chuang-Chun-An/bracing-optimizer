@@ -444,6 +444,9 @@ class ReviewPresentationTests(unittest.TestCase):
         dialog.review_items = (formal, unresolved)
         dialog.selected_review_item_key = ""
         dialog.result = object()
+        dialog.review_workflow = SimpleNamespace(
+            is_review_item_confirmed=lambda _item: False,
+        )
         dialog._updating_member_tree = False
         dialog.member_tree_selection = SimpleNamespace(select=lambda _iid: None)
 

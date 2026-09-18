@@ -8,9 +8,8 @@ import unittest
 import ezdxf
 from ezdxf.disassemble import recursive_decompose
 
-from dxf_import import import_dxf
 from dxf_import.geometry import _point
-from dxf_import.importer import DXFImporter
+from dxf_import.importer import DXFImporter, import_dxf
 from dxf_import.recognition import _GeometryGroup
 
 

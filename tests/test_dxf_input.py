@@ -8,47 +8,55 @@ from types import SimpleNamespace
 import ezdxf
 from bracing_optimizer.presentation.cad_view_interaction import CADViewport
 
-from dxf_import import (
-    CandidatePoint,
+from dxf_import.candidate_points import (
     CandidatePointBuilder,
     CandidatePointStore,
-    CandidateTreeAdapter,
-    CoordinateSystem,
+    add_cad_candidate_points,
+    apply_candidate_point_selection,
+    associate_components_to_struts,
+    select_engineering_line,
+    set_cad_engineering_line,
+)
+from dxf_import.controllers import SelectionController
+from dxf_import.dialog import DXFImportDialog
+from dxf_import.importer import (
     DEFAULT_LAYER_MAPPING,
     Y1A_LAYER_MAPPING,
     Y29_LAYER_MAPPING,
-    DXFImportDialog,
+    default_layer_mapping_for_file,
+    import_dxf,
+    read_dxf_layers,
+)
+from dxf_import.models import (
+    CandidatePoint,
+    Column,
+    CoordinateSystem,
     DXFImportError,
     GeometryTolerances,
-    PreviewRenderer,
-    PreviewScene,
-    RenderDirty,
-    RenderScheduler,
-    SelectionController,
     SelectionState,
     SourceGeometry,
     SourceText,
     Strut,
     Waler,
-    Column,
-    add_cad_candidate_points,
-    associate_components_to_struts,
-    apply_candidate_point_selection,
     apply_coordinate_system,
-    build_problem_records,
-    build_validation_overview,
     coordinate_system_from_candidate,
-    default_layer_mapping_for_file,
-    fit_window_geometry_to_work_areas,
-    import_dxf,
     normalize_project_coordinate,
     parse_coordinate_origin,
-    read_dxf_layers,
-    rectangle_centerline,
-    select_engineering_line,
-    set_cad_engineering_line,
+)
+from dxf_import.preview import (
+    CandidateTreeAdapter,
+    PreviewRenderer,
+    PreviewScene,
+    RenderDirty,
+    RenderScheduler,
+)
+from dxf_import.recognition import rectangle_centerline
+from dxf_import.validation import (
+    build_problem_records,
+    build_validation_overview,
     validate_candidate_point_pair,
 )
+from window_layout import fit_window_geometry_to_work_areas
 
 
 LAYERS = ("WALER", "STRUT", "BRACE", "EMPTY")
@@ -1961,6 +1969,9 @@ class DXFSelectionArchitectureTests(unittest.TestCase):
         dialog.preview_viewport = CADViewport()
         dialog.preview_fit_all = True
         dialog.render_scheduler = SimpleNamespace(request=render_requests.append)
+        dialog.review_workflow = SimpleNamespace(
+            review_item_for_member=lambda _member_id: None,
+        )
         dialog._update_selected_member_panel = lambda: panel_updates.append(
             controller.selected_ids[-1][0]
         )

@@ -864,7 +864,7 @@ Matplotlib 自訂工具列，只保留：
 | 案例管理 | `_test_case_json_files()`、`_sanitize_test_case_name()`、`_test_case_path()`、`_refresh_test_case_list()`、`_selected_test_case_name()`、`_load_selected_test_case()`、`_delete_selected_test_case()`、`_save_current_test_case_from_prompt()`、`_build_test_case_payload()`、`save_test_case()`、`load_test_case()` | case name/path/payload；讀寫 JSON |
 | 專案持久化 | `_new_project()`、`_save_current_project()`、`_save_project_as()`、`save_project_case()`、`load_project_case()`、`_relink_dxf()`、`_mark_project_dirty()` | 協調 serializer／asset manager，更新 GUI 與 Dirty；不自行做 hash 或幾何比對 |
 | 結果互動 | `_on_results_tree_click()`、`_on_results_tree_space()`、`_on_results_tree_double_click()`、`_show_result_details()` | 切換顯示、展開、詳細資訊與雙擊編輯 |
-| 支撐方案編輯 | `_support_config_by_id()`、`_support_plan_piece_rows()`、`_support_kind_*()`、`_replace_support_plan()`、`_recalculate_support_global_solution()`、`_find_support_forbidden_zone_hit()`、`_format_support_status()`、`_format_support_plan_breakdown()`、`_support_neighbor_penalty_for_plan()`、`_open_support_plan_editor()` | 編輯 pieces、重評單體與鄰支撐 penalty |
+| 支撐方案編輯 | `_support_plan_editing()`、`_support_plan_piece_rows()`、`_support_kind_*()`、`_find_support_forbidden_zone_hit()`、`_format_support_status()`、`_format_support_plan_breakdown()`、`_open_support_plan_editor()` | 呈現編輯器並委派 `SupportPlanEditing` 取得可用料長、驗證、staged result、鄰支撐檢查與評分分析 |
 | 圍令方案編輯 | `_open_waler_plan_editor()`、`_apply_waler_plan_segments()`、`_recalculate_waler_plan()`、`_has_modified_waler_results()` | 直接編輯 Top 5 方案的鋼材順序，立即重算 score、工程合法性與預覽 |
 | 結果 ID/群組 | `_result_group_iid()`、`_is_result_group_iid()`、`_support_plan_iid()`、`_is_support_plan_iid()`、`_parse_support_plan_iid()`、`_get_result_tree_info()`、`_get_result_group_entries()` | Treeview IID 與排序 |
 | 顯示狀態 | `_result_group_visible_mark()`、`_result_item_visible_mark()`、`_support_plan_ids()`、`_support_plan_visible()`、`_support_group_visible_mark()`、`_toggle_result_group_visibility()`、`_toggle_result_visibility()`、`_toggle_support_plan_visibility()` | 管理方案可見性 |
@@ -1930,10 +1930,6 @@ main.py
 │  ├─ project_results.py
 │  ├─ project_service.py
 │  └─ project_validation.py
-├─ bracing_optimizer/algorithms/
-│  ├─ wales.py
-│  ├─ support.py
-│  └─ solver_search.py
 ├─ bracing_optimizer/domain/
 │  ├─ project_domain.py
 │  └─ material_rules.py
@@ -1955,6 +1951,12 @@ tests/test_cad_builder_integration.py
 
 `bracing_optimizer/algorithms/` 與 `bracing_optimizer/domain/` 不 import `main.py` 或
 `bracing_optimizer/presentation/`，因此 Solver 與 Domain 不依賴 GUI。
+
+`main.py` 不直接 import `bracing_optimizer.algorithms.*`。手動支撐方案編輯透過
+`application.plan_editing.SupportPlanEditing` 取得編輯選項、工程驗證、staged solution
+與顯示用評分資料；搜尋診斷則由 `application.project_results.ProjectResultModel`
+投影為穩定的 Application view。Solver Dialog 與共用 formatter 仍有歷史性的
+Presentation → Algorithms 依賴，未納入這一階段的重構範圍。
 
 ## 14.2 Waler call graph
 

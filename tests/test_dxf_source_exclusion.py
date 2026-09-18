@@ -26,6 +26,7 @@ from dxf_import.models import (
     apply_coordinate_system,
 )
 from dxf_import.preview import PreviewRenderer, PreviewScene
+from dxf_import.review_workflow import DXFReviewWorkflow, SourceExclusionPlan
 from dxf_import.source_exclusion import (
     canonical_source_identity,
     capture_manual_overrides,
@@ -702,10 +703,6 @@ class SourceExclusionTests(unittest.TestCase):
         baseline = self.importer.convert(
             layer_roles={"WALER": "waler", "STRUT": "strut"},
         )
-        local = apply_coordinate_system(
-            baseline,
-            CoordinateSystem("local", 100.0, 200.0),
-        )
         source = baseline.walers[0]
         exclusion = ExcludedSource(
             "waler",
@@ -714,38 +711,32 @@ class SourceExclusionTests(unittest.TestCase):
             source.source_entity_types,
             source.id,
         )
-        dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.importer = self.importer
-        dialog.material_specs = ()
-        dialog.world_result = baseline
-        dialog.result = local
-        dialog.excluded_sources = ()
+        workflow = DXFReviewWorkflow(
+            self.importer,
+            self.path,
+            initial_world_result=baseline,
+        )
+        workflow.set_coordinate_origin((100.0, 200.0))
+        local = workflow.result
 
-        stage = dialog._stage_source_exclusion_change((exclusion,))
+        stage = workflow.plan_source_exclusion_change((exclusion,))
 
-        self.assertIs(dialog.world_result, baseline)
-        self.assertIs(dialog.result, local)
-        self.assertEqual(dialog.excluded_sources, ())
+        self.assertIs(workflow.world_result, baseline)
+        self.assertIs(workflow.result, local)
+        self.assertEqual(workflow.excluded_sources, ())
         self.assertTrue(
             any(
                 message.severity in {"error", "critical"}
-                for message in stage["result"].messages
+                for message in stage.result.messages
             )
         )
-        self.assertEqual(stage["result"].coordinate_system.mode, "local")
+        self.assertEqual(stage.result.coordinate_system.mode, "local")
 
-        dialog._clear_waler_adjustment_preview = Mock()
-        dialog._refresh_result_views = Mock()
-        dialog.selection_controller = SimpleNamespace(state=None)
-        dialog.preview_view_bounds = (1.0, 2.0, 3.0, 4.0)
-        dialog.preview_fit_all = True
-        dialog._commit_source_exclusion_stage(stage, "excluded:waler")
+        workflow.commit_source_exclusion_plan(stage)
 
-        self.assertIs(dialog.world_result, stage["world_result"])
-        self.assertIs(dialog.result, stage["result"])
-        self.assertEqual(dialog.excluded_sources, (exclusion,))
-        self.assertEqual(dialog.selected_review_item_key, "excluded:waler")
-        dialog._refresh_result_views.assert_called_once_with()
+        self.assertIs(workflow.world_result, stage.world_result)
+        self.assertIs(workflow.result, stage.result)
+        self.assertEqual(workflow.excluded_sources, (exclusion,))
 
     def test_restore_is_staged_without_changing_current_result(self):
         baseline = self.importer.convert(
@@ -757,19 +748,23 @@ class SourceExclusionTests(unittest.TestCase):
             layer_roles={"WALER": "waler", "STRUT": "strut"},
             excluded_sources=(exclusion,),
         )
-        dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.importer = self.importer
-        dialog.material_specs = ()
-        dialog.world_result = current
-        dialog.result = current
-        dialog.excluded_sources = (exclusion,)
+        workflow = DXFReviewWorkflow(
+            self.importer,
+            self.path,
+            initial_state={
+                "source_path": str(self.path),
+                "source_fingerprint": self.importer.source_fingerprint,
+                "excluded_sources": [asdict(exclusion)],
+            },
+            initial_world_result=current,
+        )
 
-        stage = dialog._stage_source_exclusion_change(())
+        stage = workflow.plan_source_exclusion_change(())
 
-        self.assertIs(dialog.world_result, current)
-        self.assertEqual(dialog.excluded_sources, (exclusion,))
-        self.assertEqual(len(stage["world_result"].struts), 1)
-        self.assertEqual(stage["excluded_sources"], ())
+        self.assertIs(workflow.world_result, current)
+        self.assertEqual(workflow.excluded_sources, (exclusion,))
+        self.assertEqual(len(stage.world_result.struts), 1)
+        self.assertEqual(stage.excluded_sources, ())
 
     def test_invalid_manual_geometry_is_reported_not_silently_replayed(self):
         baseline = self.convert()
@@ -823,10 +818,10 @@ class SourceExclusionTests(unittest.TestCase):
         other = _review_item(
             "member:beam:BM1", "BM1", "beam", "recognized", ("H1",), member_id="BM1"
         )
-        dialog = DXFImportDialog.__new__(DXFImportDialog)
-        dialog.review_items = (selected, other)
+        workflow = DXFReviewWorkflow.__new__(DXFReviewWorkflow)
+        workflow.review_items = (selected, other)
 
-        reason = dialog._source_exclusion_disabled_reason(selected)
+        reason = workflow.source_exclusion_disabled_reason(selected)
 
         self.assertIn("Handle H1", reason)
         self.assertIn("BM1 (beam)", reason)
@@ -856,6 +851,9 @@ class SourceExclusionTests(unittest.TestCase):
         dialog.review_items = review_items
         dialog.selected_review_item_key = ""
         dialog.result = excluded
+        dialog.review_workflow = SimpleNamespace(
+            is_review_item_confirmed=lambda _item: False,
+        )
         dialog._updating_member_tree = False
         dialog.member_tree_selection = Mock()
 
@@ -942,17 +940,19 @@ class SourceExclusionTests(unittest.TestCase):
         dialog.excluded_sources = ()
         dialog.world_result = Mock()
         dialog.window = None
-        dialog._stage_source_exclusion_change = Mock(return_value={})
+        dialog.review_workflow = Mock()
+        dialog.review_workflow.source_exclusion_disabled_reason.return_value = ""
+        dialog.review_workflow.plan_source_exclusion_for_item.return_value = (
+            Mock(spec=SourceExclusionPlan),
+            False,
+            "strut:H1",
+        )
         dialog._format_source_exclusion_impact = Mock(return_value="impact")
         dialog._commit_source_exclusion_stage = Mock()
         dialog._selected_review_item = Mock(return_value=item)
 
         with patch("tkinter.messagebox.askyesno", return_value=False):
-            with patch(
-                "dxf_import.dialog.excluded_source_from_review_item",
-                return_value=ExcludedSource("strut", ("H1",)),
-            ):
-                dialog._on_source_exclusion_action()
+            dialog._on_source_exclusion_action()
 
         dialog._commit_source_exclusion_stage.assert_not_called()
         self.assertEqual(dialog.excluded_sources, ())
@@ -968,17 +968,15 @@ class SourceExclusionTests(unittest.TestCase):
         dialog.world_result = Mock()
         dialog.window = None
         dialog._selected_review_item = Mock(return_value=item)
-        dialog._stage_source_exclusion_change = Mock(
+        dialog.review_workflow = Mock()
+        dialog.review_workflow.source_exclusion_disabled_reason.return_value = ""
+        dialog.review_workflow.plan_source_exclusion_for_item = Mock(
             side_effect=RuntimeError("technical failure")
         )
         dialog._commit_source_exclusion_stage = Mock()
 
         with patch("tkinter.messagebox.showerror"):
-            with patch(
-                "dxf_import.dialog.excluded_source_from_review_item",
-                return_value=ExcludedSource("strut", ("H1",)),
-            ):
-                dialog._on_source_exclusion_action()
+            dialog._on_source_exclusion_action()
 
         dialog._commit_source_exclusion_stage.assert_not_called()
         self.assertEqual(dialog.excluded_sources, original)

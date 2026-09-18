@@ -6,8 +6,7 @@ import copy
 import json
 import os
 import time
-from collections import Counter
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -18,13 +17,7 @@ from bracing_optimizer.presentation.field_labels import (
     recognition_method_label,
 )
 
-from .candidate_points import (
-    CandidatePointStore,
-    add_cad_candidate_points,
-    apply_candidate_point_selection,
-    rebuild_component_associations,
-)
-from .controllers import ImportModelController, SelectionController
+from .controllers import SelectionController
 from .geometry import Point, _distance, _midpoint
 from .importer import DXFImporter, default_layer_mapping_for_file
 from .models import (
@@ -38,7 +31,6 @@ from .models import (
     DXFImportError,
     DXFImportResult,
     ERROR_SEVERITIES,
-    ExcludedSource,
     ProblemRecord,
     ReviewItem,
     SelectionState,
@@ -46,7 +38,6 @@ from .models import (
     SourceText,
     Strut,
     Waler,
-    apply_coordinate_system,
     coordinate_system_from_candidate,
 )
 from .preview import (
@@ -60,19 +51,10 @@ from .preview import (
     TreeSelectionSynchronizer,
 )
 from .validation import (
-    build_problem_records,
-    build_review_items,
     problem_severity_rank,
     review_item_guidance,
-    validate_candidate_point_pair,
 )
 from .support_pairing import (
-    DoubleSupportSourceIdentity,
-    apply_double_support_decisions,
-    double_support_candidate_identity,
-    double_support_decisions_from_review_state,
-    preserve_double_support_result_decisions,
-    serialize_double_support_decisions,
     set_double_support_candidate_accepted,
 )
 from .material_recognition import (
@@ -83,30 +65,19 @@ from .waler_contact_adjustment import (
     format_adjustment_plan,
 )
 from .source_exclusion import (
-    ManualReplayReport,
-    canonical_source_identity,
-    capture_manual_overrides,
-    excluded_source_from_review_item,
-    exclusions_from_review_state,
-    manual_overrides_from_review_state,
-    normalize_excluded_sources,
     normalize_source_handles,
-    replay_manual_overrides,
     result_member_counts,
     result_severity_counts,
-    review_state_matches_source,
-    shared_handle_conflicts,
 )
 from .review_confirmation import (
     FORMAL_REVIEW_ROLES,
-    confirm_review_item,
-    review_confirmation_identity,
-    review_confirmations_from_state,
     review_item_can_be_confirmed,
-    review_item_is_confirmed,
-    serialize_review_confirmations,
-    unconfirmed_formal_review_items,
-    valid_review_confirmations,
+)
+from .review_workflow import (
+    DXFReviewSnapshot,
+    DXFReviewWorkflow,
+    ReviewMutation,
+    SourceExclusionPlan,
 )
 from window_layout import (
     _active_monitor_work_areas,
@@ -127,6 +98,31 @@ class DXFImportDialogOutcome:
 
 class DXFImportDialog:
     """Engineer-oriented import summary, issue list, location and preview UI."""
+
+    _REVIEW_SNAPSHOT_FIELDS = frozenset({
+        "world_result",
+        "result",
+        "problem_records",
+        "review_items",
+        "excluded_sources",
+        "double_support_decisions",
+        "review_confirmations",
+        "selected_origin_world",
+        "coordinate_valid",
+        "import_mode",
+        "last_manual_replay_report",
+    })
+
+    def __getattr__(self, name: str) -> Any:
+        """Expose workflow state through one immutable presentation snapshot."""
+
+        if name in self._REVIEW_SNAPSHOT_FIELDS:
+            snapshot = self.__dict__.get("_review_snapshot")
+            if snapshot is not None:
+                return getattr(snapshot, name)
+        raise AttributeError(
+            f"{type(self).__name__!s} object has no attribute {name!r}"
+        )
 
     @property
     def preview_view_bounds(self) -> tuple[float, float, float, float] | None:
@@ -298,80 +294,29 @@ class DXFImportDialog:
         self.importer = DXFImporter(file_path).read()
         self.resume_review = bool(resume_review)
         self.allow_pause = bool(allow_pause)
-        self._initial_state_matches_source = review_state_matches_source(
-            self.initial_state,
-            self.importer.source_fingerprint,
+        self.review_workflow = DXFReviewWorkflow(
+            self.importer,
             self.file_path,
+            initial_state=self.initial_state,
+            material_specs=self.material_specs,
+            resume_review=self.resume_review,
+            initial_world_result=initial_world_result,
         )
-        if self.resume_review and not self._initial_state_matches_source:
-            raise DXFImportError(
-                "此專案保存的 DXF 檢核使用的是不同版本的 DXF。"
-                "為避免人工修正套用到錯誤來源，目前無法直接繼續此檢核。"
-            )
-        restore_decision = exclusions_from_review_state(
-            self.initial_state,
-            self.importer.source_fingerprint,
-        )
-        self.excluded_sources: tuple[ExcludedSource, ...] = (
-            restore_decision.excluded_sources
+        self._initial_state_matches_source = (
+            self.review_workflow.initial_state_matches_source
         )
         self.exclusion_fingerprint_mismatch = (
-            restore_decision.fingerprint_mismatch
+            self.review_workflow.exclusion_fingerprint_mismatch
         )
         self._exclusion_fingerprint_notice_shown = False
-        self.result: DXFImportResult | None = None
-        self.world_result: DXFImportResult | None = (
-            initial_world_result
-            if (
-                initial_world_result is not None
-                and str(initial_world_result.source_fingerprint).strip().upper()
-                == str(self.importer.source_fingerprint).strip().upper()
-            )
-            else None
-        )
+        self._sync_review_workflow_state()
         self.dialog_action = ""
         self.review_state: dict[str, Any] = {}
-        self.double_support_decisions: dict[
-            DoubleSupportSourceIdentity,
-            bool,
-        ] = (
-            double_support_decisions_from_review_state(self.initial_state)
-            if self._initial_state_matches_source
-            else {}
-        )
-        self.review_confirmations: dict[str, str] = (
-            review_confirmations_from_state(self.initial_state)
-            if self._initial_state_matches_source
-            else {}
-        )
         self.waler_adjustment_preview_plan: WalerContactAdjustmentPlan | None = None
         self._waler_adjustment_overlay_items: list[int] = []
         self._contact_panel_waler_id = ""
-        self.coordinate_valid = False
-        saved_coordinate = self._coordinate_system_from_review_state(
-            self.initial_state
-            if self._initial_state_matches_source
-            else None
-        )
-        self.selected_origin_world: Point | None = (
-            (saved_coordinate.origin_x, saved_coordinate.origin_y)
-            if saved_coordinate.mode == "local"
-            else None
-        )
-        saved_import_mode = str(
-            self.initial_state.get("import_mode", "replace")
-            if self._initial_state_matches_source
-            else "replace"
-        ).strip().lower()
-        self.import_mode = (
-            saved_import_mode
-            if saved_import_mode in {"replace", "append"}
-            else "replace"
-        )
-        self.problem_records: tuple[ProblemRecord, ...] = ()
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.selected_problem: ProblemRecord | None = None
-        self.review_items: tuple[ReviewItem, ...] = ()
         self.review_item_by_key: dict[str, ReviewItem] = {}
         self.review_item_by_tree_iid: dict[str, str] = {}
         self.selected_review_item_key = ""
@@ -429,13 +374,7 @@ class DXFImportDialog:
         self.window.bind("<Configure>", self._on_main_window_configure)
         self.window.bind("<Escape>", self._cancel_active_pick)
         self.performance_diagnostics = PerformanceDiagnostics()
-        self.candidate_point_store = CandidatePointStore(
-            min(
-                self.importer.tolerances.duplicate_tolerance_mm,
-                self.importer.tolerances.endpoint_tolerance_mm,
-                1.0,
-            )
-        )
+        self.candidate_point_store = self.review_workflow.candidate_point_store
         self.render_scheduler = RenderScheduler(
             self.window.after_idle,
             self._flush_render_updates,
@@ -448,11 +387,6 @@ class DXFImportDialog:
             self.render_scheduler.request,
             self.performance_diagnostics,
         )
-        self.import_model_controller = ImportModelController(
-            self.importer.tolerances,
-            self.candidate_point_store,
-        )
-
         # The main Review layout is intentionally not one large scrolling page.
         # The left navigator, diagnostics header and footer remain fixed while
         # the right-hand detail column owns its vertical scrolling.
@@ -579,6 +513,26 @@ class DXFImportDialog:
                 self.window.after_idle(self._restore_memory_review)
             else:
                 self.window.after_idle(self._convert_preview)
+
+    def _sync_review_workflow_state(self) -> None:
+        """Refresh the dialog's single read-only Review-state projection."""
+
+        self._review_snapshot: DXFReviewSnapshot = self.review_workflow.snapshot
+
+    def _show_workflow_confirmation_invalidations(
+        self,
+        mutation: ReviewMutation,
+    ) -> None:
+        if not mutation.invalidated_confirmations:
+            return
+        from tkinter import messagebox
+
+        messagebox.showinfo(
+            "構件確認已重設",
+            "以下已確認構件因本次修改受影響，已重設為未確認：\n\n"
+            + "、".join(mutation.invalidated_confirmations),
+            parent=self.window,
+        )
 
     def _is_maximized(self) -> bool:
         try:
@@ -1951,7 +1905,11 @@ class DXFImportDialog:
 
         if self.world_result is None:
             return
-        self._apply_coordinate_settings(show_error=False)
+        self.review_workflow.reapply_coordinate_system(
+            self.coordinate_mode_var.get()
+        )
+        self._sync_review_workflow_state()
+        self._refresh_result_views()
         self.status_var.set("已恢復尚未完成的 DXF 檢核。")
 
     def _convert_preview(self) -> None:
@@ -1988,89 +1946,22 @@ class DXFImportDialog:
             layer_roles[layer] = role
         return layer_roles
 
-    def _recognize_staged_result(
-        self,
-        excluded_sources: Sequence[ExcludedSource],
-        manual_overrides: Sequence[Any] = (),
-        *,
-        layer_roles: Mapping[str, str] | None = None,
-    ) -> tuple[DXFImportResult, ManualReplayReport]:
-        """Build a complete WCS result without changing dialog state."""
-
-        staged = self.importer.convert(
-            layer_roles=layer_roles or self._current_layer_roles(),
-            coordinate_system=CoordinateSystem(),
-            material_specs=self.material_specs,
-            excluded_sources=excluded_sources,
-        )
-        staged, replay_report = replay_manual_overrides(
-            staged,
-            manual_overrides,
-            material_specs=self.material_specs,
-            tolerances=self.importer.tolerances,
-        )
-        candidates = staged.double_support_candidates
-        previous_result = getattr(self, "world_result", None)
-        if previous_result is not None:
-            candidates = preserve_double_support_result_decisions(
-                previous_result,
-                staged,
-            )
-        saved_double_support_decisions = getattr(
-            self,
-            "double_support_decisions",
-            {},
-        )
-        if saved_double_support_decisions:
-            decision_result = replace(
-                staged,
-                double_support_candidates=candidates,
-            )
-            candidates = apply_double_support_decisions(
-                decision_result,
-                saved_double_support_decisions,
-            )
-        if candidates != staged.double_support_candidates:
-            staged = rebuild_component_associations(
-                replace(
-                    staged,
-                    double_support_candidates=candidates,
-                ),
-                self.importer.tolerances,
-            )
-        return staged, replay_report
-
     def _perform_conversion(self) -> None:
         from tkinter import messagebox
 
-        before_confirmed = self._confirmed_item_snapshot()
         try:
-            if self.world_result is not None:
-                overrides = capture_manual_overrides(self.world_result)
-            elif review_state_matches_source(
-                self.initial_state,
-                self.importer.source_fingerprint,
-                self.file_path,
-            ):
-                overrides = manual_overrides_from_review_state(self.initial_state)
-            else:
-                overrides = ()
-            staged, replay_report = self._recognize_staged_result(
-                self.excluded_sources,
-                overrides,
+            mutation = self.review_workflow.recognize(
+                self._current_layer_roles()
             )
-            self.world_result = staged
-            self.excluded_sources = staged.excluded_sources
-            self.last_manual_replay_report = replay_report
-            self._apply_coordinate_settings(show_error=False)
-            self._finish_confirmation_mutation(before_confirmed)
+            self._sync_review_workflow_state()
+            self._refresh_result_views()
+            self._show_workflow_confirmation_invalidations(mutation)
         except Exception as exc:
             if isinstance(exc, DXFImportError):
                 error_text = str(exc)
             else:
                 error_text = f"辨識發生未預期錯誤：{type(exc).__name__}: {exc}"
-            self.world_result = None
-            self.result = None
+            self._sync_review_workflow_state()
             self.status_var.set(error_text)
             self.apply_button.configure(state="disabled", text="不可匯入")
             messagebox.showerror("DXF 轉換失敗", error_text, parent=self.window)
@@ -2091,11 +1982,12 @@ class DXFImportDialog:
         self._set_origin_from_world_point(None)
 
     def _set_origin_from_world_point(self, point: Point | None) -> None:
-        before_confirmed = self._confirmed_item_snapshot()
-        self.selected_origin_world = point
+        mutation = self.review_workflow.set_coordinate_origin(point)
         self.coordinate_mode_var.set("local" if point is not None else "world")
-        self._apply_coordinate_settings(show_error=False)
-        self._finish_confirmation_mutation(before_confirmed)
+        self._sync_review_workflow_state()
+        self.coordinate_error_var.set("")
+        self._refresh_result_views()
+        self._show_workflow_confirmation_invalidations(mutation)
 
     def _set_origin_from_candidate(self, candidate: CandidatePoint) -> None:
         """Commit one explicit DXF-world candidate as the Local origin."""
@@ -2116,26 +2008,14 @@ class DXFImportDialog:
             return
         mode = self.coordinate_mode_var.get()
         if mode == "local" and self.selected_origin_world is None:
-            self.coordinate_valid = False
-            self.result = self.world_result
+            self.review_workflow.reapply_coordinate_system("local")
+            self._sync_review_workflow_state()
             self.coordinate_error_var.set("請先選取一個候選點作為局部原點。")
-            self._refresh_result_views(
-                preview_dirty=preview_dirty,
-                rebuild_candidate_tree=rebuild_candidate_tree,
-            )
-            return
-        if mode == "local":
-            coordinate_system = CoordinateSystem(
-                "local",
-                self.selected_origin_world[0],
-                self.selected_origin_world[1],
-                "selected_candidate_point",
-            )
         else:
-            coordinate_system = CoordinateSystem()
-        self.coordinate_valid = True
-        self.coordinate_error_var.set("")
-        self.result = apply_coordinate_system(self.world_result, coordinate_system)
+            point = self.selected_origin_world if mode == "local" else None
+            self.review_workflow.set_coordinate_origin(point)
+            self._sync_review_workflow_state()
+            self.coordinate_error_var.set("")
         self._refresh_result_views(
             preview_dirty=preview_dirty,
             rebuild_candidate_tree=rebuild_candidate_tree,
@@ -2147,17 +2027,14 @@ class DXFImportDialog:
         preview_dirty: RenderDirty = RenderDirty.FULL_SCENE,
         rebuild_candidate_tree: bool = True,
     ) -> None:
+        self._sync_review_workflow_state()
         if self.result is None:
             return
         previous_review_key = self.selected_review_item_key
-        self.candidate_point_store.rebuild(self._all_members())
         if self.selected_member_id and self._selected_member() is None:
             self.selection_state = SelectionState()
             self.selection_controller.state = self.selection_state
-        self.problem_records = build_problem_records(self.result)
-        self.review_items = build_review_items(self.result, self.problem_records)
         self.review_item_by_key = {item.key: item for item in self.review_items}
-        self._prune_review_confirmations()
         selected_member_item = self._review_item_for_member_id(
             self.selected_member_id
         )
@@ -2353,53 +2230,17 @@ class DXFImportDialog:
     ) -> bool:
         """Commit all staged pair decisions with one association rebuild."""
 
-        if self.result is None:
-            return False
-        updated = tuple(updated)
-        previous_candidates = self.result.double_support_candidates
-        previous_by_id = {item.id: item for item in previous_candidates}
-        changed = tuple(
-            item
-            for item in updated
-            if item.id in previous_by_id
-            and previous_by_id[item.id].accepted != item.accepted
+        mutation = self.review_workflow.commit_double_support_candidates(
+            updated
         )
-        if not changed:
+        if not mutation.changed:
             return False
-        before_confirmed = self._confirmed_item_snapshot()
-        identity_result = getattr(self, "world_result", None) or self.result
-        if not hasattr(self, "double_support_decisions"):
-            self.double_support_decisions = {}
-        for item in changed:
-            identity = double_support_candidate_identity(identity_result, item)
-            if identity is not None:
-                self.double_support_decisions[identity] = item.accepted
-        if getattr(self, "world_result", None) is not None:
-            coordinate_system = self.result.coordinate_system
-            self.world_result = rebuild_component_associations(
-                replace(
-                    self.world_result,
-                    double_support_candidates=updated,
-                ),
-                self.importer.tolerances,
-            )
-            self.result = apply_coordinate_system(
-                self.world_result,
-                coordinate_system,
-            )
-        else:
-            self.result = rebuild_component_associations(
-                replace(
-                    self.result,
-                    double_support_candidates=updated,
-                ),
-                self.importer.tolerances,
-            )
+        self._sync_review_workflow_state()
         self._refresh_result_views(
             preview_dirty=RenderDirty.FULL_SCENE,
             rebuild_candidate_tree=False,
         )
-        self._finish_confirmation_mutation(before_confirmed)
+        self._show_workflow_confirmation_invalidations(mutation)
         return True
 
 
@@ -2487,36 +2328,38 @@ class DXFImportDialog:
     def _on_import_mode_changed(self) -> None:
         """Refresh the global action label when the batch import mode changes."""
 
-        self.import_mode = self._normalized_import_mode()
+        self.review_workflow.set_import_mode(self._normalized_import_mode())
+        self._sync_review_workflow_state()
         if self.result is not None:
             self._update_import_controls()
 
     def _update_import_controls(self) -> None:
         if self.result is None:
             return
+        workflow_status = self.review_workflow.completion_status()
         if not self.coordinate_valid:
             self.apply_button.configure(state="disabled", text="不可匯入")
             self.status_var.set(
                 f"✗ {self.coordinate_error_var.get() or '座標系統尚未套用'}；請完成座標系統設定。"
             )
             return
-        counts = Counter(message.severity for message in self.result.messages)
-        error_count = counts["error"] + counts["critical"]
-        unconfirmed_count = len(self._unconfirmed_formal_review_items())
+        error_count = workflow_status.blocking_error_count
+        unconfirmed_count = workflow_status.unconfirmed_count
+        warning_count = workflow_status.warning_count
         if error_count:
             self.apply_button.configure(state="disabled", text="不可匯入")
             self.status_var.set(
                 f"✗ 發現 {error_count} 項阻擋錯誤，"
                 "請先修正問題列表中的錯誤／嚴重錯誤。"
             )
-        elif counts["warning"] or unconfirmed_count:
+        elif warning_count or unconfirmed_count:
             self.apply_button.configure(
                 state="normal",
                 text=self._import_action_text(warning=True),
             )
             reminders = []
-            if counts["warning"]:
-                reminders.append(f"警告 {counts['warning']} 項")
+            if warning_count:
+                reminders.append(f"警告 {warning_count} 項")
             if unconfirmed_count:
                 reminders.append(f"未人工確認構件 {unconfirmed_count} 個")
             self.status_var.set(
@@ -2541,16 +2384,7 @@ class DXFImportDialog:
     def _all_members(
         self,
     ) -> tuple[Waler | Strut | Brace | AuxiliaryComponent, ...]:
-        if self.result is None:
-            return ()
-        return (
-            *self.result.walers,
-            *self.result.struts,
-            *self.result.braces,
-            *self.result.columns,
-            *self.result.beams,
-            *self.result.corner_braces,
-        )
+        return self.review_workflow.all_members()
 
     def _selected_member(
         self,
@@ -2560,14 +2394,7 @@ class DXFImportDialog:
     def _review_item_for_member_id(self, member_id: str) -> ReviewItem | None:
         if not member_id:
             return None
-        return next(
-            (
-                item
-                for item in getattr(self, "review_items", ())
-                if item.member_id == member_id
-            ),
-            None,
-        )
+        return self.review_workflow.review_item_for_member(member_id)
 
     def _selected_review_item(self) -> ReviewItem | None:
         item = getattr(self, "review_item_by_key", {}).get(
@@ -2578,215 +2405,53 @@ class DXFImportDialog:
         return self._review_item_for_member_id(self.selected_member_id)
 
     def _is_review_item_confirmed(self, item: ReviewItem | None) -> bool:
-        confirmations = getattr(self, "review_confirmations", {})
-        result = getattr(self, "result", None)
-        return bool(
-            item is not None
-            and result is not None
-            and confirmations
-            and review_item_is_confirmed(
-                result,
-                item,
-                confirmations,
-            )
-        )
+        return self.review_workflow.is_review_item_confirmed(item)
 
     def _unconfirmed_formal_review_items(self) -> tuple[ReviewItem, ...]:
-        result = getattr(self, "result", None)
-        if result is None:
-            return ()
-        return unconfirmed_formal_review_items(
-            result,
-            getattr(self, "review_items", ()),
-            getattr(self, "review_confirmations", {}),
-        )
-
-    def _prune_review_confirmations(self) -> None:
-        result = getattr(self, "result", None)
-        if result is None:
-            return
-        self.review_confirmations = valid_review_confirmations(
-            result,
-            getattr(self, "review_items", ()),
-            getattr(self, "review_confirmations", {}),
-        )
+        return self.review_workflow.unconfirmed_formal_review_items()
 
     def _confirmed_item_snapshot(self) -> dict[str, str]:
-        result = getattr(self, "result", None)
-        if result is None:
-            return {}
-        return {
-            identity: item.display_id
-            for item in getattr(self, "review_items", ())
-            if (identity := review_confirmation_identity(item)) is not None
-            and review_item_is_confirmed(
-                result,
-                item,
-                getattr(self, "review_confirmations", {}),
-            )
-        }
-
-    def _finish_confirmation_mutation(
-        self,
-        before_confirmed: Mapping[str, str],
-        *,
-        initiating_member_ids: Sequence[str] = (),
-    ) -> None:
-        """Prune changed signatures and report only collateral invalidations."""
-
-        self._prune_review_confirmations()
-        after_confirmed = self._confirmed_item_snapshot()
-        initiating = {str(value) for value in initiating_member_ids if str(value)}
-        invalidated = tuple(
-            display_id
-            for identity, display_id in before_confirmed.items()
-            if identity not in after_confirmed and display_id not in initiating
-        )
-        if not invalidated:
-            return
-        from tkinter import messagebox
-
-        messagebox.showinfo(
-            "構件確認已重設",
-            "以下已確認構件因本次修改受影響，已重設為未確認：\n\n"
-            + "、".join(dict.fromkeys(invalidated)),
-            parent=self.window,
-        )
+        return self.review_workflow.confirmed_snapshot()
 
     def _confirm_selected_review_item(self) -> None:
         item = self._selected_review_item()
         if self.result is None or item is None or not review_item_can_be_confirmed(item):
             return
         try:
-            self.review_confirmations = confirm_review_item(
-                self.result,
-                item,
-                getattr(self, "review_confirmations", {}),
-            )
+            if not self.review_workflow.confirm(item):
+                return
         except ValueError:
             return
+        self._sync_review_workflow_state()
         self._refresh_member_tree()
         self._update_recognition_data_panel(item, self._selected_member())
         self._update_review_confirmation_action_state(item)
 
-    def _excluded_source_for_review_item(
-        self,
-        item: ReviewItem,
-    ) -> ExcludedSource | None:
-        identity = canonical_source_identity(item.role, item.source_handles)
-        return next(
-            (
-                source
-                for source in self.excluded_sources
-                if source.identity == identity
-            ),
-            None,
-        )
-
     def _source_exclusion_disabled_reason(self, item: ReviewItem | None) -> str:
-        if item is None:
-            return "請先選取 Formal、待修或已排除來源。"
-        if not item.role or not normalize_source_handles(item.source_handles):
-            return "此項目沒有可安全識別的 DXF 來源，無法使用來源排除。"
-        if item.status == "excluded":
-            return ""
-        conflicts = shared_handle_conflicts(item, self.review_items)
-        if not conflicts:
-            return ""
-        details = "；".join(
-            f"Handle {conflict.handle} 同時由 {', '.join(conflict.owner_labels)} 使用"
-            for conflict in conflicts
-        )
-        return f"此來源有共用 Handle，不能安全單獨排除：{details}。"
-
-    @staticmethod
-    def _source_geometry_signature(result: DXFImportResult) -> tuple[Any, ...]:
-        return tuple(
-            (
-                geometry.role,
-                geometry.source_handle,
-                geometry.points,
-                geometry.closed,
-                geometry.source_layer,
-                geometry.source_entity_type,
-            )
-            for geometry in result.source_geometry
-        )
-
-    def _stage_source_exclusion_change(
-        self,
-        candidate_exclusions: Sequence[ExcludedSource],
-    ) -> dict[str, Any]:
-        if self.world_result is None or self.result is None:
-            raise DXFImportError("請先完成 DXF 辨識。")
-        normalized = normalize_excluded_sources(candidate_exclusions)
-        overrides = [*capture_manual_overrides(self.world_result)]
-        overrides.extend(
-            source.manual_override
-            for source in self.excluded_sources
-            if source.manual_override is not None
-        )
-        overrides.extend(
-            source.manual_override
-            for source in normalized
-            if source.manual_override is not None
-        )
-        staged_world, replay_report = self._recognize_staged_result(
-            normalized,
-            overrides,
-            layer_roles=self.world_result.layer_classification,
-        )
-        if staged_world.source_fingerprint != self.world_result.source_fingerprint:
-            raise DXFImportError("暫存檢核的 DXF 來源指紋不一致。")
-        if self._source_geometry_signature(staged_world) != self._source_geometry_signature(
-            self.world_result
-        ):
-            raise DXFImportError("暫存檢核未完整保留原始 DXF 來源幾何。")
-        staged_result = apply_coordinate_system(
-            staged_world,
-            self.result.coordinate_system,
-        )
-        staged_records = build_problem_records(staged_result)
-        staged_review_items = build_review_items(staged_result, staged_records)
-        return {
-            "excluded_sources": normalized,
-            "world_result": staged_world,
-            "result": staged_result,
-            "problem_records": staged_records,
-            "review_items": staged_review_items,
-            "manual_replay": replay_report,
-        }
-
-    @staticmethod
-    def _review_item_identity(item: ReviewItem) -> str:
-        return canonical_source_identity(item.role, item.source_handles)
+        return self.review_workflow.source_exclusion_disabled_reason(item)
 
     def _stage_review_item_for_identity(
         self,
-        stage: Mapping[str, Any],
+        stage: SourceExclusionPlan,
         identity: str,
         *,
         excluded: bool,
     ) -> ReviewItem | None:
-        return next(
-            (
-                item
-                for item in stage.get("review_items", ())
-                if self._review_item_identity(item) == identity
-                and (item.status == "excluded") == excluded
-            ),
-            None,
+        return self.review_workflow.review_item_for_identity(
+            stage.review_items,
+            identity,
+            excluded=excluded,
         )
 
     def _format_source_exclusion_impact(
         self,
         item: ReviewItem,
-        stage: Mapping[str, Any],
+        stage: SourceExclusionPlan,
         *,
         restoring: bool,
     ) -> str:
         assert self.result is not None
-        staged_result = stage["result"]
+        staged_result = stage.result
         before_members = sum(result_member_counts(self.result).values())
         after_members = sum(result_member_counts(staged_result).values())
         before_severity = result_severity_counts(self.result)
@@ -2800,7 +2465,7 @@ class DXFImportDialog:
             - before_severity.get("error", 0)
             - before_severity.get("critical", 0)
         )
-        replay: ManualReplayReport = stage["manual_replay"]
+        replay = stage.manual_replay
         verb = "復原" if restoring else "排除"
         lines = [
             f"將{verb}：{item.display_id}",
@@ -2828,19 +2493,25 @@ class DXFImportDialog:
 
     def _commit_source_exclusion_stage(
         self,
-        stage: Mapping[str, Any],
+        stage: SourceExclusionPlan,
         selected_key: str,
-    ) -> None:
+        *,
+        initiating_member_ids: Sequence[str] = (),
+    ) -> ReviewMutation:
         self._clear_waler_adjustment_preview()
-        self.excluded_sources = tuple(stage["excluded_sources"])
-        self.world_result = stage["world_result"]
-        self.result = stage["result"]
+        mutation = self.review_workflow.commit_source_exclusion_plan(
+            stage,
+            initiating_member_ids=initiating_member_ids,
+        )
+        self._sync_review_workflow_state()
         self.selected_review_item_key = selected_key
         self.selection_state = SelectionState(selection_source="component_tree")
         self.selection_controller.state = self.selection_state
         self.preview_view_bounds = None
         self.preview_fit_all = False
         self._refresh_result_views()
+        self._show_workflow_confirmation_invalidations(mutation)
+        return mutation
 
     def _on_source_exclusion_action(self) -> None:
         from tkinter import messagebox
@@ -2855,21 +2526,10 @@ class DXFImportDialog:
                     parent=self.window,
                 )
             return
-        identity = self._review_item_identity(item)
-        restoring = item.status == "excluded"
         try:
-            if restoring:
-                candidate_exclusions = tuple(
-                    source
-                    for source in self.excluded_sources
-                    if source.identity != identity
-                )
-            else:
-                candidate_exclusions = (
-                    *self.excluded_sources,
-                    excluded_source_from_review_item(item, self.world_result),
-                )
-            stage = self._stage_source_exclusion_change(candidate_exclusions)
+            stage, restoring, identity = (
+                self.review_workflow.plan_source_exclusion_for_item(item)
+            )
         except Exception as exc:
             error_text = (
                 str(exc)
@@ -2898,15 +2558,19 @@ class DXFImportDialog:
             identity,
             excluded=not restoring,
         )
-        before_confirmed = self._confirmed_item_snapshot()
-        self._commit_source_exclusion_stage(
-            stage,
-            selected.key if selected is not None else "",
-        )
-        self._finish_confirmation_mutation(
-            before_confirmed,
-            initiating_member_ids=((item.member_id,) if item.member_id else ()),
-        )
+        try:
+            self._commit_source_exclusion_stage(
+                stage,
+                selected.key if selected is not None else "",
+                initiating_member_ids=((item.member_id,) if item.member_id else ()),
+            )
+        except DXFImportError as exc:
+            messagebox.showerror(
+                "DXF 來源排除套用失敗",
+                f"目前辨識結果完全未變更。\n\n{exc}",
+                parent=self.window,
+            )
+            return
         action = "復原" if restoring else "排除"
         self.source_exclusion_status_var.set(
             f"已{action} {item.display_id}；工程關聯與檢核結果已重新計算。"
@@ -2916,6 +2580,8 @@ class DXFImportDialog:
         self,
         member_id: str,
     ) -> Waler | Strut | Brace | AuxiliaryComponent | None:
+        if hasattr(self, "review_workflow"):
+            return self.review_workflow.member_by_id(member_id)
         return next(
             (member for member in self._all_members() if member.id == member_id),
             None,
@@ -3757,25 +3423,20 @@ class DXFImportDialog:
         member = self._selected_member()
         if not isinstance(member, (Waler, Strut)) or self.world_result is None:
             return
-        before_confirmed = self._confirmed_item_snapshot()
         try:
-            self.world_result = self.import_model_controller.apply_material_spec(
-                self.world_result,
+            mutation = self.review_workflow.set_material_spec(
                 member.id,
                 self.material_spec_var.get(),
             )
         except DXFImportError as exc:
             self.material_spec_status_var.set(str(exc))
             return
-        self._apply_coordinate_settings(
-            show_error=False,
+        self._sync_review_workflow_state()
+        self._refresh_result_views(
             preview_dirty=RenderDirty.DETAIL_PANEL,
             rebuild_candidate_tree=False,
         )
-        self._finish_confirmation_mutation(
-            before_confirmed,
-            initiating_member_ids=(member.id,),
-        )
+        self._show_workflow_confirmation_invalidations(mutation)
 
     def _update_waler_contact_panel(
         self,
@@ -3861,8 +3522,7 @@ class DXFImportDialog:
         if not isinstance(member, Waler) or self.world_result is None:
             return
         try:
-            plan = self.import_model_controller.preview_waler_contact_adjustment(
-                self.world_result,
+            plan = self.review_workflow.preview_waler_contact_adjustment(
                 member.id,
                 **self._waler_contact_dimensions(),
             )
@@ -3929,16 +3589,10 @@ class DXFImportDialog:
         member = self._selected_member()
         if not isinstance(member, Waler) or self.world_result is None:
             return
-        before_confirmed = self._confirmed_item_snapshot()
         try:
-            # Deliberately ignore preview coordinates: the controller builds a
-            # fresh plan from the current formal world_result before commit.
-            self.world_result = (
-                self.import_model_controller.apply_waler_contact_adjustment(
-                    self.world_result,
-                    member.id,
-                    **self._waler_contact_dimensions(),
-                )
+            mutation = self.review_workflow.apply_waler_contact_adjustment(
+                member.id,
+                **self._waler_contact_dimensions(),
             )
         except DXFImportError as exc:
             self.waler_contact_status_var.set(str(exc))
@@ -3947,12 +3601,10 @@ class DXFImportDialog:
             return
         self._clear_waler_adjustment_preview()
         self._contact_panel_waler_id = ""
-        self._apply_coordinate_settings(show_error=False)
+        self._sync_review_workflow_state()
+        self._refresh_result_views()
         self.selection_controller.synchronize_formal_member()
-        self._finish_confirmation_mutation(
-            before_confirmed,
-            initiating_member_ids=(member.id,),
-        )
+        self._show_workflow_confirmation_invalidations(mutation)
         self.waler_contact_status_var.set("已一次套用全部連動幾何與衍生資料。")
 
     def _update_candidate_detail_panel(self) -> None:
@@ -4226,12 +3878,10 @@ class DXFImportDialog:
             self.candidate_action_status_var.set("請先選取構件。")
             return
         state = self.selection_state
-        validations = validate_candidate_point_pair(
-            member,
+        validations = self.review_workflow.validate_candidate_change(
+            member.id,
             state.pending_start_point_id,
             state.pending_end_point_id,
-            self.importer.tolerances,
-            self.result.walers if self.result is not None else (),
         )
         errors = [item for item in validations if item.severity in ERROR_SEVERITIES]
         if errors:
@@ -4250,18 +3900,19 @@ class DXFImportDialog:
             parent=message_parent,
         ):
             return
-        before_confirmed = self._confirmed_item_snapshot()
         try:
             self._clear_waler_adjustment_preview()
-            self.world_result = self.import_model_controller.apply_pending(
-                self.world_result,
-                state,
+            mutation = self.review_workflow.apply_candidate_change(
+                member.id,
+                state.pending_start_point_id,
+                state.pending_end_point_id,
+                state.pending_selection_source,
             )
+            self._sync_review_workflow_state()
         except DXFImportError as exc:
             self.candidate_action_status_var.set(str(exc))
             return
-        self._apply_coordinate_settings(
-            show_error=False,
+        self._refresh_result_views(
             preview_dirty=(
                 RenderDirty.COMPONENT_LAYER
                 | RenderDirty.COMPONENT_SELECTION
@@ -4273,10 +3924,7 @@ class DXFImportDialog:
             rebuild_candidate_tree=False,
         )
         self.selection_controller.synchronize_formal_member()
-        self._finish_confirmation_mutation(
-            before_confirmed,
-            initiating_member_ids=(member.id,),
-        )
+        self._show_workflow_confirmation_invalidations(mutation)
         self.candidate_action_status_var.set(
             f"已套用 {member.id}，並重建連接、衍生資料及求解器輸入。"
         )
@@ -4299,7 +3947,6 @@ class DXFImportDialog:
                 "目前 CAD 暫存工程線僅支援圍令、支撐與斜撐。"
             )
             return
-        before_confirmed = self._confirmed_item_snapshot()
         try:
             event = self.cad_event_watcher.check_new_event()
             if event is None:
@@ -4337,13 +3984,14 @@ class DXFImportDialog:
                 raise DXFImportError("CAD 暫存事件缺少工程線座標資料。")
             start = float(data["StartX"]), float(data["StartY"])
             end = float(data["EndX"]), float(data["EndY"])
-            self.world_result, start_id, end_id = add_cad_candidate_points(
-                self.world_result,
-                member.id,
-                start,
-                end,
-                self.importer.tolerances,
+            start_id, end_id, mutation = (
+                self.review_workflow.add_cad_candidate_line(
+                    member.id,
+                    start,
+                    end,
+                )
             )
+            self._sync_review_workflow_state()
             self.cad_event_watcher.acknowledge(event)
         except (DXFImportError, KeyError, TypeError, ValueError, OSError) as exc:
             self.cad_temp_status_var.set(str(exc))
@@ -4352,8 +4000,7 @@ class DXFImportDialog:
         self.cad_temp_status_var.set(
             f"已讀取 {member.id} 的 CAD 指定工程線；請確認後按「套用修改」。"
         )
-        self._apply_coordinate_settings(
-            show_error=False,
+        self._refresh_result_views(
             preview_dirty=(
                 RenderDirty.CANDIDATE_LAYER
                 | RenderDirty.CANDIDATE_SELECTION
@@ -4368,10 +4015,7 @@ class DXFImportDialog:
             end_id,
             "cad_manual",
         )
-        self._finish_confirmation_mutation(
-            before_confirmed,
-            initiating_member_ids=(member.id,),
-        )
+        self._show_workflow_confirmation_invalidations(mutation)
 
     def _on_candidate_hover(self, event: Any) -> None:
         iid = self.candidate_tree.identify_row(event.y)
@@ -5696,72 +5340,14 @@ class DXFImportDialog:
             )
         )
 
-    def _current_review_coordinate_system(self) -> CoordinateSystem:
-        mode = str(self.coordinate_mode_var.get() or "world").strip().lower()
-        if mode == "local" and self.selected_origin_world is not None:
-            return CoordinateSystem(
-                "local",
-                float(self.selected_origin_world[0]),
-                float(self.selected_origin_world[1]),
-                "selected_candidate_point",
-            )
-        return CoordinateSystem()
-
     def _build_review_state(self) -> dict[str, Any]:
         """Capture JSON-safe review inputs plus an optional diagnostics snapshot."""
 
-        self._prune_review_confirmations()
-        if self.result is not None:
-            state = self.result.to_debug_dict()
-        elif self._initial_state_matches_source:
-            state = copy.deepcopy(self.initial_state)
-        else:
-            state = {}
-
-        layer_roles = self._current_layer_roles()
-        coordinate_system = self._current_review_coordinate_system()
-        import_mode = str(self.mode_var.get() or "replace").strip().lower()
-        if import_mode not in {"replace", "append"}:
-            import_mode = "replace"
-
-        replay_source = self.world_result or self.result
-        manual_overrides = (
-            capture_manual_overrides(replay_source)
-            if replay_source is not None
-            else manual_overrides_from_review_state(self.initial_state)
+        state = self.review_workflow.serialize_review_state(
+            layer_roles=self._current_layer_roles(),
+            import_mode=self.mode_var.get(),
         )
-        state.update(
-            {
-                "review_state_version": 2,
-                "source_path": str(self.file_path.resolve()),
-                "source_fingerprint": self.importer.source_fingerprint,
-                "layer_names": list(self.importer.layer_names),
-                "layer_classification": dict(layer_roles),
-                "layer_assignments": [
-                    {
-                        "layer_name": layer_name,
-                        "layer_type": layer_type,
-                    }
-                    for layer_name, layer_type in layer_roles.items()
-                ],
-                "coordinate_system": asdict(coordinate_system),
-                "import_mode": import_mode,
-                "excluded_sources": [
-                    asdict(source) for source in self.excluded_sources
-                ],
-                "manual_overrides": [
-                    asdict(override) for override in manual_overrides
-                ],
-                "double_support_decisions": (
-                    serialize_double_support_decisions(
-                        self.double_support_decisions
-                    )
-                ),
-                "review_confirmations": serialize_review_confirmations(
-                    getattr(self, "review_confirmations", {})
-                ),
-            }
-        )
+        self._sync_review_workflow_state()
         return state
 
     def _apply(self) -> None:
@@ -5802,7 +5388,6 @@ class DXFImportDialog:
                 parent=self.window,
             ):
                 return
-        self.import_mode = self.mode_var.get()
         self.review_state = self._build_review_state()
         self.dialog_action = "complete"
         self._save_ui_state()
@@ -5811,7 +5396,6 @@ class DXFImportDialog:
     def _pause(self) -> None:
         """Return to Main without validation or ProjectDataModel mutation."""
 
-        self.import_mode = self.mode_var.get()
         self.review_state = self._build_review_state()
         self.dialog_action = "pause"
         self._save_ui_state()
@@ -5825,8 +5409,6 @@ class DXFImportDialog:
 
     def _cancel(self) -> None:
         self.dialog_action = "cancel"
-        self.result = None
-        self.world_result = None
         self.review_state = {}
         self._save_ui_state()
         self.window.destroy()

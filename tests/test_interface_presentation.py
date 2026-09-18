@@ -210,6 +210,49 @@ class InterfacePresentationTests(unittest.TestCase):
         self.assertNotIn(".compare(", relink_source)
         self.assertNotIn(".merge_source_references(", relink_source)
 
+    def test_project_ui_delegates_project_application_workflows(self):
+        dxf_apply_source = inspect.getsource(
+            SupportInputApp._complete_dxf_review
+        )
+        payload_build_source = inspect.getsource(
+            SupportInputApp._build_project_payload
+        )
+        hydration_source = inspect.getsource(
+            SupportInputApp._apply_project_payload
+        )
+        global_apply_source = inspect.getsource(
+            SupportInputApp._apply_waler_global_result
+        )
+
+        self.assertNotIn(".to_project_rows(", dxf_apply_source)
+        self.assertNotIn("ProjectDataModel(", dxf_apply_source)
+        self.assertNotIn('"schema_version"', payload_build_source)
+        self.assertNotIn('"best_solution"', hydration_source)
+        self.assertNotIn("selected_id_set", global_apply_source)
+        self.assertIn("stage_dxf_review_apply", dxf_apply_source)
+        self.assertIn("build_project_payload", payload_build_source)
+        self.assertIn("hydrate_project", hydration_source)
+        self.assertIn("stage_waler_global_result", global_apply_source)
+
+    def test_support_plan_editor_delegates_engineering_workflow(self):
+        editor_source = inspect.getsource(
+            SupportInputApp._open_support_plan_editor
+        )
+        breakdown_source = inspect.getsource(
+            SupportInputApp._format_support_plan_breakdown
+        )
+
+        self.assertIn("editing_service.stage_edit", editor_source)
+        self.assertIn("SupportPlanEditing.analyze_plan", breakdown_source)
+        for hidden_rule in (
+            "evaluate_single_support",
+            "configured_steel_lengths",
+            "support.JACK_LENGTH",
+            "support.SHIM_LENGTHS",
+            "support.TARGET_GAP",
+        ):
+            self.assertNotIn(hidden_rule, editor_source + breakdown_source)
+
     def test_saved_result_summary_uses_engineering_status_not_algorithm_values(self):
         diagnostics = SolverDiagnostics(
             solver_type="support",
