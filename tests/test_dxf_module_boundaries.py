@@ -144,6 +144,22 @@ class DXFModuleBoundaryTests(unittest.TestCase):
             with self.subTest(module=path.name):
                 self.assertNotIn("tkinter", imported_roots(path))
 
+    def test_recovery_matching_and_replay_stay_out_of_main_and_dialog(self):
+        forbidden = {
+            "match_critical_members",
+            "rebind_manual_overrides",
+            "critical_member_identity_map",
+        }
+        for path in (PROJECT_ROOT / "main.py", DXF_PACKAGE / "dialog.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            referenced = {
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name)
+            }
+            with self.subTest(module=path.name):
+                self.assertEqual(set(), forbidden.intersection(referenced))
+
     def test_ezdxf_is_confined_to_importer_module(self):
         for path in DXF_PACKAGE.glob("*.py"):
             if path.name == "importer.py":
@@ -153,6 +169,8 @@ class DXFModuleBoundaryTests(unittest.TestCase):
 
     def test_core_modules_do_not_depend_on_dialog_or_importer(self):
         for name in (
+            "block_member_recognition.py",
+            "joist_recognition.py",
             "geometry.py",
             "models.py",
             "recognition.py",
@@ -177,6 +195,8 @@ class DXFModuleBoundaryTests(unittest.TestCase):
     def test_recognition_core_does_not_depend_on_review_or_presentation(self):
         forbidden = {"controllers", "dialog", "preview", "review_workflow"}
         for name in (
+            "block_member_recognition.py",
+            "joist_recognition.py",
             "geometry.py",
             "models.py",
             "recognition.py",
@@ -188,6 +208,49 @@ class DXFModuleBoundaryTests(unittest.TestCase):
             dependencies = local_dxf_dependencies(DXF_PACKAGE / name)
             with self.subTest(module=name):
                 self.assertTrue(forbidden.isdisjoint(dependencies))
+
+    def test_bim_geometry_interpretation_is_pure_and_stays_out_of_dialog(self):
+        service_paths = (
+            DXF_PACKAGE / "block_member_recognition.py",
+            DXF_PACKAGE / "joist_recognition.py",
+        )
+        dialog_tree = ast.parse(
+            (DXF_PACKAGE / "dialog.py").read_text(encoding="utf-8")
+        )
+        dialog_names = {
+            node.id
+            for node in ast.walk(dialog_tree)
+            if isinstance(node, ast.Name)
+        }
+
+        for service_path in service_paths:
+            with self.subTest(module=service_path.name):
+                service_imports = imported_roots(service_path)
+                service_dependencies = local_dxf_dependencies(service_path)
+                self.assertTrue(
+                    {"tkinter", "ezdxf", "main"}.isdisjoint(service_imports)
+                )
+                self.assertTrue(
+                    {
+                        "controllers",
+                        "dialog",
+                        "importer",
+                        "preview",
+                        "review_workflow",
+                    }.isdisjoint(service_dependencies)
+                )
+        self.assertNotIn("recognize_component_like_strut", dialog_names)
+        self.assertNotIn("BlockMemberRecognitionInput", dialog_names)
+
+    def test_initial_zoning_operation_stays_out_of_recognition_and_presentation(self):
+        imports = imported_roots(DXF_PACKAGE / "initial_zoning.py")
+        dependencies = local_dxf_dependencies(DXF_PACKAGE / "initial_zoning.py")
+
+        self.assertTrue({"tkinter", "ezdxf", "main"}.isdisjoint(imports))
+        self.assertTrue(
+            {"controllers", "dialog", "importer", "preview", "recognition"}
+            .isdisjoint(dependencies)
+        )
 
 
 if __name__ == "__main__":

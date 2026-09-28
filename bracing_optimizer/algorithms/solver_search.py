@@ -113,9 +113,24 @@ class SolverDiagnostics:
     policy_id: str = DEFAULT_SEARCH_POLICY.policy_id
     policy_version: int = DEFAULT_SEARCH_POLICY.policy_version
     stage_records: List[Dict[str, Any]] = field(default_factory=list)
+    # Support-only optional runtime/persisted diagnostics.  Older payloads do
+    # not contain these fields, and non-Support solvers leave them as None.
+    validation_issues: Optional[List[Dict[str, Any]]] = None
+    adjacency_units: Optional[List[Dict[str, Any]]] = None
+    adjacency_pairs: Optional[List[Dict[str, Any]]] = None
+    phase2_executed: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        for key in (
+            "validation_issues",
+            "adjacency_units",
+            "adjacency_pairs",
+            "phase2_executed",
+        ):
+            if payload.get(key) is None:
+                payload.pop(key, None)
+        return payload
 
     @classmethod
     def from_dict(cls, value: Any) -> Optional["SolverDiagnostics"]:

@@ -40,11 +40,13 @@ from bracing_optimizer.application.project_data import (
 from bracing_optimizer.application.solver_input_builder import (
     InventoryLookup,
     SolverInputBuildError,
+    format_support_input_build_error,
     UNLIMITED_INVENTORY_QTY,
 )
 from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
+    confirm_review_recovery,
 )
 from dxf_import.models import (
     CoordinateSystem,
@@ -59,6 +61,11 @@ from bracing_optimizer.presentation.cad_view_interaction import (
     CADViewInteractionController,
 )
 from bracing_optimizer.presentation.field_labels import build_table_column_labels
+from bracing_optimizer.presentation.project_navigation import (
+    NavigationGuardOutcome,
+    ProjectSaveOutcome,
+    ProjectSaveStatus,
+)
 from bracing_optimizer.infrastructure.dxf_result_export import (
     DXFResultExportError,
     ExportPiece,
@@ -77,6 +84,8 @@ from bracing_optimizer.infrastructure.project_persistence import (
 from bracing_optimizer.application.project_service import (
     ApplyDxfReviewRequest,
     BuildProjectPayloadRequest,
+    PausedReviewRelinkRequest,
+    PausedReviewRelinkStatus,
     PROJECT_DXF_BINDING_FIELDS,
     RelinkDxfRequest,
     SaveProjectRequest,
@@ -85,6 +94,10 @@ from bracing_optimizer.application.plan_editing import SupportPlanEditing, Waler
 from bracing_optimizer.application.project_results import (
     MaterialDetailBuildError,
     ProjectResultModel,
+)
+from bracing_optimizer.application.optimize_waler import (
+    is_rc_waler_material,
+    partition_waler_optimization_inputs,
 )
 from bracing_optimizer.application.project_validation import ProjectDataValidator
 from bracing_optimizer.presentation import (
@@ -476,6 +489,7 @@ class SupportInputApp:
             None, None, None
         )
         self.last_dxf_compatibility_report = None
+        self.last_dxf_recovery_summary = None
         self.solver_memory = {}
         self.support_candidate_cache = {}
         self.cad_import_enabled = True
@@ -2309,10 +2323,9 @@ class SupportInputApp:
         if not project_name:
             messagebox.showwarning("載入專案", "請先選擇要載入的專案。")
             return
-        if getattr(self, "project_dirty", False) and not messagebox.askyesno(
-            "尚未儲存",
-            "目前專案有尚未儲存的變更，確定要開啟另一個專案嗎？",
-            parent=self.root,
+        if (
+            self._guard_unsaved_project_changes()
+            is NavigationGuardOutcome.CANCELLED
         ):
             return
         try:
@@ -2401,16 +2414,16 @@ class SupportInputApp:
             parent=self.root,
         )
         if project_name is None:
-            return
+            return ProjectSaveOutcome.cancelled()
         project_name = project_name.strip()
         if not project_name:
             messagebox.showwarning("儲存專案", "專案名稱不可空白。")
-            return
+            return ProjectSaveOutcome.cancelled()
 
         path = self._project_case_path(project_name)
         if path is None:
             messagebox.showwarning("儲存專案", "專案名稱不可空白。")
-            return
+            return ProjectSaveOutcome.cancelled()
         if path.exists():
             confirmed = messagebox.askyesno(
                 "覆蓋專案",
@@ -2418,23 +2431,24 @@ class SupportInputApp:
                 parent=self.root,
             )
             if not confirmed:
-                return
+                return ProjectSaveOutcome.cancelled()
 
         try:
             saved_path = self.save_project_case(project_name)
         except Exception as exc:
             messagebox.showerror("儲存專案失敗", str(exc))
-            return
+            return ProjectSaveOutcome.failed(exc)
 
         saved_name = self._project_case_name_from_path(saved_path)
         self._refresh_project_case_list(selected_name=saved_name)
         messagebox.showinfo("儲存專案", f"已儲存：\n{saved_path}")
-        return saved_path
+        return ProjectSaveOutcome.saved(saved_path)
 
     def _save_current_project_case_from_prompt(self):
         """Backward-compatible command name used by older tests/extensions."""
 
-        return self._save_project_as()
+        outcome = self._save_project_as()
+        return outcome.path if outcome.status is ProjectSaveStatus.SAVED else None
 
     def _save_current_project(self):
         current = getattr(self, "current_project_path", None)
@@ -2445,18 +2459,46 @@ class SupportInputApp:
             saved_path = self.save_project_case(project_name)
         except Exception as exc:
             messagebox.showerror("儲存專案失敗", str(exc), parent=self.root)
-            return None
+            return ProjectSaveOutcome.failed(exc)
         self._refresh_project_case_list(selected_name=project_name)
         messagebox.showinfo("儲存專案", f"已儲存：\n{saved_path}", parent=self.root)
-        return saved_path
+        return ProjectSaveOutcome.saved(saved_path)
+
+    def _guard_unsaved_project_changes(self):
+        """Resolve dirty state without invoking the requested destination."""
+
+        if not getattr(self, "project_dirty", False):
+            return NavigationGuardOutcome.PROCEED
+        decision = messagebox.askyesnocancel(
+            "尚未儲存",
+            (
+                "目前專案有尚未儲存的變更。\n"
+                "是：先儲存再繼續\n"
+                "否：放棄變更並繼續\n"
+                "取消：維持目前專案"
+            ),
+            parent=self.root,
+        )
+        if decision is None:
+            return NavigationGuardOutcome.CANCELLED
+        if decision is False:
+            return NavigationGuardOutcome.PROCEED
+        outcome = self._save_current_project()
+        if outcome.status is ProjectSaveStatus.SAVED:
+            return NavigationGuardOutcome.PROCEED
+        return NavigationGuardOutcome.CANCELLED
 
     def _new_project(self):
-        if getattr(self, "project_dirty", False) and not messagebox.askyesno(
-            "尚未儲存",
-            "目前專案有尚未儲存的變更，確定要建立新專案嗎？",
-            parent=self.root,
+        if (
+            self._guard_unsaved_project_changes()
+            is NavigationGuardOutcome.CANCELLED
         ):
             return
+        self._reset_to_new_project()
+
+    def _reset_to_new_project(self):
+        """Perform the destructive New-project continuation."""
+
         self.project_data = ProjectDataModel(inventory=self._load_default_inventory())
         self.result_items.clear()
         self.project_result = None
@@ -2472,6 +2514,7 @@ class SupportInputApp:
             None, None, None
         )
         self.last_dxf_compatibility_report = None
+        self.last_dxf_recovery_summary = None
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
         for table_name in (
@@ -2489,12 +2532,7 @@ class SupportInputApp:
 
     def _relink_dxf(self):
         if self._current_dxf_workflow_status() == DxfWorkflowStatus.REVIEW:
-            messagebox.showwarning(
-                "DXF Review 尚未完成",
-                "請先繼續目前的 DXF 匯入；Review 期間不能改用重新連結取代來源。",
-                parent=self.root,
-            )
-            return
+            return self._relink_paused_dxf_review()
         file_path = filedialog.askopenfilename(
             title="重新連結 DXF",
             filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
@@ -2594,6 +2632,192 @@ class SupportInputApp:
             )
             self.show_result(f"DXF 重新連結失敗：{exc}")
 
+    @staticmethod
+    def _paused_review_relink_details(result):
+        lines = [str(result.summary)]
+        lines.extend(str(line) for line in result.detail_lines if str(line))
+        return "\n".join(lines)
+
+    def _adopt_paused_review_relink(self, result):
+        """Atomically adopt one Application-validated Review source result."""
+
+        if (
+            not result.accepted
+            or result.relinked_state is None
+            or result.dxf_status_report is None
+            or result.workflow_status != DxfWorkflowStatus.REVIEW
+        ):
+            raise ValueError("Paused DXF Review 重新連結結果不可採用。")
+        if self._current_dxf_workflow_status() != DxfWorkflowStatus.REVIEW:
+            raise RuntimeError("目前不是可採用重新連結結果的 DXF Review。")
+
+        previous_state = getattr(self, "dxf_last_import_debug", None)
+        previous_report = getattr(self, "dxf_asset_status_report", None)
+        previous_compatibility = getattr(
+            self,
+            "last_dxf_compatibility_report",
+            None,
+        )
+        previous_recovery_summary = getattr(
+            self,
+            "last_dxf_recovery_summary",
+            None,
+        )
+        previous_review_session = getattr(self, "dxf_review_session", None)
+        previous_dirty = getattr(self, "project_dirty", False)
+        previous_dirty_reason = getattr(self, "project_dirty_reason", "")
+        try:
+            self.dxf_last_import_debug = copy.deepcopy(result.relinked_state)
+            self.dxf_asset_status_report = result.dxf_status_report
+            self.last_dxf_compatibility_report = None
+            self.last_dxf_recovery_summary = result.recovery_summary
+            if (
+                result.status
+                == PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE
+            ):
+                if result.candidate_world_result is None:
+                    raise ValueError(
+                        "Compatible recovery 缺少候選 world_result cache。"
+                    )
+                self.dxf_review_session = {
+                    "source_fingerprint": str(
+                        result.relinked_state.get("source_fingerprint", "")
+                    ).strip().upper(),
+                    "world_result": result.candidate_world_result,
+                }
+            self._mark_project_dirty(result.dirty_reason)
+        except Exception:
+            self.dxf_last_import_debug = previous_state
+            self.dxf_asset_status_report = previous_report
+            self.last_dxf_compatibility_report = previous_compatibility
+            self.last_dxf_recovery_summary = previous_recovery_summary
+            self.dxf_review_session = previous_review_session
+            self.project_dirty = previous_dirty
+            self.project_dirty_reason = previous_dirty_reason
+            try:
+                self._update_window_title()
+            except Exception:
+                pass
+            raise
+
+    def _relink_paused_dxf_review(self):
+        """Relink REVIEW by exact bytes or explicit compatible recovery."""
+
+        if self._current_dxf_workflow_status() != DxfWorkflowStatus.REVIEW:
+            raise RuntimeError("目前沒有可重新連結來源的 DXF Review。")
+        while True:
+            file_path = filedialog.askopenfilename(
+                title="重新連結 DXF Review 來源",
+                filetypes=(("DXF 圖檔", "*.dxf"), ("所有檔案", "*.*")),
+                parent=self.root,
+            )
+            if not file_path:
+                return None
+
+            service = self._ensure_project_service()
+            evaluation = service.evaluate_paused_review_relink(
+                PausedReviewRelinkRequest(
+                    candidate_path=Path(file_path),
+                    saved_state=getattr(self, "dxf_last_import_debug", None),
+                    workflow_status=self._current_dxf_workflow_status(),
+                    material_specs=self.material_specs,
+                )
+            )
+            if evaluation.status in {
+                PausedReviewRelinkStatus.INCOMPATIBLE_SOURCE,
+                PausedReviewRelinkStatus.VALIDATION_FAILED,
+            } or evaluation.plan is None:
+                details = self._paused_review_relink_details(evaluation)
+                self._set_dxf_import_status(
+                    "DXF Review 來源重新連結未套用",
+                    source=file_path,
+                    error=details,
+                )
+                retry = messagebox.askretrycancel(
+                    "DXF Review 來源未通過驗證",
+                    details + "\n\n是否選擇另一個 DXF 重試？",
+                    parent=self.root,
+                )
+                if retry:
+                    continue
+                return None
+
+            if (
+                evaluation.status
+                == PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE
+            ):
+                if evaluation.recovery_summary is None:
+                    details = "Compatible recovery 缺少可檢視的摘要。"
+                    self._set_dxf_import_status(
+                        "DXF Review 來源重新連結未套用",
+                        source=file_path,
+                        error=details,
+                    )
+                    return None
+                if not confirm_review_recovery(
+                    self.root,
+                    evaluation.recovery_summary,
+                ):
+                    return None
+            elif evaluation.status != PausedReviewRelinkStatus.EXACT_MATCH:
+                return None
+
+            result = service.commit_paused_review_relink(
+                evaluation.plan,
+                current_saved_state=getattr(
+                    self,
+                    "dxf_last_import_debug",
+                    None,
+                ),
+                current_workflow_status=self._current_dxf_workflow_status(),
+            )
+            if not result.accepted:
+                details = self._paused_review_relink_details(result)
+                self._set_dxf_import_status(
+                    "DXF Review 來源重新連結未套用",
+                    source=file_path,
+                    error=details,
+                )
+                retry = messagebox.askretrycancel(
+                    "DXF Review 來源驗證已失效",
+                    details + "\n\n是否重新選擇 DXF？",
+                    parent=self.root,
+                )
+                if retry:
+                    continue
+                return None
+
+            try:
+                self._adopt_paused_review_relink(result)
+            except Exception as exc:
+                self._set_dxf_import_status(
+                    "DXF Review 來源重新連結失敗",
+                    source=file_path,
+                    error=exc,
+                )
+                messagebox.showerror(
+                    "DXF Review 來源重新連結失敗",
+                    str(exc),
+                    parent=self.root,
+                )
+                return None
+
+            self._set_dxf_import_status(
+                "DXF Review 來源已重新連結，等待儲存專案",
+                source=file_path,
+            )
+            self.show_result(
+                (
+                    "DXF Review 已採用候選重新辨識的恢復結果；"
+                    "需重新檢查或已停用的項目仍保留在 Review。"
+                    if result.status
+                    == PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE
+                    else "DXF Review 已重新連結至內容完全相同的來源；"
+                    "既有人工修正與確認均已保留。"
+                )
+            )
+            return self._continue_dxf_import()
+
     def _load_default_inventory(self):
         repository = getattr(self, "inventory_repository", None)
         if repository is None:
@@ -2640,6 +2864,7 @@ class SupportInputApp:
         self._adopt_hydrated_project(result.hydrated_project)
         self.dxf_asset_status_report = result.dxf_status_report
         self.last_dxf_compatibility_report = None
+        self.last_dxf_recovery_summary = None
         self._clear_project_dirty()
         display_name = self._project_case_name_from_path(path)
         self._refresh_project_case_list(selected_name=display_name)
@@ -2737,6 +2962,7 @@ class SupportInputApp:
         self.dxf_review_session = None
         self.dxf_last_import_debug = hydrated.dxf_import_state
         self.dxf_asset = hydrated.dxf_asset
+        self.last_dxf_recovery_summary = None
 
         self.solver_memory.clear()
         self.support_candidate_cache.clear()
@@ -3362,6 +3588,26 @@ class SupportInputApp:
             lines.extend(self._format_support_global_analysis_lines(solution))
         return "\n".join(lines)
 
+    def _adopt_support_plan_edit(self, item, staged, zoning, support_id):
+        """Commit one changed Support edit and refresh formal result views."""
+
+        if not staged.changed:
+            return False
+
+        item["result"] = staged.solution
+        self._mark_results_updated()
+        selected_id = self._support_plan_iid(zoning, support_id)
+        self._refresh_results_tree(selected_id=selected_id)
+        parent_id = (
+            self.results_tree.parent(selected_id)
+            if self.results_tree.exists(selected_id)
+            else ""
+        )
+        if parent_id:
+            self.results_tree.item(parent_id, open=True)
+        self.update_preview(preserve_view=True)
+        return True
+
     def _open_support_plan_editor(self, zoning, support_id):
         item = self.result_items.get(zoning)
         solution = item.get("result") if isinstance(item, dict) else None
@@ -3509,8 +3755,12 @@ class SupportInputApp:
 
             solution = staged.solution
             plan = staged.plan
-            item["result"] = solution
-            self._mark_results_updated()
+            self._adopt_support_plan_edit(
+                item,
+                staged,
+                zoning,
+                support_id,
+            )
             new_plan = staged.plan
             input_error = (
                 None
@@ -3536,11 +3786,6 @@ class SupportInputApp:
                 analysis=staged.analysis,
             ))
             summary_text.configure(state="disabled")
-            self._refresh_results_tree(selected_id=self._support_plan_iid(zoning, support_id))
-            parent_id = self.results_tree.parent(self._support_plan_iid(zoning, support_id)) if self.results_tree.exists(self._support_plan_iid(zoning, support_id)) else ""
-            if parent_id:
-                self.results_tree.item(parent_id, open=True)
-            self.update_preview(preserve_view=True)
 
         def add_piece(kind, length):
             index = len(tree.get_children("")) + 1
@@ -5574,11 +5819,15 @@ class SupportInputApp:
                 "DXF Review 無法繼續",
                 error=exc,
             )
-            messagebox.showerror(
-                "DXF Review 無法繼續",
-                str(exc),
+            retry = messagebox.askretrycancel(
+                "DXF Review 來源無法使用",
+                str(exc)
+                + "\n\n按「重試」選擇相同內容或可安全恢復的 DXF 來源，"
+                "或按「取消」保留目前 Review。",
                 parent=self.root,
             )
+            if retry:
+                return self._relink_paused_dxf_review()
             return None
 
     def _manual_read_cad_event(self):
@@ -5638,6 +5887,7 @@ class SupportInputApp:
         if reason:
             state[self.DXF_BINDING_STALE_REASON_KEY] = str(reason)
         self.last_dxf_compatibility_report = None
+        self.last_dxf_recovery_summary = None
 
     def _check_dxf_export_compatibility(self, dxf_state):
         checker = getattr(self, "dxf_compatibility_checker", None)
@@ -6016,8 +6266,8 @@ class SupportInputApp:
             if decision is None:
                 return
             if decision:
-                saved = self._save_current_project()
-                if saved is None or getattr(self, "project_dirty", False):
+                outcome = self._save_current_project()
+                if outcome.status is not ProjectSaveStatus.SAVED:
                     return
         if self._cad_poll_after_id is not None:
             try:
@@ -7544,7 +7794,15 @@ class SupportInputApp:
             self.show_result("錯誤：找不到圍令輸入資料")
             return
 
-        waler_ids = list(waler_inputs.keys())
+        eligible_inputs, _excluded_inputs = partition_waler_optimization_inputs(
+            tuple(waler_inputs.values())
+        )
+        if not eligible_inputs:
+            self.show_result("沒有可進行材料配置的 non-RC 圍令。")
+            return
+
+        eligible_by_id = {item.waler_id: item for item in eligible_inputs}
+        waler_ids = list(eligible_by_id)
         dialog = WalerSelectionDialog(self.root, waler_ids)
         selected_waler = dialog.open()
         if selected_waler is None:
@@ -7565,7 +7823,7 @@ class SupportInputApp:
             if not confirmed:
                 return
 
-        waler_input = waler_inputs[selected_waler]
+        waler_input = eligible_by_id[selected_waler]
         if waler_input.material_spec and not waler_input.purchasable_lengths:
             self.show_result(
                 f"錯誤：圍令 {selected_waler} 所選規格 "
@@ -7602,9 +7860,17 @@ class SupportInputApp:
             self.show_result("錯誤：找不到圍令輸入資料")
             return
 
+        eligible_inputs, _excluded_inputs = partition_waler_optimization_inputs(
+            tuple(waler_inputs.values())
+        )
+        if not eligible_inputs:
+            self.show_result("沒有可進行材料配置的 non-RC 圍令。")
+            return
+        eligible_by_id = {item.waler_id: item for item in eligible_inputs}
+
         missing_inventory = [
             waler_id
-            for waler_id, waler_input in waler_inputs.items()
+            for waler_id, waler_input in eligible_by_id.items()
             if waler_input.material_spec and not waler_input.purchasable_lengths
         ]
         if missing_inventory:
@@ -7616,7 +7882,7 @@ class SupportInputApp:
 
         modified_waler_ids = [
             waler_id
-            for waler_id in waler_inputs
+            for waler_id in eligible_by_id
             if self._has_modified_waler_results(waler_id)
         ]
         if modified_waler_ids:
@@ -7625,7 +7891,8 @@ class SupportInputApp:
                 (
                     "下列圍令有已人工修改的成果方案：\n"
                     + "、".join(modified_waler_ids)
-                    + "\n\n套用全域結果時會取代這些方案，是否繼續計算？"
+                    + "\n\n開始計算後，合法的全域結果會自動採用並取代"
+                    "這些方案，是否繼續計算？"
                 ),
                 parent=self.root,
             )
@@ -7634,7 +7901,7 @@ class SupportInputApp:
 
         dialog = WalerGlobalSolverDialog(
             self.root,
-            tuple(waler_inputs.values()),
+            tuple(eligible_inputs),
             self._apply_waler_global_result,
             optimize_waler_global=self.make_waler_global_optimizer(),
             waler_solver_guard=waler_solver_guard,
@@ -7644,9 +7911,16 @@ class SupportInputApp:
     def _apply_waler_global_result(self, global_result):
         """Commit selected Waler data, then refresh the UI independently."""
 
+        excluded_rc_waler_ids = tuple(
+            str(row.get("WalerID", "") or "").strip()
+            for row in self._ensure_project_data().walers
+            if is_rc_waler_material(row.get("material_spec"))
+            and str(row.get("WalerID", "") or "").strip()
+        )
         try:
             staged = self._ensure_project_results().stage_waler_global_result(
-                global_result
+                global_result,
+                excluded_waler_ids=excluded_rc_waler_ids,
             )
         except Exception as exc:
             LOGGER.exception("Global Waler apply staging failed")
@@ -7742,7 +8016,10 @@ class SupportInputApp:
                 selected_zoning,
             )
         except SolverInputBuildError as exc:
-            self.show_result(f"無法建立支撐 Solver 輸入：\n{exc}")
+            self.show_result(
+                "無法建立支撐 Solver 輸入：\n"
+                + format_support_input_build_error(exc)
+            )
             return
         if not support_input.configs:
             self.show_result(f"錯誤：分區 {selected_zoning} 沒有可供計算的支撐")

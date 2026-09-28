@@ -1,8 +1,11 @@
+import copy
 import json
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import ezdxf
 
@@ -17,6 +20,8 @@ from bracing_optimizer.application.project_results import ProjectResultModel
 from bracing_optimizer.application.project_service import (
     ApplyDxfReviewRequest,
     BuildProjectPayloadRequest,
+    PausedReviewRelinkRequest,
+    PausedReviewRelinkStatus,
     ProjectService,
     RelinkDxfRequest,
     SaveProjectRequest,
@@ -31,6 +36,78 @@ class FakeReviewResult:
     def to_project_rows(self, existing_rows=None):
         self.existing_rows = existing_rows
         return self.rows
+
+
+class FakeRecoveryStage:
+    def __init__(
+        self,
+        candidate_path,
+        candidate_fingerprint,
+        base_state_token,
+        recovered_state,
+        world_result,
+    ):
+        self.candidate_path = Path(candidate_path).resolve()
+        self.candidate_fingerprint = candidate_fingerprint
+        self.base_state_token = base_state_token
+        self._recovered_state = copy.deepcopy(recovered_state)
+        self.world_result = world_result
+
+    def copy_recovered_state(self):
+        return copy.deepcopy(self._recovered_state)
+
+
+class FakeRecoveryPlanner:
+    def __init__(self, status="COMPATIBLE_RECOVERY_AVAILABLE"):
+        self.status = status
+        self.calls = []
+        self.world_result = object()
+        self.summary = SimpleNamespace(name="recovery-summary")
+
+    def plan(
+        self,
+        candidate_path,
+        candidate_fingerprint,
+        saved_state,
+        base_state_token,
+        *,
+        material_specs=(),
+    ):
+        self.calls.append((
+            Path(candidate_path).resolve(),
+            candidate_fingerprint,
+            copy.deepcopy(saved_state),
+            base_state_token,
+            tuple(material_specs),
+        ))
+        if self.status != "COMPATIBLE_RECOVERY_AVAILABLE":
+            return SimpleNamespace(
+                status=self.status,
+                plan=None,
+                summary=self.summary,
+                detail_lines=("planner detail",),
+            )
+        recovered = copy.deepcopy(saved_state)
+        recovered["source_path"] = str(Path(candidate_path).resolve())
+        recovered["source_fingerprint"] = candidate_fingerprint
+        stage = FakeRecoveryStage(
+            candidate_path,
+            candidate_fingerprint,
+            base_state_token,
+            recovered,
+            self.world_result,
+        )
+        return SimpleNamespace(
+            status=self.status,
+            plan=SimpleNamespace(stage=stage),
+            summary=self.summary,
+            detail_lines=(),
+        )
+
+
+class FailingRelinkReportManager(DxfAssetManager):
+    def accepted_relink_report(self, source_path, *, summary):
+        raise ProjectPersistenceError("狀態建立失敗", "simulated")
 
 
 def project_payload(*, include_asset=True, result=None):
@@ -50,11 +127,33 @@ def project_payload(*, include_asset=True, result=None):
     return value
 
 
-def create_dxf(path: Path) -> Path:
+def create_dxf(path: Path, *, offset: float = 0.0) -> Path:
     document = ezdxf.new("R2010")
-    document.modelspace().add_line((0, 0), (1000, 0))
+    document.modelspace().add_line((offset, 0), (offset + 1000, 0))
     document.saveas(path)
     return path
+
+
+def paused_review_state(path: Path, **updates) -> dict:
+    state = {
+        "review_state_version": 2,
+        "source_path": str(path),
+        "source_fingerprint": DxfAssetManager.file_info(path).sha256.upper(),
+        "layer_classification": {"0": "ignore"},
+        "coordinate_system": {
+            "mode": "local",
+            "origin_x": 125.0,
+            "origin_y": -75.0,
+        },
+        "import_mode": "replace",
+        "excluded_sources": [{"role": "beam", "source_handles": ["6EF"]}],
+        "manual_overrides": [{"role": "waler", "source_handles": ["10"]}],
+        "double_support_decisions": [{"source": "S1|S2", "accepted": True}],
+        "review_confirmations": {"waler:10": "ABC123"},
+        "validation_messages": [{"severity": "warning", "code": "PENDING"}],
+    }
+    state.update(updates)
+    return state
 
 
 def import_state(path: Path, *, handle: str) -> dict:
@@ -207,6 +306,369 @@ class ProjectServiceTests(unittest.TestCase):
             result.relinked_state["converted"]["walers"][0]["source_handles"],
             ["99"],
         )
+
+    def test_paused_review_exact_relink_stages_only_source_reference_changes(self):
+        source = create_dxf(self.root / "original.dxf")
+        candidate = self.root / "renamed.dxf"
+        shutil.copy2(source, candidate)
+        saved_state = paused_review_state(source)
+        before = copy.deepcopy(saved_state)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(paused_review_recovery_planner=planner)
+
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        self.assertEqual(evaluation.status, PausedReviewRelinkStatus.EXACT_MATCH)
+        self.assertIsNotNone(evaluation.plan)
+        expected = copy.deepcopy(before)
+        expected["source_path"] = str(candidate.resolve())
+        expected["source_fingerprint"] = before["source_fingerprint"].upper()
+        self.assertEqual(evaluation.plan.relinked_state, expected)
+        self.assertEqual(saved_state, before)
+        self.assertIsNot(evaluation.plan.relinked_state, saved_state)
+        self.assertIsNot(
+            evaluation.plan.relinked_state["excluded_sources"],
+            saved_state["excluded_sources"],
+        )
+        self.assertEqual(planner.calls, [])
+        self.assertIsNone(evaluation.recovery_seed)
+        self.assertIsNone(evaluation.recovery_summary)
+
+    def test_paused_review_relink_reports_incompatible_planner_result(self):
+        source = create_dxf(self.root / "original.dxf")
+        candidate = create_dxf(self.root / "changed.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        before = copy.deepcopy(saved_state)
+        planner = FakeRecoveryPlanner("INCOMPATIBLE_SOURCE")
+        service = ProjectService(paused_review_recovery_planner=planner)
+
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        self.assertEqual(
+            evaluation.status,
+            PausedReviewRelinkStatus.INCOMPATIBLE_SOURCE,
+        )
+        self.assertIsNone(evaluation.plan)
+        self.assertIsNotNone(evaluation.recovery_seed)
+        self.assertIs(evaluation.recovery_summary, planner.summary)
+        self.assertEqual(len(planner.calls), 1)
+        self.assertEqual(saved_state, before)
+
+    def test_paused_review_relink_returns_compatible_recovery_plan(self):
+        source = create_dxf(self.root / "original.dxf")
+        candidate = create_dxf(self.root / "changed.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(paused_review_recovery_planner=planner)
+
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+                material_specs=({"Usage": "圍令", "Spec": "H350"},),
+            )
+        )
+
+        self.assertEqual(
+            evaluation.status,
+            PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+        )
+        self.assertIsNotNone(evaluation.plan)
+        self.assertEqual(
+            evaluation.plan.status,
+            PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+        )
+        self.assertIs(evaluation.plan.candidate_world_result, planner.world_result)
+        self.assertIs(evaluation.recovery_summary, planner.summary)
+        self.assertEqual(
+            planner.calls[0][4],
+            ({"Usage": "圍令", "Spec": "H350"},),
+        )
+        self.assertEqual(saved_state["source_path"], str(source))
+
+    def test_paused_review_relink_maps_planner_validation_failure(self):
+        source = create_dxf(self.root / "original.dxf")
+        candidate = create_dxf(self.root / "changed.dxf", offset=5000)
+        planner = FakeRecoveryPlanner("VALIDATION_FAILED")
+        service = ProjectService(paused_review_recovery_planner=planner)
+
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=paused_review_state(source),
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        self.assertEqual(
+            evaluation.status,
+            PausedReviewRelinkStatus.VALIDATION_FAILED,
+        )
+        self.assertIsNone(evaluation.plan)
+        self.assertEqual(evaluation.detail_lines, ("planner detail",))
+
+    def test_paused_review_relink_reports_invalid_candidate(self):
+        source = create_dxf(self.root / "original.dxf")
+        candidate = self.root / "invalid.dxf"
+        candidate.write_text("not a dxf", encoding="utf-8")
+
+        evaluation = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=paused_review_state(source),
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        self.assertEqual(
+            evaluation.status,
+            PausedReviewRelinkStatus.VALIDATION_FAILED,
+        )
+        self.assertIsNone(evaluation.plan)
+        self.assertTrue(evaluation.detail_lines)
+
+    def test_paused_review_relink_requires_saved_fingerprint_and_review_status(self):
+        candidate = create_dxf(self.root / "candidate.dxf")
+        no_fingerprint = {"source_path": "old.dxf"}
+
+        missing = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=no_fingerprint,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        wrong_workflow = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=paused_review_state(candidate),
+                workflow_status=DxfWorkflowStatus.COMPLETED,
+            )
+        )
+
+        self.assertEqual(
+            missing.status,
+            PausedReviewRelinkStatus.VALIDATION_FAILED,
+        )
+        self.assertEqual(
+            wrong_workflow.status,
+            PausedReviewRelinkStatus.VALIDATION_FAILED,
+        )
+        self.assertIsNone(missing.plan)
+        self.assertIsNone(wrong_workflow.plan)
+
+    def test_paused_review_relink_commit_revalidates_candidate(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = self.root / "candidate.dxf"
+        shutil.copy2(source, candidate)
+        saved_state = paused_review_state(source)
+        evaluation = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        create_dxf(candidate, offset=9000)
+
+        committed = self.service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=saved_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertFalse(committed.accepted)
+        self.assertEqual(
+            committed.status,
+            PausedReviewRelinkStatus.VALIDATION_FAILED,
+        )
+        self.assertIsNone(committed.relinked_state)
+        self.assertIsNone(committed.dxf_status_report)
+
+    def test_paused_review_relink_commit_rejects_stale_review_state(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = self.root / "candidate.dxf"
+        shutil.copy2(source, candidate)
+        saved_state = paused_review_state(source)
+        evaluation = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        changed_state = copy.deepcopy(saved_state)
+        changed_state["review_confirmations"]["strut:20"] = "NEW"
+
+        committed = self.service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=changed_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertFalse(committed.accepted)
+        self.assertIsNone(committed.relinked_state)
+        self.assertIsNone(committed.dxf_status_report)
+        self.assertEqual(changed_state["source_path"], str(source))
+
+    def test_paused_review_exact_commit_returns_pending_save_adoption(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = self.root / "candidate.dxf"
+        shutil.copy2(source, candidate)
+        saved_state = paused_review_state(source)
+        evaluation = self.service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        committed = self.service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=saved_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertTrue(committed.accepted)
+        self.assertEqual(committed.status, PausedReviewRelinkStatus.EXACT_MATCH)
+        self.assertEqual(committed.workflow_status, DxfWorkflowStatus.REVIEW)
+        self.assertEqual(
+            committed.dxf_status_report.status,
+            DxfStatus.VERIFIED_PENDING_SAVE,
+        )
+        self.assertEqual(
+            committed.relinked_state["source_path"],
+            str(candidate.resolve()),
+        )
+        self.assertEqual(saved_state["source_path"], str(source))
+        self.assertIsNot(committed.relinked_state, evaluation.plan.relinked_state)
+
+    def test_paused_review_compatible_commit_returns_candidate_adoption(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = create_dxf(self.root / "candidate.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(paused_review_recovery_planner=planner)
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=saved_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertTrue(committed.accepted)
+        self.assertEqual(
+            committed.status,
+            PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+        )
+        self.assertEqual(committed.workflow_status, DxfWorkflowStatus.REVIEW)
+        self.assertIs(committed.candidate_world_result, planner.world_result)
+        self.assertIs(committed.recovery_summary, planner.summary)
+        self.assertEqual(
+            committed.relinked_state["source_path"],
+            str(candidate.resolve()),
+        )
+        self.assertEqual(saved_state["source_path"], str(source))
+
+    def test_paused_review_compatible_commit_rejects_changed_candidate(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = create_dxf(self.root / "candidate.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(paused_review_recovery_planner=planner)
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        create_dxf(candidate, offset=9000)
+
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=saved_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertFalse(committed.accepted)
+        self.assertIsNone(committed.relinked_state)
+        self.assertIsNone(committed.candidate_world_result)
+
+    def test_paused_review_compatible_commit_rejects_stale_review_state(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = create_dxf(self.root / "candidate.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(paused_review_recovery_planner=planner)
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        changed_state = copy.deepcopy(saved_state)
+        changed_state["import_mode"] = "append"
+
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=changed_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertFalse(committed.accepted)
+        self.assertIsNone(committed.relinked_state)
+        self.assertEqual(changed_state["source_path"], str(source))
+
+    def test_paused_review_compatible_commit_rejects_status_creation_failure(self):
+        source = create_dxf(self.root / "source.dxf")
+        candidate = create_dxf(self.root / "candidate.dxf", offset=5000)
+        saved_state = paused_review_state(source)
+        planner = FakeRecoveryPlanner()
+        service = ProjectService(
+            FailingRelinkReportManager(),
+            paused_review_recovery_planner=planner,
+        )
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=saved_state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=saved_state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+
+        self.assertFalse(committed.accepted)
+        self.assertIsNone(committed.relinked_state)
+        self.assertIsNone(committed.dxf_status_report)
+        self.assertIsNone(committed.candidate_world_result)
 
     def test_stage_dxf_replace_preserves_settings_and_invalidates_results(self):
         current = ProjectDataModel(

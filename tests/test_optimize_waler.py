@@ -2,7 +2,13 @@ import unittest
 from dataclasses import replace
 from unittest.mock import patch
 
-from bracing_optimizer.application.optimize_waler import OptimizeWaler, OptimizeWalerRequest
+from bracing_optimizer.application.optimize_waler import (
+    OptimizeWaler,
+    OptimizeWalerRequest,
+    WalerOptimizationExcludedError,
+    is_rc_waler_material,
+    partition_waler_optimization_inputs,
+)
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.algorithms.solver_search import DEFAULT_SEARCH_POLICY
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
@@ -25,6 +31,40 @@ def make_request(waler_id="W1"):
 
 
 class OptimizeWalerTests(unittest.TestCase):
+    def test_rc_exclusion_is_not_a_general_material_classification(self):
+        for value in ("RC", " rc ", "Rc"):
+            with self.subTest(value=value):
+                self.assertTrue(is_rc_waler_material(value))
+        for value in ("", None, "H400x400", "CUSTOM"):
+            with self.subTest(value=value):
+                self.assertFalse(is_rc_waler_material(value))
+
+        inputs = tuple(
+            replace(make_request().input, waler_id=waler_id, material_spec=spec)
+            for waler_id, spec in (
+                ("W1", "RC"),
+                ("W2", ""),
+                ("W3", "CUSTOM"),
+                ("W4", "H400x400"),
+            )
+        )
+        eligible, excluded = partition_waler_optimization_inputs(inputs)
+
+        self.assertEqual([item.waler_id for item in eligible], ["W2", "W3", "W4"])
+        self.assertEqual([item.waler_id for item in excluded], ["W1"])
+
+    @patch("bracing_optimizer.application.optimize_waler.wales.evolve")
+    def test_rc_request_is_rejected_before_algorithm_execution(self, evolve):
+        request = replace(
+            make_request("W-RC"),
+            input=replace(make_request("W-RC").input, material_spec=" rc "),
+        )
+
+        with self.assertRaises(WalerOptimizationExcludedError):
+            OptimizeWaler().execute(request, logger=lambda *args: None)
+
+        evolve.assert_not_called()
+
     def test_cache_key_contains_waler_id_and_ignores_stock_items(self):
         use_case = OptimizeWaler()
         first = make_request("W1")

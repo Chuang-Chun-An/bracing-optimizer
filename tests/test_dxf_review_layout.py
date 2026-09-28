@@ -457,5 +457,87 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
         )
 
 
+class CornerBraceRepairButtonStateTests(unittest.TestCase):
+    def test_only_safe_recognized_or_unresolved_corner_subject_is_enabled(self):
+        base = _review_item()
+        recognized = replace(
+            base,
+            key="corner:T1",
+            role="corner_brace",
+            display_id="CB71",
+            member_id="CB71",
+        )
+        unresolved = replace(
+            recognized,
+            key="unresolved:corner:T1",
+            status="unresolved",
+            member_id=None,
+        )
+        self.assertEqual(
+            DXFImportDialog.corner_brace_repair_disabled_reason(recognized),
+            "",
+        )
+        self.assertEqual(
+            DXFImportDialog.corner_brace_repair_disabled_reason(unresolved),
+            "",
+        )
+        self.assertTrue(
+            DXFImportDialog.corner_brace_repair_disabled_reason(
+                replace(recognized, status="excluded")
+            )
+        )
+        self.assertTrue(
+            DXFImportDialog.corner_brace_repair_disabled_reason(
+                replace(recognized, role="strut")
+            )
+        )
+        self.assertTrue(
+            DXFImportDialog.corner_brace_repair_disabled_reason(
+                replace(unresolved, source_handles=())
+            )
+        )
+
+    def test_repair_preview_cancel_is_ui_only_and_apply_uses_workflow_command(self):
+        cancel_source = inspect.getsource(
+            DXFImportDialog._cancel_corner_brace_repair
+        )
+        apply_source = inspect.getsource(
+            DXFImportDialog._apply_corner_brace_repair
+        )
+        preview_source = inspect.getsource(
+            DXFImportDialog._show_corner_brace_repair_window
+        )
+
+        self.assertNotIn("review_workflow", cancel_source)
+        self.assertIn("commit_corner_brace_repair", apply_source)
+        self.assertNotIn("world_result =", apply_source)
+        self.assertNotIn("result =", apply_source)
+        self.assertIn("plan.candidates", preview_source)
+        self.assertIn("WM_DELETE_WINDOW", preview_source)
+        self.assertIn("_cancel_corner_brace_repair", preview_source)
+
+    def test_repair_preview_exposes_only_planner_candidates_and_never_auto_applies(self):
+        open_source = inspect.getsource(
+            DXFImportDialog._open_corner_brace_repair_preview
+        )
+        preview_source = inspect.getsource(
+            DXFImportDialog._show_corner_brace_repair_window
+        )
+
+        no_candidate_branch = open_source.split("if not plan.candidates:", 1)[1]
+        self.assertIn("showwarning", no_candidate_branch)
+        self.assertLess(
+            no_candidate_branch.index("return"),
+            no_candidate_branch.index("_show_corner_brace_repair_window"),
+        )
+        self.assertIn("for candidate in plan.candidates", preview_source)
+        self.assertIn("target_waler_id", preview_source)
+        self.assertIn("target_strut_id", preview_source)
+        self.assertIn("primary_references", preview_source)
+        self.assertIn("secondary_references", preview_source)
+        self.assertIn("len(plan.candidates) == 1", preview_source)
+        self.assertNotIn("commit_corner_brace_repair", preview_source)
+
+
 if __name__ == "__main__":
     unittest.main()

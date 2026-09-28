@@ -99,6 +99,7 @@ RECOGNITION_METHOD_LABELS: Mapping[str, str] = {
     "inner_boundary_line": "內側邊界線",
     "closed_outline_axis": "封閉外框中心軸",
     "parallel_edges_midline": "平行邊線中線",
+    "bim_block_whole_axis": "BIM 圖塊完整構件軸",
     "mline_center_path": "多線中心路徑",
     "column_section_centroid": "中間柱截面中心軸",
     "connection_plate_midpoints": "連接板中點",

@@ -13,6 +13,9 @@ from .geometry import Point, _midpoint
 ERROR_SEVERITIES = {"error", "critical"}
 CONNECTION_VALIDATION_CODES = {
     "AMBIGUOUS_WALER_CONNECTION",
+    "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+    "BRACE_AXIS_EXTENDED_TO_WALER",
+    "BRACE_SAME_WALER_CONNECTION",
     "STRUT_NOT_CONNECTED",
     "STRUT_ONE_END_NOT_CONNECTED",
     "BRACE_NOT_CONNECTED",
@@ -42,6 +45,10 @@ class GeometryTolerances:
     duplicate_tolerance_mm: float = 50.0
     minimum_component_length_mm: float = 100.0
     connection_tolerance_mm: float = 250.0
+    # Maximum automatic outward-axis extension used only by Brace-to-Waler
+    # recognition/finalization.  This is recognition tuning, not the shared
+    # endpoint connection tolerance or an engineering member-design rule.
+    maximum_brace_axis_extension_mm: float = 600.0
     component_association_tolerance_mm: float = 250.0
     # Columns are commonly drawn beside a Strut centreline because both are
     # represented by their physical H-section footprints.  Their association
@@ -57,6 +64,12 @@ class GeometryTolerances:
     minimum_slenderness_ratio: float = 1.5
     minimum_projection_overlap_ratio: float = 0.8
     ambiguous_candidate_score_delta: float = 0.03
+    # Synthetic BIM characterization uses two equally supported conflicting
+    # whole-axis clusters as the ambiguity boundary.  Requiring at least half
+    # of the de-duplicated strong longitudinal evidence keeps both candidates
+    # eligible for ambiguity, while a minority direction cannot win alone.
+    # This is recognition tuning, not an engineering/member-design rule.
+    bim_minimum_longitudinal_evidence_ratio: float = 0.5
     double_support_spacing_mm: float = 1000.0
     double_support_spacing_tolerance_mm: float = 150.0
     double_support_overlap_ratio: float = 0.9
@@ -255,6 +268,7 @@ class Strut:
     to_brace_to_waler_end_len: float = 0.0
     material_spec: str = ""
     material_spec_source: str = ""
+    initial_zoning: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
@@ -317,7 +331,7 @@ class Strut:
             "ToBraceToWalerStartLen": to_brace_lengths[0],
             "ToBraceToWalerEndLen": to_brace_lengths[1],
             "TargetJackRegion": 2,
-            "Zoning": "DXF",
+            "Zoning": self.initial_zoning or "DXF",
         }
 
 
@@ -473,6 +487,8 @@ class BeamCrossing:
     beam_segment_index: int
     distance: float = 0.0
     recognition_method: str = "segment_intersection"
+    world_source_contact_point: Point | None = None
+    local_source_contact_point: Point | None = None
 
 
 @dataclass(frozen=True)
@@ -484,6 +500,8 @@ class Beam(AuxiliaryComponent):
     path: tuple[Point, ...] = ()
     associated_strut_ids: tuple[str, ...] = ()
     crossings: tuple[BeamCrossing, ...] = ()
+    joist_assembly_key: str = ""
+    joist_axis_slot: int | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -508,8 +526,59 @@ class Beam(AuxiliaryComponent):
 
 
 @dataclass(frozen=True)
+class CornerBraceRepairSubjectKey:
+    """Stable identity for one repairable CornerBrace source subject.
+
+    Source handles alone are insufficient because one compound INSERT may
+    produce more than one CornerBrace.  ``base_geometry_key`` is therefore a
+    canonical, tolerance-quantized discriminator derived from the subject's
+    original geometry.  The key deliberately contains no UI label.
+    """
+
+    source_fingerprint: str
+    source_handles: tuple[str, ...]
+    target_kind: str
+    base_geometry_key: str
+    role: str = "corner_brace"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_fingerprint", str(self.source_fingerprint).strip().upper())
+        object.__setattr__(self, "source_handles", _normalized_source_handles(self.source_handles))
+        object.__setattr__(self, "target_kind", str(self.target_kind).strip().lower())
+        object.__setattr__(self, "base_geometry_key", str(self.base_geometry_key).strip())
+        object.__setattr__(self, "role", "corner_brace")
+
+
+@dataclass(frozen=True)
+class CornerBraceRepairReference:
+    """Auditable identity and class of one adopted repair reference."""
+
+    subject_key: CornerBraceRepairSubjectKey
+    member_id: str
+    reference_class: str
+
+
+@dataclass(frozen=True)
+class CornerBraceRepairProvenance:
+    """Replayable evidence for one explicitly adopted CornerBrace repair."""
+
+    subject_key: CornerBraceRepairSubjectKey
+    adopted_world_start: Point
+    adopted_world_end: Point
+    target_waler_identity: str
+    target_strut_identity: str
+    automatic_primary_references: tuple[CornerBraceRepairReference, ...]
+    manual_secondary_references: tuple[CornerBraceRepairReference, ...] = ()
+    preferred_display_id: str = ""
+    selection_source: str = "corner_brace_repair"
+    evidence_signature: str = ""
+
+
+@dataclass(frozen=True)
 class CornerBrace(AuxiliaryComponent):
     """DXF-classified corner-brace engineering line."""
+
+    repair_provenance: CornerBraceRepairProvenance | None = None
 
 
 @dataclass(frozen=True)
@@ -611,6 +680,7 @@ class SourceManualOverride:
     adopted_backfill_mm: float | None = None
     original_waler_width_mm: float | None = None
     adopted_waler_width_mm: float | None = None
+    corner_brace_repair: CornerBraceRepairProvenance | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role", str(self.role).strip().lower())
@@ -821,6 +891,27 @@ class DXFImportResult:
     source_fingerprint: str = ""
     excluded_sources: tuple[ExcludedSource, ...] = ()
 
+    def with_initial_zoning(
+        self,
+        existing_zonings: Sequence[str] = (),
+        *,
+        tolerances: GeometryTolerances | None = None,
+    ) -> DXFImportResult:
+        """Return reviewed geometry with deterministic initial Zoning values.
+
+        This operation is intentionally explicit: recognition and review do
+        not call it.  The Project application boundary invokes it only after
+        the user completes the review and immediately before row mapping.
+        """
+
+        from .initial_zoning import assign_initial_zoning
+
+        return assign_initial_zoning(
+            self,
+            existing_zonings=existing_zonings,
+            tolerances=tolerances or GeometryTolerances(),
+        ).result
+
     @property
     def can_import(self) -> bool:
         return not any(message.severity in ERROR_SEVERITIES for message in self.messages)
@@ -861,6 +952,17 @@ class DXFImportResult:
             "WALER_RECOGNITION_FAILED",
             "STRUT_RECOGNITION_FAILED",
             "BRACE_RECOGNITION_FAILED",
+            "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+            "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+            "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+            "BIM_JOIST_PAIR_AMBIGUOUS",
+            "BIM_JOIST_PAIR_SPACING_INVALID",
+            "BIM_JOIST_PAIR_UNPAIRED",
+            "BIM_JOIST_RECOGNITION_FAILED",
+            "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+            "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+            "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+            "BIM_JOIST_WHOLE_SOURCE_AXIS_FAILED",
         }
         return {
             "selected_layers": dict(self.selected_layers),
@@ -1178,6 +1280,13 @@ def apply_coordinate_system(
                         local_point=coordinate_system.transform(
                             crossing.world_point
                         ),
+                        local_source_contact_point=(
+                            coordinate_system.transform(
+                                crossing.world_source_contact_point
+                            )
+                            if crossing.world_source_contact_point is not None
+                            else None
+                        ),
                     )
                     for crossing in member.crossings
                 ),
@@ -1207,6 +1316,11 @@ def apply_coordinate_system(
         replace(
             crossing,
             local_point=coordinate_system.transform(crossing.world_point),
+            local_source_contact_point=(
+                coordinate_system.transform(crossing.world_source_contact_point)
+                if crossing.world_source_contact_point is not None
+                else None
+            ),
         )
         for crossing in result.beam_crossings
     )

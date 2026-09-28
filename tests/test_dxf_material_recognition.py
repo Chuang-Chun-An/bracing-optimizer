@@ -76,6 +76,23 @@ class DxfMaterialRecognitionTests(unittest.TestCase):
             "",
         )
 
+    def test_hatch_rc_precedence_is_not_overwritten_by_width_match(self):
+        hatch_waler = replace(
+            _result().walers[0],
+            source_width=350.0,
+            source_entity_types=("HATCH",),
+            material_spec="RC",
+            material_spec_source="auto_hatch",
+        )
+
+        recognized = recognize_result_material_specs(
+            replace(_result(), walers=(hatch_waler,)),
+            MATERIAL_SPECS,
+        )
+
+        self.assertEqual(recognized.walers[0].material_spec, "RC")
+        self.assertEqual(recognized.walers[0].material_spec_source, "auto_hatch")
+
     def test_manual_choice_enters_project_rows_without_changing_geometry(self):
         recognized = recognize_result_material_specs(_result(), MATERIAL_SPECS)
         before = recognized.struts[0].start, recognized.struts[0].end

@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .geometry import _distance
 from .models import (
     Beam,
     Brace,
+    CornerBrace,
+    CornerBraceRepairProvenance,
+    CornerBraceRepairReference,
+    CornerBraceRepairSubjectKey,
+    CoordinateSystem,
     DXFImportError,
     DXFImportResult,
     ExcludedSource,
@@ -20,6 +26,7 @@ from .models import (
     SourceManualOverride,
     Strut,
     Waler,
+    apply_coordinate_system,
 )
 
 
@@ -104,6 +111,97 @@ def _optional_float(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _repair_subject_key_from_mapping(
+    value: Mapping[str, Any] | None,
+) -> CornerBraceRepairSubjectKey | None:
+    if not isinstance(value, Mapping):
+        return None
+    handles = normalize_source_handles(value.get("source_handles", ()))
+    target_kind = str(value.get("target_kind", "") or "").strip().lower()
+    base_geometry_key = str(value.get("base_geometry_key", "") or "").strip()
+    if not handles or target_kind not in {"recognized", "unresolved"} or not base_geometry_key:
+        return None
+    return CornerBraceRepairSubjectKey(
+        source_fingerprint=str(value.get("source_fingerprint", "") or ""),
+        source_handles=handles,
+        target_kind=target_kind,
+        base_geometry_key=base_geometry_key,
+    )
+
+
+def _repair_reference_from_mapping(
+    value: Mapping[str, Any] | None,
+) -> CornerBraceRepairReference | None:
+    if not isinstance(value, Mapping):
+        return None
+    key = _repair_subject_key_from_mapping(value.get("subject_key"))
+    member_id = str(value.get("member_id", "") or "").strip()
+    reference_class = str(value.get("reference_class", "") or "").strip()
+    if key is None or not member_id or reference_class not in {
+        "automatic_primary",
+        "manual_repaired_secondary",
+    }:
+        return None
+    return CornerBraceRepairReference(key, member_id, reference_class)
+
+
+def _repair_provenance_from_mapping(
+    value: Mapping[str, Any] | None,
+) -> CornerBraceRepairProvenance | None:
+    if not isinstance(value, Mapping):
+        return None
+    key = _repair_subject_key_from_mapping(value.get("subject_key"))
+    start = _point(value.get("adopted_world_start"))
+    end = _point(value.get("adopted_world_end"))
+    primary_raw = value.get("automatic_primary_references", ())
+    secondary_raw = value.get("manual_secondary_references", ())
+    if (
+        key is None
+        or start is None
+        or end is None
+        or not isinstance(primary_raw, Sequence)
+        or isinstance(primary_raw, (str, bytes))
+        or not isinstance(secondary_raw, Sequence)
+        or isinstance(secondary_raw, (str, bytes))
+    ):
+        return None
+    primary = tuple(
+        reference
+        for raw in primary_raw
+        if (reference := _repair_reference_from_mapping(raw)) is not None
+    )
+    secondary = tuple(
+        reference
+        for raw in secondary_raw
+        if (reference := _repair_reference_from_mapping(raw)) is not None
+    )
+    if (
+        not primary
+        or len(primary) != len(primary_raw)
+        or len(secondary) != len(secondary_raw)
+    ):
+        return None
+    waler_identity = str(value.get("target_waler_identity", "") or "").strip()
+    strut_identity = str(value.get("target_strut_identity", "") or "").strip()
+    if not waler_identity or not strut_identity:
+        return None
+    return CornerBraceRepairProvenance(
+        subject_key=key,
+        adopted_world_start=start,
+        adopted_world_end=end,
+        target_waler_identity=waler_identity,
+        target_strut_identity=strut_identity,
+        automatic_primary_references=primary,
+        manual_secondary_references=secondary,
+        preferred_display_id=str(value.get("preferred_display_id", "") or "").strip(),
+        selection_source=str(
+            value.get("selection_source", "corner_brace_repair")
+            or "corner_brace_repair"
+        ).strip(),
+        evidence_signature=str(value.get("evidence_signature", "") or "").strip(),
+    )
+
+
 def manual_override_from_mapping(
     value: Mapping[str, Any] | None,
 ) -> SourceManualOverride | None:
@@ -143,6 +241,9 @@ def manual_override_from_mapping(
         ),
         adopted_waler_width_mm=_optional_float(
             value.get("adopted_waler_width_mm")
+        ),
+        corner_brace_repair=_repair_provenance_from_mapping(
+            value.get("corner_brace_repair")
         ),
     )
 
@@ -241,6 +342,7 @@ class SharedHandleConflict:
 def shared_handle_conflicts(
     selected: ReviewItem,
     review_items: Sequence[ReviewItem],
+    result: DXFImportResult | None = None,
 ) -> tuple[SharedHandleConflict, ...]:
     """Find other active Review objects that own any selected source handle."""
 
@@ -254,11 +356,34 @@ def shared_handle_conflicts(
         for handle in normalize_source_handles(item.source_handles):
             if handle in selected_handles:
                 owners[handle][item.key] = item
+
+    beam_assemblies = {
+        member.id: member.joist_assembly_key
+        for member in (result.beams if result is not None else ())
+        if member.joist_assembly_key
+    }
+
+    def paired_siblings(first: ReviewItem, second: ReviewItem) -> bool:
+        if (
+            first.status != "recognized"
+            or second.status != "recognized"
+            or first.role != "beam"
+            or second.role != "beam"
+            or first.member_id is None
+            or second.member_id is None
+        ):
+            return False
+        first_assembly = beam_assemblies.get(first.member_id, "")
+        return bool(
+            first_assembly
+            and first_assembly == beam_assemblies.get(second.member_id, "")
+        )
     conflicts = []
     for handle in sorted(selected_handles):
         others = {
             key: item for key, item in owners.get(handle, {}).items()
             if key != selected.key
+            and not paired_siblings(selected, item)
         }
         if not others:
             continue
@@ -333,7 +458,12 @@ def capture_member_manual_override(
         None,
     )
     has_contact = _contact_input_is_manual(member, review)
-    if not (has_material or geometry_source or has_contact):
+    repair_provenance = (
+        member.repair_provenance
+        if isinstance(member, CornerBrace)
+        else None
+    )
+    if not (has_material or geometry_source or has_contact or repair_provenance):
         return None
     return SourceManualOverride(
         role=role,
@@ -353,6 +483,7 @@ def capture_member_manual_override(
         adopted_waler_width_mm=(
             review.adopted_waler_width_mm if has_contact else None
         ),
+        corner_brace_repair=repair_provenance,
     )
 
 
@@ -438,7 +569,12 @@ def _manual_override_from_saved_member(
             selection_source == "waler_contact_adjustment"
             or (displacement is not None and abs(displacement) > 1e-9)
         )
-    if not (has_material or geometry_source or has_contact):
+    repair_provenance = (
+        _repair_provenance_from_mapping(raw.get("repair_provenance"))
+        if role == "corner_brace"
+        else None
+    )
+    if not (has_material or geometry_source or has_contact or repair_provenance):
         return None
     return SourceManualOverride(
         role=role,
@@ -450,6 +586,7 @@ def _manual_override_from_saved_member(
         world_start=world_start,
         world_end=world_end,
         has_waler_contact_input=has_contact,
+        corner_brace_repair=repair_provenance,
         **contact_values,
     )
 
@@ -517,7 +654,17 @@ def _override_labels(override: SourceManualOverride) -> tuple[str, ...]:
         labels.append(f"{display} {label}")
     if override.has_waler_contact_input:
         labels.append(f"{display} Waler 背填／寬度")
+    if override.corner_brace_repair is not None:
+        labels.append(f"{display} CornerBrace repair")
     return tuple(labels)
+
+
+def manual_override_labels(
+    override: SourceManualOverride,
+) -> tuple[str, ...]:
+    """Expose the stable per-input labels used by replay reports."""
+
+    return _override_labels(override)
 
 
 def _unique_member_for_override(
@@ -539,6 +686,8 @@ def replay_manual_overrides(
     *,
     material_specs: Sequence[Mapping[str, Any]] = (),
     tolerances: GeometryTolerances | None = None,
+    review_confirmations: Mapping[str, str] | None = None,
+    confirmation_coordinate_system: CoordinateSystem | None = None,
 ) -> tuple[DXFImportResult, ManualReplayReport]:
     """Replay only explicit inputs; every relationship remains newly derived."""
 
@@ -556,7 +705,13 @@ def replay_manual_overrides(
     tolerances = tolerances or GeometryTolerances()
     excluded_identities = {source.identity for source in result.excluded_sources}
     grouped: dict[str, list[SourceManualOverride]] = defaultdict(list)
+    repair_overrides = tuple(
+        override for override in overrides
+        if override.corner_brace_repair is not None
+    )
     for override in overrides:
+        if override.corner_brace_repair is not None:
+            continue
         grouped[
             canonical_source_identity(override.role, override.source_handles)
         ].append(override)
@@ -695,6 +850,155 @@ def replay_manual_overrides(
             continue
         preserved.append(label)
 
+    if repair_overrides:
+        from .corner_brace_repair import (
+            apply_corner_brace_repair,
+            plan_corner_brace_repair,
+            repair_subject_key,
+        )
+        from .validation import build_problem_records, build_review_items
+
+        pending = list(repair_overrides)
+        coordinate_system = confirmation_coordinate_system or CoordinateSystem()
+        while pending:
+            made_progress = False
+            deferred: list[SourceManualOverride] = []
+            for override in pending:
+                provenance = override.corner_brace_repair
+                assert provenance is not None
+                label = next(
+                    text for text in _override_labels(override)
+                    if text.endswith("CornerBrace repair")
+                )
+                projected = apply_coordinate_system(current, coordinate_system)
+                records = build_problem_records(projected)
+                items = build_review_items(projected, records)
+                targets = []
+                for item in items:
+                    if item.role != "corner_brace":
+                        continue
+                    try:
+                        key = repair_subject_key(current, item, tolerances)
+                    except DXFImportError:
+                        continue
+                    if key == provenance.subject_key:
+                        targets.append(item)
+                if len(targets) != 1:
+                    needs_review.append(label)
+                    continue
+                target = targets[0]
+                if (
+                    provenance.subject_key.target_kind == "unresolved"
+                    and provenance.preferred_display_id
+                    and any(
+                        corner.id == provenance.preferred_display_id
+                        and normalize_source_handles(corner.source_handles)
+                        != provenance.subject_key.source_handles
+                        for corner in current.corner_braces
+                    )
+                ):
+                    needs_review.append(label)
+                    continue
+                plan = plan_corner_brace_repair(
+                    current,
+                    target,
+                    base_revision=0,
+                    review_items=items,
+                    confirmations=review_confirmations,
+                    confirmation_result=projected,
+                    tolerances=tolerances,
+                )
+                saved_primary = {
+                    reference.subject_key
+                    for reference in provenance.automatic_primary_references
+                }
+                saved_secondary = {
+                    reference.subject_key
+                    for reference in provenance.manual_secondary_references
+                }
+                matches = []
+                for candidate in plan.candidates:
+                    waler = next(
+                        (member for member in current.walers if member.id == candidate.target_waler_id),
+                        None,
+                    )
+                    strut = next(
+                        (member for member in current.struts if member.id == candidate.target_strut_id),
+                        None,
+                    )
+                    if waler is None or strut is None:
+                        continue
+                    if (
+                        canonical_source_identity("waler", waler.source_handles)
+                        != provenance.target_waler_identity
+                        or canonical_source_identity("strut", strut.source_handles)
+                        != provenance.target_strut_identity
+                    ):
+                        continue
+                    if (
+                        _distance(candidate.world_start, provenance.adopted_world_start)
+                        > tolerances.endpoint_tolerance_mm
+                        or _distance(candidate.world_end, provenance.adopted_world_end)
+                        > tolerances.endpoint_tolerance_mm
+                    ):
+                        continue
+                    candidate_primary = {
+                        reference.subject_key for reference in candidate.primary_references
+                    }
+                    candidate_secondary = {
+                        reference.subject_key for reference in candidate.secondary_references
+                    }
+                    if not saved_primary or not saved_primary.issubset(candidate_primary):
+                        continue
+                    if not saved_secondary.issubset(candidate_secondary):
+                        continue
+                    matches.append(candidate)
+                if len(matches) != 1:
+                    # A secondary repair may not have been replayed yet.  Give
+                    # the dependency one deterministic later pass, but never
+                    # substitute another reference.
+                    if provenance.manual_secondary_references:
+                        deferred.append(override)
+                    else:
+                        needs_review.append(label)
+                    continue
+                replay_plan = replace(
+                    plan,
+                    preferred_display_id=provenance.preferred_display_id,
+                )
+                try:
+                    replayed_current, repaired_id = apply_corner_brace_repair(
+                        current,
+                        target,
+                        replay_plan,
+                        matches[0].id,
+                        explicit_adoption=True,
+                        tolerances=tolerances,
+                    )
+                except (DXFImportError, ValueError):
+                    needs_review.append(label)
+                    continue
+                if (
+                    provenance.preferred_display_id
+                    and repaired_id != provenance.preferred_display_id
+                ):
+                    needs_review.append(label)
+                    continue
+                current = replayed_current
+                preserved.append(label)
+                made_progress = True
+            if not deferred:
+                break
+            if not made_progress:
+                for override in deferred:
+                    label = next(
+                        text for text in _override_labels(override)
+                        if text.endswith("CornerBrace repair")
+                    )
+                    needs_review.append(label)
+                break
+            pending = deferred
+
     def unique(values: Sequence[str]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(values))
 
@@ -723,6 +1027,7 @@ __all__ = [
     "excluded_source_from_review_item",
     "exclusions_from_review_state",
     "manual_overrides_from_review_state",
+    "manual_override_labels",
     "normalize_excluded_sources",
     "normalize_source_handles",
     "replay_manual_overrides",

@@ -32,6 +32,10 @@ class SharedFieldLabelTests(unittest.TestCase):
 
     def test_technical_display_values_are_chinese_without_changing_ids(self):
         self.assertEqual(recognition_method_label("existing_centerline"), "既有中心線")
+        self.assertEqual(
+            recognition_method_label("bim_block_whole_axis"),
+            "BIM 圖塊完整構件軸",
+        )
         self.assertEqual(dxf_entity_type_label("LINE"), "LINE（線）")
         self.assertIn("custom_method", recognition_method_label("custom_method"))
 

@@ -8,9 +8,11 @@ confirmation, application-state mutation, and presentation.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -65,6 +67,20 @@ class ProjectRowsSource(Protocol):
         self,
         existing_rows: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]: ...
+
+
+class PausedReviewRecoveryPlannerPort(Protocol):
+    """DXF-owned changed-content recovery supplied at composition time."""
+
+    def plan(
+        self,
+        candidate_path: str | Path,
+        candidate_fingerprint: str,
+        saved_state: Mapping[str, Any],
+        base_state_token: str,
+        *,
+        material_specs: Sequence[Mapping[str, Any]] = (),
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -162,6 +178,65 @@ class RelinkDxfResult:
     detail_lines: tuple[str, ...]
 
 
+class PausedReviewRelinkStatus(str, Enum):
+    """Outcomes for exact and staged-compatible paused Review relink."""
+
+    EXACT_MATCH = "EXACT_MATCH"
+    COMPATIBLE_RECOVERY_AVAILABLE = "COMPATIBLE_RECOVERY_AVAILABLE"
+    INCOMPATIBLE_SOURCE = "INCOMPATIBLE_SOURCE"
+    VALIDATION_FAILED = "VALIDATION_FAILED"
+
+
+@dataclass(frozen=True)
+class PausedReviewRelinkRequest:
+    candidate_path: Path
+    saved_state: Mapping[str, Any] | None
+    workflow_status: DxfWorkflowStatus
+    material_specs: Sequence[Mapping[str, Any]] = ()
+
+
+@dataclass(frozen=True)
+class PausedReviewRecoverySeed:
+    candidate_path: Path
+    candidate_fingerprint: str
+    base_state_token: str
+
+
+@dataclass(frozen=True)
+class PausedReviewRelinkPlan:
+    candidate_path: Path
+    candidate_fingerprint: str
+    base_state_token: str
+    relinked_state: dict[str, Any]
+    status: PausedReviewRelinkStatus = PausedReviewRelinkStatus.EXACT_MATCH
+    recovery_summary: Any | None = None
+    candidate_world_result: Any | None = None
+
+
+@dataclass(frozen=True)
+class PausedReviewRelinkEvaluation:
+    status: PausedReviewRelinkStatus
+    plan: PausedReviewRelinkPlan | None
+    summary: str
+    detail_lines: tuple[str, ...] = ()
+    recovery_seed: PausedReviewRecoverySeed | None = None
+    recovery_summary: Any | None = None
+
+
+@dataclass(frozen=True)
+class PausedReviewRelinkCommitResult:
+    accepted: bool
+    status: PausedReviewRelinkStatus
+    relinked_state: dict[str, Any] | None
+    dxf_status_report: DxfAssetStatusReport | None
+    workflow_status: DxfWorkflowStatus
+    dirty_reason: str
+    summary: str
+    detail_lines: tuple[str, ...] = ()
+    recovery_summary: Any | None = None
+    candidate_world_result: Any | None = None
+
+
 class ProjectService:
     """Coordinate project use cases without depending on GUI state."""
 
@@ -169,11 +244,13 @@ class ProjectService:
         self,
         dxf_asset_manager: DxfAssetManager | None = None,
         dxf_compatibility_checker: DxfCompatibilityChecker | None = None,
+        paused_review_recovery_planner: PausedReviewRecoveryPlannerPort | None = None,
     ) -> None:
         self.dxf_asset_manager = dxf_asset_manager or DxfAssetManager()
         self.dxf_compatibility_checker = (
             dxf_compatibility_checker or DxfCompatibilityChecker()
         )
+        self.paused_review_recovery_planner = paused_review_recovery_planner
 
     def inspect_dxf_state(
         self,
@@ -227,7 +304,23 @@ class ProjectService:
         current = request.current_project_data
         case_data = current.to_case_data()
         existing_rows = current.geometry_rows() if import_mode == "append" else None
-        imported = request.review_result.to_project_rows(existing_rows)
+        review_result = request.review_result
+        prepare_initial_zoning = getattr(
+            review_result,
+            "with_initial_zoning",
+            None,
+        )
+        if callable(prepare_initial_zoning):
+            existing_zonings = (
+                tuple(
+                    str(row.get("Zoning", "") or "")
+                    for row in case_data["struts"]
+                )
+                if import_mode == "append"
+                else ()
+            )
+            review_result = prepare_initial_zoning(existing_zonings)
+        imported = review_result.to_project_rows(existing_rows)
 
         if import_mode == "append":
             walers = [*case_data["walers"], *imported["walers"]]
@@ -488,6 +581,355 @@ class ProjectService:
             detail_lines=("SHA-256 完全一致",),
         )
 
+    @staticmethod
+    def _coerce_dxf_workflow_status(value: Any) -> DxfWorkflowStatus | None:
+        if isinstance(value, DxfWorkflowStatus):
+            return value
+        try:
+            return DxfWorkflowStatus(str(value).strip().upper())
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _normalized_sha256(value: Any) -> str:
+        fingerprint = str(value or "").strip().upper()
+        if len(fingerprint) != 64:
+            return ""
+        if any(character not in "0123456789ABCDEF" for character in fingerprint):
+            return ""
+        return fingerprint
+
+    @staticmethod
+    def _review_state_token(state: Mapping[str, Any]) -> str:
+        serialized = json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest().upper()
+
+    @staticmethod
+    def _paused_review_failure(
+        summary: str,
+        *detail_lines: str,
+    ) -> PausedReviewRelinkEvaluation:
+        return PausedReviewRelinkEvaluation(
+            status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+            plan=None,
+            summary=summary,
+            detail_lines=tuple(str(line) for line in detail_lines if str(line)),
+        )
+
+    def evaluate_paused_review_relink(
+        self,
+        request: PausedReviewRelinkRequest,
+    ) -> PausedReviewRelinkEvaluation:
+        """Stage an exact or candidate-recovered relink without mutation."""
+
+        workflow_status = self._coerce_dxf_workflow_status(
+            request.workflow_status
+        )
+        if workflow_status != DxfWorkflowStatus.REVIEW:
+            return self._paused_review_failure(
+                "目前不是可重新連結來源的 DXF Review。",
+                "只有 REVIEW 狀態可以執行此操作。",
+            )
+        if not isinstance(request.saved_state, Mapping):
+            return self._paused_review_failure(
+                "DXF Review 缺少可恢復的狀態。"
+            )
+
+        saved_fingerprint = self._normalized_sha256(
+            request.saved_state.get("source_fingerprint")
+        )
+        if not saved_fingerprint:
+            return self._paused_review_failure(
+                "DXF Review 缺少有效的來源 fingerprint。",
+                "無法用檔名、路徑或檔案時間推測候選來源相同。",
+            )
+
+        try:
+            candidate_info = self.dxf_asset_manager.file_info(
+                request.candidate_path
+            )
+        except (ProjectPersistenceError, OSError, ValueError) as exc:
+            return self._paused_review_failure(
+                "候選 DXF 驗證失敗。",
+                str(exc),
+            )
+
+        candidate_fingerprint = self._normalized_sha256(candidate_info.sha256)
+        try:
+            base_state_token = self._review_state_token(request.saved_state)
+        except (TypeError, ValueError) as exc:
+            return self._paused_review_failure(
+                "DXF Review 狀態無法建立安全提交基準。",
+                str(exc),
+            )
+
+        if candidate_fingerprint != saved_fingerprint:
+            seed = PausedReviewRecoverySeed(
+                candidate_path=candidate_info.path,
+                candidate_fingerprint=candidate_fingerprint,
+                base_state_token=base_state_token,
+            )
+            planner = self.paused_review_recovery_planner
+            if planner is None:
+                return PausedReviewRelinkEvaluation(
+                    status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                    plan=None,
+                    summary="候選 DXF 內容不同，但 recovery planner 尚未設定。",
+                    detail_lines=("原 paused Review 狀態未變更。",),
+                    recovery_seed=seed,
+                )
+            try:
+                recovery = planner.plan(
+                    seed.candidate_path,
+                    seed.candidate_fingerprint,
+                    request.saved_state,
+                    seed.base_state_token,
+                    material_specs=request.material_specs,
+                )
+            except Exception as exc:
+                return PausedReviewRelinkEvaluation(
+                    status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                    plan=None,
+                    summary="候選 DXF staged recovery 失敗。",
+                    detail_lines=(str(exc) or exc.__class__.__name__,),
+                    recovery_seed=seed,
+                )
+            return self._paused_review_recovery_evaluation(seed, recovery)
+
+        relinked_state = copy.deepcopy(dict(request.saved_state))
+        relinked_state["source_path"] = str(candidate_info.path)
+        relinked_state["source_fingerprint"] = candidate_fingerprint
+        return PausedReviewRelinkEvaluation(
+            status=PausedReviewRelinkStatus.EXACT_MATCH,
+            plan=PausedReviewRelinkPlan(
+                candidate_path=candidate_info.path,
+                candidate_fingerprint=candidate_fingerprint,
+                base_state_token=base_state_token,
+                relinked_state=relinked_state,
+            ),
+            summary="已找到與 paused Review 完全相同的 DXF 來源。",
+            detail_lines=("SHA-256 完全一致。",),
+        )
+
+    def _paused_review_recovery_evaluation(
+        self,
+        seed: PausedReviewRecoverySeed,
+        recovery: Any,
+    ) -> PausedReviewRelinkEvaluation:
+        status_value = str(
+            getattr(getattr(recovery, "status", ""), "value", getattr(recovery, "status", ""))
+        ).strip().upper()
+        detail_lines = tuple(
+            str(line)
+            for line in getattr(recovery, "detail_lines", ())
+            if str(line)
+        )
+        recovery_summary = getattr(recovery, "summary", None)
+        if status_value == PausedReviewRelinkStatus.INCOMPATIBLE_SOURCE.value:
+            return PausedReviewRelinkEvaluation(
+                status=PausedReviewRelinkStatus.INCOMPATIBLE_SOURCE,
+                plan=None,
+                summary="候選 DXF 無法安全恢復 paused Review。",
+                detail_lines=detail_lines,
+                recovery_seed=seed,
+                recovery_summary=recovery_summary,
+            )
+        if status_value != PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE.value:
+            return PausedReviewRelinkEvaluation(
+                status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                plan=None,
+                summary="候選 DXF staged recovery 驗證失敗。",
+                detail_lines=detail_lines,
+                recovery_seed=seed,
+                recovery_summary=recovery_summary,
+            )
+
+        recovery_plan = getattr(recovery, "plan", None)
+        stage = getattr(recovery_plan, "stage", None)
+        if stage is None:
+            return PausedReviewRelinkEvaluation(
+                status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                plan=None,
+                summary="候選 DXF recovery 缺少可提交 stage。",
+                recovery_seed=seed,
+                recovery_summary=recovery_summary,
+            )
+        try:
+            stage_path = Path(stage.candidate_path).resolve()
+            stage_fingerprint = self._normalized_sha256(
+                stage.candidate_fingerprint
+            )
+            stage_token = str(stage.base_state_token).strip().upper()
+            recovered_state = stage.copy_recovered_state()
+            world_result = stage.world_result
+        except (AttributeError, TypeError, ValueError, OSError) as exc:
+            return PausedReviewRelinkEvaluation(
+                status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                plan=None,
+                summary="候選 DXF recovery stage 無法驗證。",
+                detail_lines=(str(exc),),
+                recovery_seed=seed,
+                recovery_summary=recovery_summary,
+            )
+        if (
+            stage_path != seed.candidate_path
+            or stage_fingerprint != seed.candidate_fingerprint
+            or stage_token != seed.base_state_token
+            or not isinstance(recovered_state, dict)
+        ):
+            return PausedReviewRelinkEvaluation(
+                status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+                plan=None,
+                summary="候選 DXF recovery stage 與安全提交基準不一致。",
+                recovery_seed=seed,
+                recovery_summary=recovery_summary,
+            )
+        return PausedReviewRelinkEvaluation(
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            plan=PausedReviewRelinkPlan(
+                candidate_path=stage_path,
+                candidate_fingerprint=stage_fingerprint,
+                base_state_token=stage_token,
+                relinked_state=copy.deepcopy(recovered_state),
+                status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+                recovery_summary=recovery_summary,
+                candidate_world_result=world_result,
+            ),
+            summary="候選 DXF 可安全建立 recovered Review，尚未採用。",
+            detail_lines=detail_lines,
+            recovery_seed=seed,
+            recovery_summary=recovery_summary,
+        )
+
+    @staticmethod
+    def _paused_review_commit_failure(
+        summary: str,
+        *detail_lines: str,
+    ) -> PausedReviewRelinkCommitResult:
+        return PausedReviewRelinkCommitResult(
+            accepted=False,
+            status=PausedReviewRelinkStatus.VALIDATION_FAILED,
+            relinked_state=None,
+            dxf_status_report=None,
+            workflow_status=DxfWorkflowStatus.REVIEW,
+            dirty_reason="",
+            summary=summary,
+            detail_lines=tuple(str(line) for line in detail_lines if str(line)),
+        )
+
+    def commit_paused_review_relink(
+        self,
+        plan: PausedReviewRelinkPlan,
+        *,
+        current_saved_state: Mapping[str, Any] | None,
+        current_workflow_status: DxfWorkflowStatus,
+    ) -> PausedReviewRelinkCommitResult:
+        """Revalidate and return one atomic paused Review adoption result."""
+
+        workflow_status = self._coerce_dxf_workflow_status(
+            current_workflow_status
+        )
+        if plan.status not in {
+            PausedReviewRelinkStatus.EXACT_MATCH,
+            PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+        }:
+            return self._paused_review_commit_failure(
+                "DXF Review recovery plan 狀態無法提交。"
+            )
+        if workflow_status != DxfWorkflowStatus.REVIEW:
+            return self._paused_review_commit_failure(
+                "DXF Review 狀態已改變，未套用重新連結。"
+            )
+        if not isinstance(current_saved_state, Mapping):
+            return self._paused_review_commit_failure(
+                "DXF Review 缺少目前狀態，未套用重新連結。"
+            )
+        try:
+            current_token = self._review_state_token(current_saved_state)
+        except (TypeError, ValueError) as exc:
+            return self._paused_review_commit_failure(
+                "目前 DXF Review 狀態無法驗證。",
+                str(exc),
+            )
+        if current_token != plan.base_state_token:
+            return self._paused_review_commit_failure(
+                "DXF Review 狀態已在驗證後變更，未套用舊的重新連結結果。"
+            )
+
+        try:
+            candidate_info = self.dxf_asset_manager.file_info(plan.candidate_path)
+        except (ProjectPersistenceError, OSError, ValueError) as exc:
+            return self._paused_review_commit_failure(
+                "候選 DXF 在提交前重新驗證失敗。",
+                str(exc),
+            )
+        candidate_fingerprint = self._normalized_sha256(candidate_info.sha256)
+        if candidate_fingerprint != plan.candidate_fingerprint:
+            return self._paused_review_commit_failure(
+                "候選 DXF 在驗證後已被修改，未套用重新連結。"
+            )
+
+        relinked_fingerprint = self._normalized_sha256(
+            plan.relinked_state.get("source_fingerprint")
+        )
+        try:
+            relinked_path = Path(
+                str(plan.relinked_state.get("source_path", ""))
+            ).resolve()
+        except (OSError, ValueError):
+            relinked_path = Path()
+        if (
+            relinked_fingerprint != plan.candidate_fingerprint
+            or relinked_path != candidate_info.path
+        ):
+            return self._paused_review_commit_failure(
+                "Recovered Review 的候選來源參照不一致，未套用重新連結。"
+            )
+
+        compatible = (
+            plan.status
+            == PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE
+        )
+        summary = (
+            "Recovered DXF Review 已採用，等待儲存專案。"
+            if compatible
+            else "Paused DXF Review 來源已重新連結，等待儲存專案。"
+        )
+        try:
+            status_report = self.dxf_asset_manager.accepted_relink_report(
+                candidate_info.path,
+                summary=summary,
+            )
+        except (ProjectPersistenceError, OSError, ValueError) as exc:
+            return self._paused_review_commit_failure(
+                "候選 DXF 在建立來源狀態時驗證失敗。",
+                str(exc),
+            )
+        return PausedReviewRelinkCommitResult(
+            accepted=True,
+            status=plan.status,
+            relinked_state=copy.deepcopy(plan.relinked_state),
+            dxf_status_report=status_report,
+            workflow_status=DxfWorkflowStatus.REVIEW,
+            dirty_reason="DXF Review 來源已重新連結，尚未保存管理副本",
+            summary=summary,
+            detail_lines=(
+                (
+                    "候選重新辨識結果與 recovered Review state 已通過提交驗證。"
+                    if compatible
+                    else "SHA-256 完全一致；既有 Review 狀態已完整保留。"
+                ),
+            ),
+            recovery_summary=plan.recovery_summary,
+            candidate_world_result=plan.candidate_world_result,
+        )
+
     def relink_dxf(self, request: RelinkDxfRequest) -> RelinkDxfResult:
         """Evaluate an imported DXF candidate without mutating project state."""
 
@@ -564,6 +1006,13 @@ __all__ = [
     "BuildProjectPayloadRequest",
     "HydratedProject",
     "LoadProjectResult",
+    "PausedReviewRelinkCommitResult",
+    "PausedReviewRelinkEvaluation",
+    "PausedReviewRelinkPlan",
+    "PausedReviewRelinkRequest",
+    "PausedReviewRelinkStatus",
+    "PausedReviewRecoveryPlannerPort",
+    "PausedReviewRecoverySeed",
     "PROJECT_DXF_BINDING_FIELDS",
     "ProjectService",
     "ProjectInputChangePlan",

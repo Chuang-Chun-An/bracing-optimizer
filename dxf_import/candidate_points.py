@@ -47,6 +47,11 @@ from .models import (
     ERROR_SEVERITIES,
     apply_coordinate_system,
 )
+from .brace_waler_connection import (
+    BraceEndpointResolution,
+    outward_waler_intersections,
+    resolve_brace_waler_connection,
+)
 from .validation import (
     _member_model_role,
     _result_members,
@@ -415,7 +420,7 @@ class CandidatePointBuilder:
                 valid_for=valid_for,
             )
 
-        if isinstance(member, (Strut, Brace)) and axis is not None:
+        if isinstance(member, Strut) and axis is not None:
             for waler in self.walers:
                 direct = _segment_intersection_point(
                     (world_start, world_end),
@@ -462,6 +467,113 @@ class CandidatePointBuilder:
                         else ("start", "end")
                     ),
                 )
+
+        if isinstance(member, Brace) and axis is not None:
+            for waler in self.walers:
+                direct = _segment_intersection_point(
+                    (world_start, world_end),
+                    (waler.world_start or waler.start, waler.world_end or waler.end),
+                    self.tolerances.endpoint_tolerance_mm,
+                )
+                if direct is None:
+                    continue
+                along = _dot(_vector(world_start, direct), axis)
+                store.add(
+                    direct,
+                    point_type="waler_intersection",
+                    label=f"與 {waler.id} 圍令內側線交點",
+                    source_handles=tuple(
+                        sorted({*member.source_handles, *waler.source_handles})
+                    ),
+                    source_entity_types=tuple(
+                        sorted(
+                            {
+                                *member.source_entity_types,
+                                *waler.source_entity_types,
+                            }
+                        )
+                    ),
+                    score=0.98,
+                    valid_for=(
+                        ("start",)
+                        if along < length / 2
+                        else ("end",)
+                        if along > length / 2
+                        else ("start", "end")
+                    ),
+                )
+            selected_source_line = next(
+                (
+                    line
+                    for line in member.line_candidates
+                    if line.id == member.selected_candidate_id
+                ),
+                None,
+            )
+            if selected_source_line is not None:
+                source_start = selected_source_line.world_start
+                source_end = selected_source_line.world_end
+                forward_distance = _distance(source_start, world_start) + _distance(
+                    source_end,
+                    world_end,
+                )
+                reverse_distance = _distance(source_end, world_start) + _distance(
+                    source_start,
+                    world_end,
+                )
+                if reverse_distance < forward_distance:
+                    source_start, source_end = source_end, source_start
+            elif not member.from_waler and not member.to_waler:
+                source_start, source_end = world_start, world_end
+            else:
+                source_start = source_end = None
+
+            source_axis = (
+                None
+                if source_start is None or source_end is None
+                else _unit(source_start, source_end)
+            )
+            if source_axis is not None:
+                outward_sides = (
+                    (
+                        "start",
+                        source_start,
+                        (-source_axis[0], -source_axis[1]),
+                    ),
+                    ("end", source_end, source_axis),
+                )
+                for side, origin, direction in outward_sides:
+                    for intersection in outward_waler_intersections(
+                        origin,
+                        direction,
+                        self.walers,
+                        self.tolerances,
+                    ):
+                        store.add(
+                            intersection.point,
+                            point_type="extended_axis_waler_intersection",
+                            label=(
+                                f"長軸延伸線與 {intersection.waler_id} 圍令內側線交點"
+                            ),
+                            source_handles=tuple(
+                                sorted(
+                                    {
+                                        *member.source_handles,
+                                        *intersection.waler_source_handles,
+                                    }
+                                )
+                            ),
+                            source_entity_types=tuple(
+                                sorted(
+                                    {
+                                        *member.source_entity_types,
+                                        *intersection.waler_source_entity_types,
+                                    }
+                                )
+                            ),
+                            score=0.92,
+                            valid_for=(side,),
+                        )
 
         return replace(
             member,
@@ -611,8 +723,64 @@ def connect_components_to_walers(
 
     connected_braces = []
     for member in braces:
-        from_waler, start = connect(member.start, "brace", member.source_handles)
-        to_waler, end = connect(member.end, "brace", member.source_handles)
+        resolution = resolve_brace_waler_connection(member, walers, tolerances)
+
+        def report_endpoint(endpoint: BraceEndpointResolution) -> None:
+            endpoint_label = "起點" if endpoint.endpoint_name == "start" else "終點"
+            if endpoint.status == "direct" and endpoint.competing_waler_ids:
+                messages.append(
+                    ValidationMessage(
+                        "warning",
+                        "AMBIGUOUS_WALER_CONNECTION",
+                        (
+                            f"{member.id} {endpoint_label}同時接近 {endpoint.waler_id} 與 "
+                            f"{endpoint.competing_waler_ids[0]}，採用距離較近的 "
+                            f"{endpoint.waler_id}。"
+                        ),
+                        "brace",
+                        member.source_handles,
+                    )
+                )
+            elif endpoint.status == "axis_extension":
+                messages.append(
+                    ValidationMessage(
+                        "info",
+                        "BRACE_AXIS_EXTENDED_TO_WALER",
+                        (
+                            f"{member.id} {endpoint_label}沿斜撐軸線向外延伸 "
+                            f"{endpoint.extension_distance:.1f} mm，連接圍令 "
+                            f"{endpoint.waler_id}。"
+                        ),
+                        "brace",
+                        tuple(
+                            dict.fromkeys(
+                                (*member.source_handles, *endpoint.waler_source_handles)
+                            )
+                        ),
+                        (member.id, endpoint.waler_id),
+                    )
+                )
+            elif endpoint.status == "ambiguous":
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+                        (
+                            f"{member.id} {endpoint_label}沿軸線向外延伸時，同時遇到距離相近的圍令 "
+                            f"{'、'.join(endpoint.competing_waler_ids)}，無法唯一決定連接。"
+                        ),
+                        "brace",
+                        member.source_handles,
+                        (member.id, *endpoint.competing_waler_ids),
+                    )
+                )
+
+        report_endpoint(resolution.start)
+        report_endpoint(resolution.end)
+        from_waler = resolution.start.waler_id
+        to_waler = resolution.end.waler_id
+        start = resolution.start.adopted_point
+        end = resolution.end.adopted_point
         connected = replace(
             member,
             start=start,
@@ -625,11 +793,23 @@ def connect_components_to_walers(
             to_waler=to_waler,
         )
         connected_braces.append(connected)
-        count = bool(from_waler) + bool(to_waler)
-        if count == 0:
-            messages.append(ValidationMessage("error", "BRACE_NOT_CONNECTED", f"{member.id} 兩端皆未連接圍令。", "brace", member.source_handles))
-        elif count == 1:
-            messages.append(ValidationMessage("error", "BRACE_ONE_END_NOT_CONNECTED", f"{member.id} 僅一端連接圍令。", "brace", member.source_handles))
+        if resolution.same_waler:
+            messages.append(
+                ValidationMessage(
+                    "error",
+                    "BRACE_SAME_WALER_CONNECTION",
+                    f"{member.id} 兩端皆連接同一圍令 {from_waler}，斜撐連接無效。",
+                    "brace",
+                    member.source_handles,
+                    (member.id, from_waler),
+                )
+            )
+        elif "ambiguous" not in {resolution.start.status, resolution.end.status}:
+            count = bool(from_waler) + bool(to_waler)
+            if count == 0:
+                messages.append(ValidationMessage("error", "BRACE_NOT_CONNECTED", f"{member.id} 兩端皆未連接圍令。", "brace", member.source_handles))
+            elif count == 1:
+                messages.append(ValidationMessage("error", "BRACE_ONE_END_NOT_CONNECTED", f"{member.id} 僅一端連接圍令。", "brace", member.source_handles))
     return tuple(connected_struts), tuple(connected_braces), tuple(messages)
 
 
@@ -965,6 +1145,81 @@ def associate_components_to_struts(
             component.world_start or component.start,
             component.world_end or component.end,
         )
+        if component.joist_assembly_key:
+            # BIM Joist crossings have already passed the pure finite-contact
+            # and pair eligibility rules.  Re-project their stored engineering
+            # points only to refresh stations against the current Strut start;
+            # never send them through the generic nearest-gap recognizer.
+            struts_by_id = {strut.id: strut for strut in struts}
+            crossings: list[BeamCrossing] = []
+            for crossing in component.crossings:
+                strut = struts_by_id.get(crossing.strut_id)
+                if strut is None:
+                    continue
+                strut_start = strut.world_start or strut.start
+                strut_end = strut.world_end or strut.end
+                strut_axis = _unit(strut_start, strut_end)
+                strut_length = _length(strut_start, strut_end)
+                if strut_axis is None or strut_length <= 1e-9:
+                    continue
+                station = _dot(
+                    _vector(strut_start, crossing.world_point),
+                    strut_axis,
+                )
+                if not (-1e-6 <= station <= strut_length + 1e-6):
+                    continue
+                crossings.append(
+                    replace(
+                        crossing,
+                        strut_station=max(0.0, min(strut_length, station)),
+                    )
+                )
+            if not crossings:
+                return replace(
+                    component,
+                    associated_strut_id="",
+                    associated_strut_ids=(),
+                    association_station=None,
+                    association_distance=None,
+                    world_association_point=None,
+                    local_association_point=None,
+                    crossings=(),
+                )
+            crossings.sort(
+                key=lambda item: (
+                    item.beam_segment_index,
+                    item.strut_id,
+                    item.strut_station,
+                )
+            )
+            for crossing in crossings:
+                assignments[crossing.strut_id]["beam"].append(
+                    (crossing.strut_station, component.id)
+                )
+                associations.append(
+                    ComponentAssociation(
+                        component.id,
+                        "beam",
+                        crossing.strut_id,
+                        crossing.strut_station,
+                        crossing.distance,
+                        crossing.world_point,
+                        crossing.local_point,
+                    )
+                )
+            first = crossings[0]
+            return replace(
+                component,
+                associated_strut_id=first.strut_id,
+                associated_strut_ids=tuple(
+                    dict.fromkeys(item.strut_id for item in crossings)
+                ),
+                association_station=first.strut_station,
+                association_distance=first.distance,
+                world_association_point=first.world_point,
+                local_association_point=first.local_point,
+                crossings=tuple(crossings),
+            )
         raw_crossings: list[BeamCrossing] = []
         overlap_struts: set[str] = set()
         snapped_pairs: set[tuple[str, int]] = set()

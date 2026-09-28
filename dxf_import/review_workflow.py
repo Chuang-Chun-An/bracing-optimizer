@@ -20,6 +20,13 @@ from .candidate_points import (
     apply_candidate_point_selection,
     rebuild_component_associations,
 )
+from .corner_brace_repair import (
+    CornerBraceRepairPlan,
+    apply_corner_brace_repair,
+    plan_corner_brace_repair as build_corner_brace_repair_plan,
+    repair_subject_key,
+    repair_subject_signature,
+)
 from .geometry import Point
 from .material_recognition import set_member_material_spec
 from .models import (
@@ -395,6 +402,8 @@ class DXFReviewWorkflow:
             manual_overrides,
             material_specs=self.material_specs,
             tolerances=self.importer.tolerances,
+            review_confirmations=self.review_confirmations,
+            confirmation_coordinate_system=self._current_coordinate_system(),
         )
         candidates = staged.double_support_candidates
         if self.world_result is not None:
@@ -428,6 +437,47 @@ class DXFReviewWorkflow:
             manual_overrides,
             layer_roles=layer_roles,
         )
+
+    def install_staged_recovery(
+        self,
+        world_result: DXFImportResult,
+        *,
+        layer_roles: Mapping[str, str],
+        excluded_sources: Sequence[ExcludedSource],
+        double_support_decisions: Mapping[
+            DoubleSupportSourceIdentity,
+            bool,
+        ],
+        review_confirmations: Mapping[str, str],
+        manual_replay_report: ManualReplayReport,
+    ) -> None:
+        """Install one already-validated candidate stage into this workflow.
+
+        Recovery matching and decision classification stay in the recovery
+        planner. This method only uses the workflow's existing rebuild and
+        confirmation-validation boundary to make the candidate stage live.
+        """
+
+        if (
+            str(world_result.source_fingerprint).strip().upper()
+            != str(self.importer.source_fingerprint).strip().upper()
+        ):
+            raise DXFImportError("候選辨識結果與目前 DXF 來源不一致。")
+        decisions = dict(double_support_decisions)
+        candidates = apply_double_support_decisions(world_result, decisions)
+        if candidates != world_result.double_support_candidates:
+            world_result = rebuild_component_associations(
+                replace(world_result, double_support_candidates=candidates),
+                self.importer.tolerances,
+            )
+        self.layer_roles = dict(layer_roles)
+        self.world_result = world_result
+        self.excluded_sources = tuple(excluded_sources)
+        self.double_support_decisions = decisions
+        self.review_confirmations = dict(review_confirmations)
+        self.last_manual_replay_report = manual_replay_report
+        self._rebuild_derived_state()
+        self.revision += 1
 
     def recognize(self, layer_roles: Mapping[str, str]) -> ReviewMutation:
         before_confirmed = self._confirmed_snapshot()
@@ -647,6 +697,151 @@ class DXFReviewWorkflow:
             initiating_member_ids=(waler_id,),
         )
 
+    def plan_corner_brace_repair(
+        self,
+        item_or_key: ReviewItem | str,
+    ) -> CornerBraceRepairPlan:
+        """Build a side-effect-free STEP4 CornerBrace repair preview."""
+
+        if self.world_result is None or self.result is None:
+            raise DXFImportError("Please recognize the DXF before repairing a CornerBrace.")
+        item = (
+            item_or_key
+            if isinstance(item_or_key, ReviewItem)
+            else self.review_item_by_key(str(item_or_key))
+        )
+        if item is None:
+            raise DXFImportError("The selected CornerBrace review subject no longer exists.")
+        return build_corner_brace_repair_plan(
+            self.world_result,
+            item,
+            base_revision=self.revision,
+            review_items=self.review_items,
+            confirmations=self.review_confirmations,
+            confirmation_result=self.result,
+            tolerances=self.importer.tolerances,
+        )
+
+    def _corner_brace_repair_item(
+        self,
+        plan: CornerBraceRepairPlan,
+    ) -> ReviewItem | None:
+        if self.world_result is None:
+            return None
+        for item in self.review_items:
+            if item.role != "corner_brace":
+                continue
+            if plan.target_kind == "recognized" and item.member_id != plan.target_member_id:
+                continue
+            if plan.target_kind == "unresolved" and item.status != "unresolved":
+                continue
+            try:
+                current_key = repair_subject_key(
+                    self.world_result,
+                    item,
+                    self.importer.tolerances,
+                )
+            except DXFImportError:
+                continue
+            if current_key == plan.subject_key:
+                return item
+        return None
+
+    @staticmethod
+    def _result_members_for_store(result: DXFImportResult) -> tuple[Any, ...]:
+        return (
+            *result.walers,
+            *result.struts,
+            *result.braces,
+            *result.columns,
+            *result.beams,
+            *result.corner_braces,
+        )
+
+    def commit_corner_brace_repair(
+        self,
+        plan: CornerBraceRepairPlan,
+        candidate_id: str,
+        *,
+        explicit_adoption: bool = True,
+    ) -> ReviewMutation:
+        """Atomically adopt one currently eligible CornerBrace repair."""
+
+        if self.world_result is None or self.result is None:
+            raise DXFImportError("Please recognize the DXF before repairing a CornerBrace.")
+        if plan.base_revision != self.revision:
+            raise DXFImportError("DXF Review changed; preview the CornerBrace repair again.")
+        item = self._corner_brace_repair_item(plan)
+        if item is None:
+            raise DXFImportError("The CornerBrace repair subject changed; preview it again.")
+        if repair_subject_signature(
+            self.world_result,
+            item,
+            self.importer.tolerances,
+        ) != plan.subject_signature:
+            raise DXFImportError("The CornerBrace repair evidence changed; preview it again.")
+
+        # Re-plan from current truth so a saved candidate cannot bypass a
+        # changed reference, connection, confirmation or unresolved-create gate.
+        current_plan = build_corner_brace_repair_plan(
+            self.world_result,
+            item,
+            base_revision=self.revision,
+            review_items=self.review_items,
+            confirmations=self.review_confirmations,
+            confirmation_result=self.result,
+            tolerances=self.importer.tolerances,
+        )
+        planned_candidate = next(
+            (candidate for candidate in plan.candidates if candidate.id == candidate_id),
+            None,
+        )
+        current_candidate = next(
+            (
+                candidate
+                for candidate in current_plan.candidates
+                if candidate.id == candidate_id
+            ),
+            None,
+        )
+        if planned_candidate is None or current_candidate != planned_candidate:
+            raise DXFImportError(
+                "The CornerBrace repair candidate is stale or no longer eligible; preview it again."
+            )
+
+        before_confirmed = self._confirmed_snapshot()
+        staged_world, repaired_member_id = apply_corner_brace_repair(
+            self.world_result,
+            item,
+            current_plan,
+            candidate_id,
+            explicit_adoption=explicit_adoption,
+            tolerances=self.importer.tolerances,
+        )
+        staged_result = apply_coordinate_system(
+            staged_world,
+            self.result.coordinate_system,
+        )
+        staged_records = build_problem_records(staged_result)
+        staged_items = build_review_items(staged_result, staged_records)
+        staged_confirmations = valid_review_confirmations(
+            staged_result,
+            staged_items,
+            self.review_confirmations,
+        )
+        staged_store = CandidatePointStore(self.candidate_point_store.tolerance)
+        staged_store.rebuild(self._result_members_for_store(staged_result))
+
+        # The live workflow is changed only after every projection succeeds.
+        self.world_result = staged_world
+        self.result = staged_result
+        self.problem_records = staged_records
+        self.review_items = staged_items
+        self.review_confirmations = staged_confirmations
+        self.candidate_point_store = staged_store
+        self.revision += 1
+        return self._mutation_result(before_confirmed)
+
     def is_review_item_confirmed(self, item: ReviewItem | None) -> bool:
         return bool(
             item is not None
@@ -688,7 +883,11 @@ class DXFReviewWorkflow:
             return "此項目沒有可安全識別的 DXF 來源，無法使用來源排除。"
         if item.status == "excluded":
             return ""
-        conflicts = shared_handle_conflicts(item, self.review_items)
+        conflicts = shared_handle_conflicts(
+            item,
+            self.review_items,
+            getattr(self, "world_result", None),
+        )
         if not conflicts:
             return ""
         details = "；".join(

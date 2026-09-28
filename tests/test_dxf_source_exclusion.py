@@ -19,7 +19,9 @@ from dxf_import.dialog import DXFImportDialog
 from dxf_import.importer import DXFImporter
 from dxf_import.material_recognition import set_member_material_spec
 from dxf_import.models import (
+    Beam,
     CoordinateSystem,
+    DXFImportResult,
     ExcludedSource,
     ReviewItem,
     SourceManualOverride,
@@ -230,6 +232,84 @@ class SourceExclusionTests(unittest.TestCase):
 
         self.assertEqual({item.handle for item in conflicts}, {"H1", "H2"})
         self.assertTrue(all("S2 (strut)" in item.owner_labels for item in conflicts))
+
+    def test_paired_joist_siblings_are_one_source_not_an_ownership_conflict(self):
+        first = _review_item(
+            "member:beam:BM1",
+            "BM1",
+            "beam",
+            "recognized",
+            ("PAIR",),
+            member_id="BM1",
+        )
+        second = _review_item(
+            "member:beam:BM2",
+            "BM2",
+            "beam",
+            "recognized",
+            ("PAIR",),
+            member_id="BM2",
+        )
+
+        result = SimpleNamespace(
+            beams=(
+                SimpleNamespace(id="BM1", joist_assembly_key="PAIR"),
+                SimpleNamespace(id="BM2", joist_assembly_key="PAIR"),
+            )
+        )
+        self.assertEqual(
+            shared_handle_conflicts(first, (first, second), result),
+            (),
+        )
+        self.assertTrue(shared_handle_conflicts(first, (first, second)))
+
+    def test_paired_joist_manual_replay_is_not_guessed_by_member_order(self):
+        common = {
+            "source_layer": "BEAM",
+            "source_handles": ("PAIR",),
+            "source_entity_types": ("INSERT",),
+            "recognition_method": "bim_joist_paired_axis",
+            "centerline_computed": True,
+            "source_width": 90.0,
+            "confidence": 1.0,
+            "selection_source": "cad_manual",
+            "joist_assembly_key": "PAIR",
+        }
+        first = Beam(
+            id="BM1",
+            start=(0.0, 0.0),
+            end=(1000.0, 0.0),
+            joist_axis_slot=0,
+            **common,
+        )
+        second = Beam(
+            id="BM2",
+            start=(0.0, 518.0),
+            end=(1000.0, 518.0),
+            joist_axis_slot=1,
+            **common,
+        )
+        result = DXFImportResult(
+            source_path="paired.dxf",
+            layer_names=("BEAM",),
+            selected_layers={"beam": ("BEAM",)},
+            layer_info=(),
+            walers=(),
+            struts=(),
+            braces=(),
+            entity_debug=(),
+            messages=(),
+            source_entity_counts={"beam": 1},
+            beams=(first, second),
+        )
+
+        overrides = capture_manual_overrides(result)
+        replayed, report = replay_manual_overrides(result, overrides)
+
+        self.assertEqual(2, len(overrides))
+        self.assertEqual(result, replayed)
+        self.assertEqual((), report.preserved)
+        self.assertEqual(2, len(report.needs_review))
 
     def test_independent_handle_set_can_be_excluded(self):
         first = _review_item(

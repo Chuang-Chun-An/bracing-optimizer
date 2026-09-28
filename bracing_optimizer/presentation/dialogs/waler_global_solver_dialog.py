@@ -61,7 +61,7 @@ def format_waler_global_result_summary(solution, diagnostics) -> str:
 
 
 class WalerGlobalSolverDialog(SolverDialogThreadBridge):
-    """Generate local candidates, show the exact DP result, then apply once."""
+    """Generate, display, and immediately adopt a valid global result."""
 
     def __init__(
         self,
@@ -182,13 +182,6 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
             command=self._run,
         )
         self.run_button.pack(side="left", padx=(0, 8))
-        self.apply_button = ttk.Button(
-            buttons,
-            text="套用全域結果",
-            command=self._apply,
-            state="disabled",
-        )
-        self.apply_button.pack(side="left")
         ttk.Button(
             buttons,
             text="關閉",
@@ -227,7 +220,6 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
         LOGGER.info("Global Waler Solver start")
         try:
             self.current_result = None
-            self.apply_button.configure(state="disabled")
             self.run_button.configure(state="disabled")
             self.summary_var.set("正在依序建立各圍令候選……")
             for item_id in self.result_tree.get_children(""):
@@ -299,23 +291,24 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
             if error is not None:
                 self._display_error(error)
             elif result is not None:
-                self._display_result(result)
+                if self._display_result(result):
+                    self._adopt_current_result()
+            else:
+                self._display_error(RuntimeError("Solver 未回傳結果。"))
         except Exception as exc:
             LOGGER.exception("Global Waler result UI callback failed")
             self._display_error(exc)
 
     def _display_error(self, exc):
         self.current_result = None
-        self.apply_button.configure(state="disabled")
         self.summary_var.set(f"全部圍令最佳化失敗：{exc}")
 
     def _display_result(self, result):
         self.current_result = result if result.solution.valid else None
         solution = result.solution
         if not solution.valid:
-            self.apply_button.configure(state="disabled")
             self.summary_var.set(f"全部圍令最佳化失敗：{solution.reason}")
-            return
+            return False
 
         self.summary_var.set(
             format_waler_global_result_summary(solution, result.diagnostics)
@@ -335,15 +328,23 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
                     f"{item.local_regret:.6f}",
                 ),
             )
-        self.apply_button.configure(state="normal")
+        return True
 
-    def _apply(self):
+    def _adopt_current_result(self):
         if self.current_result is None or not self.current_result.solution.valid:
             return
+        result_summary = format_waler_global_result_summary(
+            self.current_result.solution,
+            self.current_result.diagnostics,
+        )
         try:
             outcome = self.callback(self.current_result)
         except Exception as exc:
             LOGGER.exception("Global Waler apply callback failed")
+            self.summary_var.set(
+                "全域結果未採用：套用失敗，原成果未變更。\n"
+                + result_summary
+            )
             messagebox.showerror(
                 "套用失敗",
                 "全域圍令成果套用失敗，原成果未變更。\n"
@@ -351,10 +352,12 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
             return
-        if outcome is not None and not bool(
-            getattr(outcome, "committed", False)
-        ):
+        if not bool(getattr(outcome, "committed", False)):
             detail = str(getattr(outcome, "error", "") or "").strip()
+            self.summary_var.set(
+                "全域結果未採用：套用失敗，原成果未變更。\n"
+                + result_summary
+            )
             messagebox.showerror(
                 "套用失敗",
                 "全域圍令成果套用失敗，原成果未變更。"
@@ -362,10 +365,10 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
             return
-        self.apply_button.configure(state="disabled")
-        if outcome is not None and not bool(
-            getattr(outcome, "refreshed", False)
-        ):
+        if not bool(getattr(outcome, "refreshed", False)):
+            self.summary_var.set(
+                "全域結果已採用（畫面更新失敗）。\n" + result_summary
+            )
             messagebox.showwarning(
                 "畫面更新失敗",
                 "圍令成果已成功套用，但畫面更新失敗。"
@@ -373,10 +376,8 @@ class WalerGlobalSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
             return
-        messagebox.showinfo(
-            "全部圍令最佳化",
-            "全域結果已一次套用至成果配置。",
-            parent=self.dialog,
+        self.summary_var.set(
+            "全域結果已採用。\n" + result_summary
         )
 
     def _on_close(self):

@@ -49,6 +49,32 @@ class ProjectDataValidatorTests(unittest.TestCase):
         self.assertEqual(report.errors, ())
         self.assertEqual(report.warnings, ())
 
+    def test_project_validation_does_not_enforce_solver_zoning_tolerances(self):
+        model = ProjectDataModel(
+            walers=[
+                {"WalerID": "W1", "StartX": 0, "StartY": -10000,
+                 "EndX": 0, "EndY": 10000},
+                {"WalerID": "W2", "StartX": 10000, "StartY": -10000,
+                 "EndX": 10000, "EndY": 10000},
+            ],
+            struts=[
+                {"StrutID": "S1", "FromWaler": "W1", "ToWaler": "W2",
+                 "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0,
+                 "Zoning": "Z1"},
+                {"StrutID": "S2", "FromWaler": "W1", "ToWaler": "W2",
+                 "StartX": 0, "StartY": 1000, "EndX": 10000, "EndY": 2000,
+                 "Zoning": "Z1"},
+            ],
+        )
+
+        report = ProjectDataValidator().validate(model)
+
+        self.assertTrue(report.valid, [issue.message for issue in report.errors])
+        self.assertFalse(any(
+            "5°" in issue.message or "5 mm" in issue.message
+            for issue in (*report.errors, *report.warnings)
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,7 @@ from dxf_import.importer import (
     DEFAULT_LAYER_MAPPING,
     Y1A_LAYER_MAPPING,
     Y29_LAYER_MAPPING,
+    Y05_LAYER_MAPPING,
     default_layer_mapping_for_file,
     import_dxf,
     read_dxf_layers,
@@ -50,7 +51,11 @@ from dxf_import.preview import (
     RenderDirty,
     RenderScheduler,
 )
-from dxf_import.recognition import rectangle_centerline
+from dxf_import.recognition import (
+    _Candidate,
+    _refine_corner_brace_axis_intersections,
+    rectangle_centerline,
+)
 from dxf_import.validation import (
     build_problem_records,
     build_validation_overview,
@@ -114,9 +119,22 @@ class DXFInputRecognitionTests(unittest.TestCase):
             "壓樑": "托梁",
             "角撐": "角撐",
         }
+        expected_y05_defaults = {
+            "I-WALL": "連續壁",
+            "0": "連續壁",
+            "圍令": "圍令",
+            "支撐": "支撐",
+            "托梁": "托梁",
+            "斜撐": "斜撐",
+            "S-BEAM": "角撐",
+            "S-GRID": "輔助線",
+            "S-GRID-IDEN": "輔助線",
+            "S-COLS": "中間柱",
+        }
         self.assertEqual(DEFAULT_LAYER_MAPPING, expected_defaults)
         self.assertEqual(Y1A_LAYER_MAPPING, expected_defaults)
         self.assertEqual(Y29_LAYER_MAPPING, expected_y29_defaults)
+        self.assertEqual(Y05_LAYER_MAPPING, expected_y05_defaults)
         self.assertEqual(
             default_layer_mapping_for_file("C:/drawings/Y1A擋土支撐簡化版.dxf"),
             expected_defaults,
@@ -125,9 +143,18 @@ class DXFInputRecognitionTests(unittest.TestCase):
             default_layer_mapping_for_file("C:/drawings/Y29_TEST.DXF"),
             expected_y29_defaults,
         )
+        self.assertEqual(
+            default_layer_mapping_for_file(
+                "C:/drawings/670-CO-Y05-FW-圖紙 - 005 - "
+                "Y05站 安全支撐系統 第一層支撐平面圖.DXF"
+            ),
+            expected_y05_defaults,
+        )
         self.assertEqual(default_layer_mapping_for_file("other.dxf"), {})
         self.assertNotIn("圍令", Y1A_LAYER_MAPPING)
         self.assertNotIn("L-SITE-WALL", Y29_LAYER_MAPPING)
+        self.assertNotIn("I-WALL", Y1A_LAYER_MAPPING)
+        self.assertNotIn("I-WALL", Y29_LAYER_MAPPING)
         self.assertTrue(
             DXFImportDialog._saved_classification_matches_file(
                 "C:/new/Y29_test.dxf",
@@ -1351,6 +1378,282 @@ class DXFInputRecognitionTests(unittest.TestCase):
                 for message in result.messages
             )
         )
+
+    def test_parallel_edge_corner_brace_extends_to_member_centerlines(self):
+        doc = self.new_doc()
+        doc.layers.add("CORNER")
+        model = doc.modelspace()
+        model.add_line((0, 0), (1000, 0), dxfattribs={"layer": "WALER"})
+        model.add_line((0, 1000), (1000, 1000), dxfattribs={"layer": "WALER"})
+        model.add_line((500, 0), (500, 1000), dxfattribs={"layer": "STRUT"})
+        block = doc.blocks.new("PARALLEL_CORNER")
+        block.add_line((200, 200), (450, 450))
+        block.add_line((240, 160), (490, 410))
+        model.add_blockref(
+            "PARALLEL_CORNER",
+            (0, 0),
+            dxfattribs={"layer": "CORNER"},
+        )
+        self.counter += 1
+        path = Path(self.temp_dir.name) / f"parallel_corner_{self.counter}.dxf"
+        doc.saveas(path)
+
+        result = import_dxf(
+            path,
+            layer_roles={
+                "WALER": "waler",
+                "STRUT": "strut",
+                "CORNER": "corner_brace",
+            },
+        )
+
+        self.assertEqual(len(result.corner_braces), 1)
+        corner = result.corner_braces[0]
+        self.assertEqual(corner.recognition_method, "brace_centerline_intersections")
+        self.assertEqual(
+            (corner.world_start, corner.world_end),
+            ((40.0, 0.0), (500.0, 460.0)),
+        )
+        selected_start = next(
+            point
+            for point in corner.candidate_points
+            if point.id == corner.selected_start_point_id
+        )
+        selected_end = next(
+            point
+            for point in corner.candidate_points
+            if point.id == corner.selected_end_point_id
+        )
+        self.assertEqual(selected_start.world_point, (40.0, 0.0))
+        self.assertEqual(selected_end.world_point, (500.0, 460.0))
+        self.assertEqual(
+            result.struts[0].from_brace_to_waler_start_len,
+            460.0,
+        )
+        self.assertEqual(len(result.corner_brace_connections), 1)
+        connection = result.corner_brace_connections[0]
+        self.assertEqual(connection.baseline_waler_attachment, (40.0, 0.0))
+        self.assertEqual(connection.baseline_strut_attachment, (500.0, 460.0))
+        self.assertAlmostEqual(
+            connection.fixed_length_mm,
+            math.hypot(460.0, 460.0),
+        )
+
+    @staticmethod
+    def _corner_refinement_candidate(
+        start,
+        end,
+        recognition_method,
+        *,
+        boundary_lines=(),
+        source_points=(),
+        handle="H-CORNER",
+    ):
+        return _Candidate(
+            start=start,
+            end=end,
+            recognition_method=recognition_method,
+            centerline_computed=True,
+            source_width=80.0,
+            confidence=0.9,
+            layer="CORNER",
+            handles={handle},
+            entity_types={"LINE"},
+            block_instances=[],
+            source_keys={handle},
+            warnings=[],
+            boundary_lines=tuple(boundary_lines),
+            recognized_axis=(start, end),
+            reference_point=(
+                (start[0] + end[0]) / 2.0,
+                (start[1] + end[1]) / 2.0,
+            ),
+            source_points=tuple(source_points),
+        )
+
+    @staticmethod
+    def _corner_refinement_members(waler_line, strut_line):
+        waler = DXFInputRecognitionTests._corner_refinement_candidate(
+            *waler_line,
+            "existing_inner_line",
+            handle="H-WALER",
+        )
+        strut = DXFInputRecognitionTests._corner_refinement_candidate(
+            *strut_line,
+            "existing_centerline",
+            handle="H-STRUT",
+        )
+        return waler, strut
+
+    def test_corner_refinement_requires_reliable_axis_for_non_legacy_method(self):
+        waler, strut = self._corner_refinement_members(
+            ((0.0, 0.0), (1000.0, 0.0)),
+            ((500.0, 0.0), (500.0, 1000.0)),
+        )
+        corner = self._corner_refinement_candidate(
+            (200.0, 200.0),
+            (400.0, 400.0),
+            "existing_centerline",
+            boundary_lines=(((200.0, 200.0), (400.0, 400.0)),),
+        )
+        before = (
+            corner.start,
+            corner.end,
+            corner.recognition_method,
+            corner.recognized_axis,
+            corner.reference_point,
+        )
+
+        messages = _refine_corner_brace_axis_intersections(
+            {"waler": (waler,), "strut": (strut,), "corner_brace": (corner,)},
+            GeometryTolerances(),
+        )
+
+        self.assertEqual(messages, [])
+        self.assertEqual(
+            (
+                corner.start,
+                corner.end,
+                corner.recognition_method,
+                corner.recognized_axis,
+                corner.reference_point,
+            ),
+            before,
+        )
+
+    def test_connection_plate_without_rails_keeps_legacy_face_fallback(self):
+        waler, strut = self._corner_refinement_members(
+            ((0.0, 0.0), (1000.0, 0.0)),
+            ((500.0, 0.0), (500.0, 1000.0)),
+        )
+        source_points = (
+            (100.0, 0.0),
+            (300.0, 0.0),
+            (500.0, 300.0),
+            (500.0, 550.0),
+        )
+        corner = self._corner_refinement_candidate(
+            (200.0, 0.0),
+            (500.0, 425.0),
+            "connection_plate_midpoints",
+            boundary_lines=(
+                ((100.0, 0.0), (300.0, 0.0)),
+                ((500.0, 300.0), (500.0, 550.0)),
+            ),
+            source_points=source_points,
+        )
+
+        messages = _refine_corner_brace_axis_intersections(
+            {"waler": (waler,), "strut": (strut,), "corner_brace": (corner,)},
+            GeometryTolerances(),
+        )
+
+        self.assertEqual(messages, [])
+        self.assertEqual(corner.recognition_method, "connection_face_midpoints")
+        self.assertEqual((corner.start, corner.end), ((200.0, 0.0), (500.0, 425.0)))
+
+    def test_reliable_corner_axis_failure_is_atomic(self):
+        rails = (
+            ((200.0, 200.0), (450.0, 450.0)),
+            ((240.0, 160.0), (490.0, 410.0)),
+        )
+        cases = (
+            (
+                "missing_waler_intersection",
+                ((700.0, 0.0), (900.0, 0.0)),
+                ((500.0, 0.0), (500.0, 1000.0)),
+                (200.0, 200.0),
+                (450.0, 450.0),
+                rails,
+            ),
+            (
+                "missing_strut_intersection",
+                ((0.0, 0.0), (1000.0, 0.0)),
+                ((500.0, 600.0), (500.0, 1000.0)),
+                (200.0, 200.0),
+                (450.0, 450.0),
+                rails,
+            ),
+            (
+                "corrected_axis_too_short",
+                ((-100.0, 0.0), (100.0, 0.0)),
+                ((50.0, 0.0), (50.0, 100.0)),
+                (0.0, 0.0),
+                (50.0, 50.0),
+                (
+                    ((-100.0, -80.0), (200.0, 220.0)),
+                    ((-80.0, -100.0), (220.0, 200.0)),
+                ),
+            ),
+        )
+        for name, waler_line, strut_line, start, end, boundary_lines in cases:
+            with self.subTest(name=name):
+                waler, strut = self._corner_refinement_members(
+                    waler_line,
+                    strut_line,
+                )
+                corner = self._corner_refinement_candidate(
+                    start,
+                    end,
+                    "parallel_edges_midline",
+                    boundary_lines=boundary_lines,
+                )
+                before = (
+                    corner.start,
+                    corner.end,
+                    corner.recognition_method,
+                    corner.recognized_axis,
+                    corner.reference_point,
+                )
+
+                messages = _refine_corner_brace_axis_intersections(
+                    {
+                        "waler": (waler,),
+                        "strut": (strut,),
+                        "corner_brace": (corner,),
+                    },
+                    GeometryTolerances(),
+                )
+
+                self.assertEqual(
+                    (
+                        corner.start,
+                        corner.end,
+                        corner.recognition_method,
+                        corner.recognized_axis,
+                        corner.reference_point,
+                    ),
+                    before,
+                )
+                self.assertEqual(
+                    [message.code for message in messages],
+                    ["CORNER_BRACE_CONNECTION_POINT_FAILED"],
+                )
+                self.assertEqual(messages[0].source_handles, ("H-CORNER",))
+
+    def test_reliable_corner_axis_preserves_reverse_endpoint_selection(self):
+        waler, strut = self._corner_refinement_members(
+            ((0.0, 0.0), (1000.0, 0.0)),
+            ((500.0, 0.0), (500.0, 1000.0)),
+        )
+        corner = self._corner_refinement_candidate(
+            (450.0, 450.0),
+            (200.0, 200.0),
+            "parallel_edges_midline",
+            boundary_lines=(
+                ((200.0, 200.0), (450.0, 450.0)),
+                ((240.0, 160.0), (490.0, 410.0)),
+            ),
+        )
+
+        messages = _refine_corner_brace_axis_intersections(
+            {"waler": (waler,), "strut": (strut,), "corner_brace": (corner,)},
+            GeometryTolerances(),
+        )
+
+        self.assertEqual(messages, [])
+        self.assertEqual(corner.recognition_method, "brace_centerline_intersections")
+        self.assertEqual((corner.start, corner.end), ((40.0, 0.0), (500.0, 460.0)))
 
     def test_h_section_column_uses_section_center_for_strut_association(self):
         doc = self.new_doc()

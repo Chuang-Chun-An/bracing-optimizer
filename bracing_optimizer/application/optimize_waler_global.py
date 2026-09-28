@@ -17,6 +17,7 @@ from bracing_optimizer.application.optimize_waler import (
     OptimizeWaler,
     OptimizeWalerRequest,
     OptimizeWalerResult,
+    partition_waler_optimization_inputs,
 )
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
@@ -89,10 +90,19 @@ class OptimizeWalerGlobal:
         logger: LogCallback | None = None,
     ) -> OptimizeWalerGlobalResult:
         log = logger or (lambda *args: None)
-        inputs = tuple(request.waler_inputs)
+        inputs, excluded_inputs = partition_waler_optimization_inputs(
+            tuple(request.waler_inputs)
+        )
         waler_order = tuple(item.waler_id for item in inputs)
         log("=== 全部圍令最佳化 ===")
         log(f"圍令數：{len(inputs)}")
+        if excluded_inputs:
+            log(
+                "排除 RC 圍令："
+                + "、".join(item.waler_id for item in excluded_inputs)
+            )
+        if not inputs:
+            return self._no_eligible_result(request.material_ratio_targets)
 
         local_records: list[WalerLocalOptimizationRecord] = []
         candidates_by_waler: dict[str, tuple[WalerGlobalCandidate, ...]] = {}
@@ -182,6 +192,20 @@ class OptimizeWalerGlobal:
             solution=solution,
             diagnostics=diagnostics,
             local_results=tuple(local_records),
+        )
+
+    @staticmethod
+    def _no_eligible_result(
+        targets: MaterialRatioTargets,
+    ) -> OptimizeWalerGlobalResult:
+        message = "沒有可進行材料配置的 non-RC 圍令。"
+        return OptimizeWalerGlobalResult(
+            solution=WalerGlobalSolution(reason=message),
+            diagnostics=WalerGlobalDiagnostics(
+                waler_count=0,
+                target_ratio=targets.as_dict(),
+                messages=(message,),
+            ),
         )
 
     @staticmethod

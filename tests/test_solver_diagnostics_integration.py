@@ -1,14 +1,18 @@
+import json
 import unittest
 from types import SimpleNamespace
 
 from bracing_optimizer.application.optimize_support_zone import OptimizeSupportZone
+from bracing_optimizer.application.solver_input_builder import SolverInputBuildError
 from bracing_optimizer.algorithms.solver_search import (
     CANDIDATE_INSUFFICIENT,
     ENGINEERING_CONSTRAINT_LIMITED,
     SCORING_PREFERENCE,
     SEARCH_INSUFFICIENT,
     SearchStageAssessment,
+    SolverDiagnostics,
 )
+from bracing_optimizer.domain.support_adjacency import SupportGeometryIssue
 
 
 def candidate_status(
@@ -154,6 +158,60 @@ class SupportDiagnosticsClassificationTests(unittest.TestCase):
         )
         self.assertEqual(diagnostics.main_issue_category, SCORING_PREFERENCE)
         self.assertFalse(diagnostics.search_was_escalated)
+
+    def test_geometry_validation_diagnostic_is_json_safe_and_pre_phase2(self):
+        error = SolverInputBuildError(
+            ("Z1 geometry invalid",),
+            geometry_issues=(SupportGeometryIssue(
+                code="ZONING_ANGLE_OUT_OF_TOLERANCE",
+                zoning="Z1",
+                member_ids=("S1", "S2"),
+                actual_value=5.1,
+                tolerance=5.0,
+            ),),
+        )
+
+        payload = error.to_diagnostics()
+
+        json.dumps(payload)
+        self.assertFalse(payload["phase2_executed"])
+        self.assertEqual(
+            payload["validation_issues"][0],
+            {
+                "code": "ZONING_ANGLE_OUT_OF_TOLERANCE",
+                "zoning": "Z1",
+                "member_ids": ["S1", "S2"],
+                "unit_ids": [],
+                "actual_value": 5.1,
+                "tolerance": 5.0,
+            },
+        )
+
+    def test_optional_adjacency_diagnostics_are_backward_compatible(self):
+        legacy = SolverDiagnostics.from_dict({
+            "solver_type": "support",
+            "legal_solution_found": True,
+        })
+        current = SolverDiagnostics(
+            solver_type="support",
+            legal_solution_found=True,
+            adjacency_units=[{"unit_id": "S1", "member_ids": ["S1"]}],
+            adjacency_pairs=[{
+                "first_unit_id": "S1",
+                "second_unit_id": "S2",
+                "distance": 500.0,
+                "minimum_distance": 500.0,
+                "valid": True,
+            }],
+            phase2_executed=True,
+        )
+
+        self.assertIsNone(legacy.adjacency_pairs)
+        self.assertNotIn("adjacency_pairs", legacy.to_dict())
+        restored = SolverDiagnostics.from_dict(current.to_dict())
+        self.assertTrue(restored.phase2_executed)
+        self.assertEqual(current.adjacency_pairs, restored.adjacency_pairs)
+        json.dumps(current.to_dict())
 
 
 if __name__ == "__main__":

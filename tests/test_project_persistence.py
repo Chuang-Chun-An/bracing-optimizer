@@ -1,5 +1,6 @@
 import copy
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,11 +12,14 @@ from bracing_optimizer.algorithms import support
 from main import SupportInputApp
 from bracing_optimizer.algorithms.solver_search import SolverDiagnostics
 from bracing_optimizer.application.project_data import ProjectDataModel
+from bracing_optimizer.application.project_service import PausedReviewRelinkRequest
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
     DxfCompatibilityChecker,
     DxfStatus,
+    DxfWorkflowStatus,
     MANAGED_DXF_RELATIVE_PATH,
+    PROJECT_SCHEMA_VERSION,
     ProjectPersistenceError,
 )
 
@@ -114,6 +118,43 @@ class ProjectPersistenceTests(unittest.TestCase):
         self.assertEqual(report.status, DxfStatus.RUNTIME_READY)
         self.assertFalse((self.root / "source" / "source.dxf").exists())
         self.assertFalse(self.project_path.exists())
+
+    def test_geometry_invalid_shared_zoning_round_trips_as_project_data(self):
+        project_payload = payload()
+        project_payload["input_data"]["walers"] = [
+            {"WalerID": "W1", "StartX": 0, "StartY": -10000,
+             "EndX": 0, "EndY": 10000},
+            {"WalerID": "W2", "StartX": 10000, "StartY": -10000,
+             "EndX": 10000, "EndY": 10000},
+        ]
+        project_payload["input_data"]["struts"] = [
+            {"StrutID": "S1", "SharedLayoutGroup": "G1",
+             "FromWaler": "W1", "ToWaler": "W2",
+             "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0,
+             "Zoning": "USER-ZONE"},
+            {"StrutID": "S2", "SharedLayoutGroup": "G1",
+             "FromWaler": "W1", "ToWaler": "W2",
+             "StartX": 0, "StartY": 1000, "EndX": 10000, "EndY": 2000,
+             "Zoning": "USER-ZONE"},
+        ]
+
+        self.manager.save_project(
+            self.project_path,
+            project_payload,
+            active_source=None,
+            existing_asset=None,
+        )
+        saved = json.loads(self.project_path.read_text(encoding="utf-8"))
+        restored = ProjectDataModel.from_case_data(saved["input_data"])
+
+        self.assertEqual(
+            [row["Zoning"] for row in restored.struts],
+            ["USER-ZONE", "USER-ZONE"],
+        )
+        self.assertEqual(
+            [row["SharedLayoutGroup"] for row in restored.struts],
+            ["G1", "G1"],
+        )
 
     def test_first_save_creates_project_json_and_managed_dxf(self):
         result = self.save()
@@ -581,6 +622,12 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
             solver_type="support",
             search_stage="ENHANCED",
             legal_solution_found=True,
+            adjacency_units=[{
+                "unit_id": "S1",
+                "member_ids": ["S1"],
+            }],
+            adjacency_pairs=[],
+            phase2_executed=True,
         )
         solution = support.GlobalSolution(
             plans=[],
@@ -598,6 +645,9 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
         self.assertEqual(
             restored["result"].search_diagnostics["search_stage"],
             "ENHANCED",
+        )
+        self.assertTrue(
+            restored["result"].search_diagnostics["phase2_executed"]
         )
         legacy_payload = copy.deepcopy(payload)
         legacy_payload["result"].pop("search_diagnostics")
@@ -747,6 +797,79 @@ class MainProjectPersistenceIntegrationTests(unittest.TestCase):
             DxfStatus.VERIFIED_PENDING_SAVE,
         )
         self.assertTrue(app.project_dirty)
+
+    def test_paused_review_exact_relink_round_trips_after_save(self):
+        app = self.app()
+        source = create_dxf(self.root / "paused-source.dxf")
+        candidate = self.root / "paused-renamed.dxf"
+        shutil.copy2(source, candidate)
+        state = import_state(source)
+        state.update({
+            "review_state_version": 2,
+            "source_fingerprint": DxfAssetManager.file_info(
+                source
+            ).sha256.upper(),
+            "review_confirmations": {"waler:10": "CONFIRMED"},
+            "manual_overrides": [{"role": "waler", "source_handles": ["10"]}],
+        })
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_asset_status_report = DxfAssetManager().runtime_report(source)
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+
+        service = app._ensure_project_service()
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+        app._adopt_paused_review_relink(committed)
+
+        self.assertIsNone(app.dxf_asset)
+        self.assertEqual(
+            app.dxf_asset_status_report.status,
+            DxfStatus.VERIFIED_PENDING_SAVE,
+        )
+        self.assertFalse(
+            (self.root / "paused-relinked" / MANAGED_DXF_RELATIVE_PATH).is_file()
+        )
+
+        saved_path = app.save_project_case("paused-relinked")
+        saved = json.loads(saved_path.read_text(encoding="utf-8"))
+        loaded = self.app()
+        loaded.load_project_case("paused-relinked", silent=True)
+        resume_source, resume_fingerprint = loaded._review_resume_source()
+
+        self.assertEqual(saved["schema_version"], PROJECT_SCHEMA_VERSION)
+        self.assertEqual(saved["dxf_workflow_status"], "REVIEW")
+        self.assertEqual(
+            saved["dxf_import_state"]["source_path"],
+            str(candidate.resolve()),
+        )
+        self.assertEqual(
+            saved["dxf_import_state"]["review_confirmations"],
+            state["review_confirmations"],
+        )
+        self.assertEqual(
+            loaded._current_dxf_workflow_status(),
+            DxfWorkflowStatus.REVIEW,
+        )
+        self.assertEqual(
+            resume_source,
+            saved_path.parent / MANAGED_DXF_RELATIVE_PATH,
+        )
+        self.assertEqual(
+            resume_fingerprint,
+            state["source_fingerprint"],
+        )
 
 
 class ProjectSavedStatusLabelTests(unittest.TestCase):

@@ -1,9 +1,12 @@
+import copy
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from main import SupportInputApp
 from bracing_optimizer.application.project_data import ProjectDataModel, TABLE_COLUMNS
+from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.solver_input_builder import SupportInputBuilder
 from bracing_optimizer.infrastructure.dxf_result_export import (
     ExportPiece,
     MemberExportPlan,
@@ -349,6 +352,144 @@ class MainProjectEditingTests(unittest.TestCase):
         self.assertFalse(app._dxf_binding_is_stale())
         self.assertEqual(app.struts[0]["material_spec"], "H400x400")
         self.assertEqual(app.events["solver"], 1)
+
+    def test_waler_steel_rc_transitions_clear_results_and_runtime_caches(self):
+        app = self.make_app(with_dxf=False)
+        app._invalidate_solver_state_after_input_change = (
+            SupportInputApp._invalidate_solver_state_after_input_change.__get__(
+                app,
+                SupportInputApp,
+            )
+        )
+
+        def seed_solver_state():
+            app._project_results = ProjectResultModel(
+                result_items={"W1-方案1": {"type": "waler", "result": {}}},
+                persisted_payload={"best_solution": {}},
+            )
+            app.solver_memory = {"old": object()}
+            app.support_candidate_cache = {"old": object()}
+
+        seed_solver_state()
+        changed, _value, error = app._commit_project_field_edit(
+            "walers", 0, "material_spec", "RC"
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(error, "")
+        self.assertEqual(app.walers[0]["material_spec"], "RC")
+        self.assertEqual(app.result_items, {})
+        self.assertIsNone(app.project_result)
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
+
+        seed_solver_state()
+        changed, _value, error = app._commit_project_field_edit(
+            "walers", 0, "material_spec", "H350x350"
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(error, "")
+        self.assertEqual(app.walers[0]["material_spec"], "H350x350")
+        self.assertEqual(app.result_items, {})
+        self.assertIsNone(app.project_result)
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
+
+    def test_uncommitted_waler_material_edit_preserves_solver_state(self):
+        app = self.make_app(with_dxf=False)
+        original_results = {
+            "W1-方案1": {"type": "waler", "result": {"waler_id": "W1"}}
+        }
+        app._project_results = ProjectResultModel(
+            result_items=copy.deepcopy(original_results),
+            persisted_payload={"best_solution": {}},
+        )
+        app.solver_memory = {"old": 1}
+        app.support_candidate_cache = {"old": 2}
+        app._invalidate_solver_state_after_input_change = (
+            SupportInputApp._invalidate_solver_state_after_input_change.__get__(
+                app,
+                SupportInputApp,
+            )
+        )
+
+        changed, _value, error = app._commit_project_field_edit(
+            "walers", 0, "material_spec", "H350x350"
+        )
+        missing_changed, _missing_value, missing_error = (
+            app._commit_project_field_edit(
+                "walers", 99, "material_spec", "RC"
+            )
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual(error, "")
+        self.assertFalse(missing_changed)
+        self.assertTrue(missing_error)
+        self.assertEqual(app.result_items, original_results)
+        self.assertEqual(app.solver_memory, {"old": 1})
+        self.assertEqual(app.support_candidate_cache, {"old": 2})
+
+    def test_main_allows_geometry_invalid_zoning_to_be_edited(self):
+        app = self.make_app(with_dxf=False)
+        app.struts.append({
+            **app.struts[0],
+            "StrutID": "S2",
+            "StartY": 1000,
+            "EndY": 4000,
+        })
+
+        changed, value, error = app._commit_project_field_edit(
+            "struts", 1, "EndX", "1000"
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(value, 1000)
+        self.assertEqual(error, "")
+        self.assertEqual(app.struts[1]["Zoning"], "Z1")
+        self.assertEqual(app.events["dirty"], 1)
+        self.assertEqual(app.events["solver"], 1)
+
+    def test_solver_geometry_preflight_preserves_committed_result(self):
+        app = self.make_app(with_dxf=False)
+        app.project_data.replace_table("struts", [
+            {
+                **app.struts[0],
+                "StrutID": "S1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 10000,
+                "EndY": 0,
+            },
+            {
+                **app.struts[0],
+                "StrutID": "S2",
+                "StartX": 0,
+                "StartY": 1000,
+                "EndX": 9900,
+                "EndY": 2500,
+            },
+        ])
+        committed = {"Z1": {"type": "support", "result": "old"}}
+        app.result_items = committed.copy()
+        messages = []
+        app.validate_data = lambda: True
+        app.show_result = messages.append
+        app._ensure_solver_input_builders = lambda: (SupportInputBuilder(), None)
+
+        selection = SimpleNamespace(open=lambda: "Z1")
+        with (
+            patch("main.ZoningSelectionDialog", return_value=selection),
+            patch("main.SupportSolverDialog") as dialog,
+        ):
+            app._open_support_solver()
+
+        dialog.assert_not_called()
+        self.assertEqual(app.result_items, committed)
+        self.assertTrue(any("Zoning 幾何驗證失敗" in message for message in messages))
+        self.assertTrue(any("未進入 Phase 2" in message for message in messages))
+        self.assertTrue(any("方向差" in message for message in messages))
 
     def test_stale_binding_does_not_block_current_project_export(self):
         app = self.make_app()

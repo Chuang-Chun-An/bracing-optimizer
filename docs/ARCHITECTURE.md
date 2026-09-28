@@ -179,10 +179,48 @@ DXF Models / Geometry
 - `preview.py`、`controllers.py`：顯示、selection 與 preview interaction。
 - `review_workflow.py`：一個 live DXF Review session 的 Application workflow。
 - `importer.py`：DXF reader 與 recognition pipeline adapter。
-- `recognition.py`、`validation.py`：辨識與驗證。
+- `recognition.py`、`joist_recognition.py`、`validation.py`：辨識與驗證；
+  `joist_recognition.py` 是不依賴 Importer mutable state 的 BIM Joist pure service。
 - `candidate_points.py`、`support_pairing.py`：工程 review operations。
 - `source_exclusion.py`、`review_confirmation.py`：Review decision persistence。
+- `corner_brace_repair.py`：STEP4 CornerBrace repair 的 pure WCS planning、reference eligibility、hard filtering 與 staged derived rebuild；automatic recognition 不依賴此模組。
 - `models.py`、`geometry.py`：DXF models 與幾何操作。
+
+DXF 構件辨識的長期 stage dependency order 為：
+
+```text
+Waler → Strut → Brace → CornerBrace → Column → Joist
+```
+
+箭頭表示 stage ordering 與所有已完成 upstream context 的可見方向，不表示
+每個 stage 只能依賴緊鄰的前一種構件，也不要求 recognizer 使用全部 upstream
+context。每個 stage 維持 `member source geometry + applicable immutable upstream
+engineering context → pure recognition outcome`；upstream context 可提供 span、
+boundary、connection 或 support evidence，但不得取代構件自身的 source geometry。
+downstream stage 不得反向修改 upstream source recognition truth，contact／endpoint／
+association adjustment 則屬於辨識後的 canonical relationship/finalization。
+
+Strut contextual recognition 由同一 root `INSERT` 的 WCS source geometry 與 immutable
+formal Waler context 建立結果。Transverse center authority 依完整來源證據分層：可獨立
+驗證的完整 topology boundary、whole-root component outer-envelope、最後才是 local
+fragmented rail-pair fallback。Topology node clustering 與後續 axis／width 計算使用同一
+endpoint tolerance 的 canonical nodes；branch／detail evidence 不得直接改寫 envelope。
+同軸候選先合併 center evidence，再獨立 reconcile 有效 component envelopes；中心唯一但
+外包絡不唯一時可保留 axis 並讓來源寬度保持 unknown。Waler context 只提供 longitudinal
+span／boundary evidence，不取代 Strut 自身的 transverse source geometry。
+
+目前 production 實作 `Waler → Strut` 與 Joist stage 所需的 upstream context：Importer
+先完成 Waler、Strut、Brace、CornerBrace、Column 的 recognition、exclusion、deduplication
+與必要 finalization，再把正式 finite Strut／Brace／Column station 凍結為 immutable
+`JoistContextSnapshot`。`joist_recognition.py` 只接收一個 Beam-role root source geometry
+與該 snapshot，輸出 single-axis、paired-axis、failed 或 ambiguous outcome，不回查
+Importer global state。Brace、CornerBrace、Column 未來若新增自己的 contextual recognition，
+仍須由各自 OpenSpec change 定義可使用的 upstream context，不得形成 circular dependency。
+
+可靠雙 C Joist root 可以產生兩個 runtime Beam，但共享同一 root provenance 與 assembly
+identity。Recognition 保留 source axes；direct crossing 或合格 Strut-face contact 只建立
+relationship point／station，不修改來源軸。配對 confirmation 與 source exclusion 以 root
+為原子範圍，兩個 Beam 仍各自具有可選取的 BM ID。
 
 Recognition core 不依賴 Dialog、Preview 或 Review Workflow。
 

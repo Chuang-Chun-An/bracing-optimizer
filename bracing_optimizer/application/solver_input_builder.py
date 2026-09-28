@@ -14,6 +14,13 @@ from typing import Mapping, Sequence
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.project_mapper import ProjectDomainMappingError
 from bracing_optimizer.algorithms import support
+from bracing_optimizer.domain.project_domain import Point, ProjectDomainModel, Strut
+from bracing_optimizer.domain.support_adjacency import (
+    SupportGeometryIssue,
+    build_axis_fact,
+    project_support_units,
+    validate_support_axes,
+)
 
 
 UNLIMITED_INVENTORY_QTY = 99
@@ -25,9 +32,44 @@ SUPPORT_STATION_DEDUP_TOLERANCE_MM = 1.0
 class SolverInputBuildError(ValueError):
     """Raised when project rows cannot form a valid Solver input."""
 
-    def __init__(self, issues: Sequence[str]):
+    def __init__(
+        self,
+        issues: Sequence[str],
+        *,
+        geometry_issues: Sequence[SupportGeometryIssue] = (),
+    ):
         self.issues = tuple(str(issue) for issue in issues if str(issue).strip())
+        self.geometry_issues = tuple(geometry_issues)
         super().__init__("\n".join(self.issues))
+
+    def to_diagnostics(self) -> dict[str, object]:
+        """Return JSON-safe, pre-Phase-2 validation diagnostics."""
+
+        return {
+            "solver_type": "support",
+            "search_status": "validation_failed",
+            "legal_solution_found": False,
+            "phase2_executed": False,
+            "validation_issues": [
+                {
+                    "code": issue.code,
+                    "zoning": issue.zoning,
+                    "member_ids": list(issue.member_ids),
+                    "unit_ids": list(issue.unit_ids),
+                    "actual_value": issue.actual_value,
+                    "tolerance": issue.tolerance,
+                }
+                for issue in self.geometry_issues
+            ],
+        }
+
+
+def format_support_input_build_error(error: SolverInputBuildError) -> str:
+    """Format Application validation without duplicating geometry rules."""
+
+    if error.geometry_issues:
+        return "Zoning 幾何驗證失敗（未進入 Phase 2）：\n" + str(error)
+    return str(error)
 
 
 @dataclass(frozen=True)
@@ -36,29 +78,15 @@ class SupportZoneInput:
 
     zoning: str
     configs: tuple[support.SupportConfig, ...]
+    adjacency_contract: "SupportAdjacencyContract | None" = None
 
     @property
     def units(self) -> tuple["SupportOptimizationUnit", ...]:
-        grouped: dict[str, list[support.SupportConfig]] = {}
-        order: list[str] = []
-        for config in self.configs:
-            group_id = str(config.shared_layout_group or "").strip()
-            unit_id = f"group:{group_id}" if group_id else f"single:{config.support_id}"
-            if unit_id not in grouped:
-                grouped[unit_id] = []
-                order.append(unit_id)
-            grouped[unit_id].append(config)
-        return tuple(
-            SupportOptimizationUnit(
-                unit_id=(
-                    unit_id.removeprefix("group:")
-                    if unit_id.startswith("group:")
-                    else grouped[unit_id][0].support_id
-                ),
-                configs=tuple(grouped[unit_id]),
-                require_shared_layout=unit_id.startswith("group:"),
-            )
-            for unit_id in order
+        if self.adjacency_contract is not None:
+            return self.adjacency_contract.ordered_units
+        raise SolverInputBuildError(
+            ("SupportZoneInput 缺少 geometry-based adjacency contract，"
+             "不得以 config input order 推導相鄰關係。",)
         )
 
 
@@ -69,6 +97,26 @@ class SupportOptimizationUnit:
     unit_id: str
     configs: tuple[support.SupportConfig, ...]
     require_shared_layout: bool = False
+    member_ids: tuple[str, ...] = ()
+    representative_position: tuple[float, float] | None = None
+    projection: float | None = None
+
+
+@dataclass(frozen=True)
+class SupportAdjacencyPair:
+    first_unit_id: str
+    second_unit_id: str
+
+
+@dataclass(frozen=True)
+class SupportAdjacencyContract:
+    """Transient geometry ordering consumed by Support Phase 2."""
+
+    zoning: str
+    common_direction: tuple[float, float]
+    row_direction: tuple[float, float]
+    ordered_units: tuple[SupportOptimizationUnit, ...]
+    pairs: tuple[SupportAdjacencyPair, ...]
 
 
 @dataclass(frozen=True)
@@ -258,9 +306,130 @@ class SupportInputBuilder:
         zoning: str,
     ) -> SupportZoneInput:
         normalized_zoning = str(zoning or "").strip()
+        try:
+            domain = project_data.to_domain(strict=True)
+        except ProjectDomainMappingError as exc:
+            raise SolverInputBuildError(exc.issues) from exc
+        zoning_struts = tuple(
+            strut for strut in domain.struts
+            if strut.zoning == normalized_zoning
+        )
+        missing_geometry = [
+            f"支撐 {strut.id or '<未命名>'} 缺少有效長度或完整座標"
+            for strut in zoning_struts
+            if strut.axis is None
+        ]
+        if missing_geometry:
+            raise SolverInputBuildError(missing_geometry)
+        geometry = validate_support_axes(
+            (
+                build_axis_fact(strut.id, strut.axis)
+                for strut in zoning_struts
+                if strut.axis is not None
+            ),
+            zoning=normalized_zoning,
+        )
+        if geometry.issues:
+            raise _geometry_build_error(geometry.issues)
+        contract = self._build_adjacency_contract(
+            domain,
+            zoning_struts,
+            normalized_zoning,
+            tuple(self._build_configs(project_data, normalized_zoning)),
+        )
         return SupportZoneInput(
             zoning=normalized_zoning,
-            configs=tuple(self._build_configs(project_data, normalized_zoning)),
+            configs=tuple(
+                config
+                for unit in contract.ordered_units
+                for config in unit.configs
+            ),
+            adjacency_contract=contract,
+        )
+
+    @staticmethod
+    def _build_adjacency_contract(
+        domain: ProjectDomainModel,
+        zoning_struts: Sequence[Strut],
+        zoning: str,
+        configs: Sequence[support.SupportConfig],
+    ) -> SupportAdjacencyContract:
+        axes = []
+        missing_geometry_issues = []
+        for strut in zoning_struts:
+            if strut.axis is None:
+                missing_geometry_issues.append(
+                    f"支撐 {strut.id or '<未命名>'} 缺少有效長度或完整座標"
+                )
+                continue
+            axes.append(build_axis_fact(strut.id, strut.axis))
+        if missing_geometry_issues:
+            raise SolverInputBuildError(missing_geometry_issues)
+
+        direction = validate_support_axes(axes, zoning=zoning)
+        if direction.issues:
+            raise _geometry_build_error(direction.issues)
+        if direction.common_direction is None or direction.row_direction is None:
+            raise SolverInputBuildError((f"分區 {zoning} 沒有可用的支撐幾何",))
+
+        configs_by_id = {config.support_id: config for config in configs}
+        axes_by_id = {fact.member_id: fact for fact in axes}
+        grouped_struts: dict[str, list[Strut]] = {}
+        for strut in zoning_struts:
+            group_id = str(strut.shared_layout_group or "").strip()
+            key = f"group:{group_id}" if group_id else f"support:{strut.id}"
+            grouped_struts.setdefault(key, []).append(strut)
+
+        draft_units = []
+        projection_inputs = []
+        for key, members in grouped_struts.items():
+            member_ids = tuple(sorted(member.id for member in members))
+            member_configs = tuple(configs_by_id[item] for item in member_ids)
+            midpoints = [axes_by_id[item].midpoint for item in member_ids]
+            representative = Point(
+                sum(point.x for point in midpoints) / len(midpoints),
+                sum(point.y for point in midpoints) / len(midpoints),
+            )
+            group_id = str(members[0].shared_layout_group or "").strip()
+            unit_id = group_id if group_id else members[0].id
+            draft_units.append((
+                key,
+                SupportOptimizationUnit(
+                    unit_id=unit_id,
+                    configs=member_configs,
+                    require_shared_layout=bool(group_id),
+                    member_ids=member_ids,
+                    representative_position=representative.as_tuple(),
+                ),
+            ))
+            projection_inputs.append((key, member_ids, representative))
+
+        projection = project_support_units(
+            projection_inputs,
+            direction.row_direction,
+            zoning=zoning,
+        )
+        if projection.issues:
+            raise _geometry_build_error(projection.issues)
+
+        unit_by_key = dict(draft_units)
+        ordered_units = tuple(
+            replace(
+                unit_by_key[fact.unit_id],
+                projection=fact.projection,
+            )
+            for fact in projection.projections
+        )
+        pairs = tuple(
+            SupportAdjacencyPair(first.unit_id, second.unit_id)
+            for first, second in zip(ordered_units, ordered_units[1:])
+        )
+        return SupportAdjacencyContract(
+            zoning=zoning,
+            common_direction=direction.common_direction,
+            row_direction=direction.row_direction,
+            ordered_units=ordered_units,
+            pairs=pairs,
         )
 
     def build_all(self, project_data: ProjectDataModel) -> tuple[support.SupportConfig, ...]:
@@ -495,6 +664,9 @@ class WalerInputBuilder:
 __all__ = [
     "InventoryLookup",
     "SolverInputBuildError",
+    "format_support_input_build_error",
+    "SupportAdjacencyContract",
+    "SupportAdjacencyPair",
     "SupportOptimizationUnit",
     "SupportInputBuilder",
     "SupportZoneInput",
@@ -506,3 +678,33 @@ __all__ = [
     "project_point_onto_segment",
     "to_number",
 ]
+
+
+def _geometry_build_error(
+    geometry_issues: Sequence[SupportGeometryIssue],
+) -> SolverInputBuildError:
+    messages = []
+    for issue in geometry_issues:
+        members = "、".join(issue.member_ids) or "<未知支撐>"
+        if issue.code == "ZONING_ZERO_LENGTH_AXIS":
+            message = f"分區 {issue.zoning} 的支撐 {members} 軸線長度為零"
+        elif issue.code == "ZONING_ANGLE_OUT_OF_TOLERANCE":
+            message = (
+                f"分區 {issue.zoning} 的支撐 {members} 方向差 "
+                f"{issue.actual_value:.3f}°，超過 {issue.tolerance:g}°"
+            )
+        elif issue.code == "ZONING_LENGTH_OUT_OF_TOLERANCE":
+            message = (
+                f"分區 {issue.zoning} 的支撐 {members} 長度差 "
+                f"{issue.actual_value:.3f} mm，超過 {issue.tolerance:g} mm"
+            )
+        elif issue.code == "ZONING_PROJECTION_TIE":
+            units = "、".join(issue.unit_ids)
+            message = (
+                f"分區 {issue.zoning} 的支撐單元 {units} 橫向位置差 "
+                f"{issue.actual_value:.3f} mm，不大於 {issue.tolerance:g} mm"
+            )
+        else:
+            message = f"分區 {issue.zoning} 幾何無效：{issue.code}（{members}）"
+        messages.append(message)
+    return SolverInputBuildError(messages, geometry_issues=geometry_issues)

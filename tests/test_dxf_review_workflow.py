@@ -5,12 +5,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import ezdxf
 
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.project_service import (
+    PausedReviewRelinkRequest,
+    PausedReviewRelinkStatus,
+)
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
     DxfCompatibilityChecker,
@@ -23,6 +27,7 @@ from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
 )
+from dxf_import.importer import DXFImporter
 from dxf_import.models import (
     CoordinateSystem,
     DXFImportError,
@@ -166,6 +171,97 @@ class DxfReviewWorkflowTests(unittest.TestCase):
             result=result,
             world_result=result,
         )
+
+    def test_brace_axis_extension_rebuilds_across_exclusion_restore_and_resume(self):
+        source = self.root / "brace-extension.dxf"
+        document = ezdxf.new("R2018")
+        document.layers.add("WALER")
+        document.layers.add("STRUT")
+        document.layers.add("BRACE")
+        model = document.modelspace()
+        model.add_line((0.0, -500.0), (0.0, 500.0), dxfattribs={"layer": "WALER"})
+        model.add_line((2000.0, -500.0), (2000.0, 500.0), dxfattribs={"layer": "WALER"})
+        model.add_line((500.0, 0.0), (1500.0, 0.0), dxfattribs={"layer": "BRACE"})
+        document.saveas(source)
+        roles = {"WALER": "waler", "STRUT": "strut", "BRACE": "brace"}
+
+        importer = DXFImporter(source).read()
+        workflow = DXFReviewWorkflow(importer, source)
+        workflow.recognize(roles)
+        self.assertIsNotNone(workflow.world_result)
+        brace = workflow.world_result.braces[0]
+        self.assertEqual((brace.start, brace.end), ((0.0, 0.0), (2000.0, 0.0)))
+        self.assertEqual((brace.from_waler, brace.to_waler), ("W1", "W2"))
+        self.assertEqual(
+            sum(
+                message.code == "BRACE_AXIS_EXTENDED_TO_WALER"
+                for message in workflow.world_result.messages
+            ),
+            2,
+        )
+
+        brace_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "brace" and item.member_id == brace.id
+        )
+        self.assertTrue(workflow.confirm(brace_item))
+        self.assertTrue(workflow.is_review_item_confirmed(brace_item))
+
+        first_waler_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "waler" and item.member_id == "W1"
+        )
+        exclusion_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            first_waler_item
+        )
+        self.assertFalse(restoring)
+        workflow.commit_source_exclusion_plan(exclusion_plan)
+        excluded_brace = workflow.world_result.braces[0]
+        self.assertTrue(bool(excluded_brace.from_waler) ^ bool(excluded_brace.to_waler))
+        active_waler_ids = {member.id for member in workflow.world_result.walers}
+        self.assertTrue(
+            {excluded_brace.from_waler, excluded_brace.to_waler} - {""}
+            <= active_waler_ids
+        )
+        self.assertFalse(workflow.is_review_item_confirmed(brace_item))
+
+        excluded_waler_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "waler" and item.status == "excluded"
+        )
+        restore_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            excluded_waler_item
+        )
+        self.assertTrue(restoring)
+        workflow.commit_source_exclusion_plan(restore_plan)
+        restored_brace = workflow.world_result.braces[0]
+        self.assertEqual(
+            (restored_brace.from_waler, restored_brace.to_waler),
+            ("W1", "W2"),
+        )
+
+        state = workflow.serialize_review_state(layer_roles=roles)
+        resumed_importer = DXFImporter(source).read()
+        resumed = DXFReviewWorkflow(
+            resumed_importer,
+            source,
+            initial_state=state,
+            resume_review=True,
+        )
+        resumed.recognize(roles)
+        resumed_brace = resumed.world_result.braces[0]
+        self.assertEqual(
+            (resumed_brace.start, resumed_brace.end),
+            ((0.0, 0.0), (2000.0, 0.0)),
+        )
+        self.assertEqual(
+            (resumed_brace.from_waler, resumed_brace.to_waler),
+            ("W1", "W2"),
+        )
+        self.assertNotIn("brace_waler_connections", state)
 
     def test_explicit_workflow_is_one_way(self):
         app = self.app()
@@ -406,6 +502,74 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(resume_source, saved_path.parent / "source" / "source.dxf")
 
+    def test_compatible_recovery_save_load_keeps_schema_and_defers_managed_copy(self):
+        candidate = create_dxf(self.root / "recovered-source.dxf", offset=5000)
+        app = self.app()
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        original = review_state(self.source)
+        recovered = review_state(
+            candidate,
+            review_state_version=2,
+            validation_messages=[{
+                "severity": "warning",
+                "code": "RECOVERY_REVIEW_REQUIRED",
+            }],
+        )
+        app.dxf_last_import_debug = original
+        app.dxf_review_session = {
+            "source_fingerprint": original["source_fingerprint"],
+            "world_result": empty_result(self.source),
+        }
+        recovery_summary = object()
+        result = SimpleNamespace(
+            accepted=True,
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            relinked_state=recovered,
+            dxf_status_report=DxfAssetManager().accepted_relink_report(
+                candidate,
+                summary="recovered",
+            ),
+            workflow_status=DxfWorkflowStatus.REVIEW,
+            dirty_reason="recovered",
+            recovery_summary=recovery_summary,
+            candidate_world_result=empty_result(candidate),
+        )
+        managed_path = (
+            app.project_cases_dir / "recovered" / "source" / "source.dxf"
+        )
+
+        app._adopt_paused_review_relink(result)
+
+        self.assertFalse(managed_path.exists())
+        self.assertIs(app.last_dxf_recovery_summary, recovery_summary)
+
+        saved_path = app.save_project_case("recovered")
+        saved = json.loads(saved_path.read_text(encoding="utf-8"))
+        loaded = self.app()
+        loaded.load_project_case("recovered", silent=True)
+
+        self.assertTrue(managed_path.is_file())
+        self.assertEqual(
+            source_file_fingerprint(managed_path),
+            source_file_fingerprint(candidate),
+        )
+        self.assertEqual(saved["schema_version"], 3)
+        self.assertEqual(
+            saved["dxf_import_state"]["review_state_version"],
+            2,
+        )
+        self.assertNotIn("recovery_summary", saved["dxf_import_state"])
+        self.assertNotIn("recovery_plan", saved["dxf_import_state"])
+        self.assertEqual(
+            loaded._current_dxf_workflow_status(),
+            DxfWorkflowStatus.REVIEW,
+        )
+        self.assertEqual(
+            loaded.dxf_last_import_debug["source_fingerprint"],
+            recovered["source_fingerprint"],
+        )
+        self.assertIsNone(loaded.last_dxf_recovery_summary)
+
     def test_same_sha_different_path_can_resume(self):
         copied = self.root / "renamed.dxf"
         shutil.copy2(self.source, copied)
@@ -417,6 +581,407 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         source, _fingerprint = app._review_resume_source()
 
         self.assertEqual(source, copied)
+
+    def test_relink_routes_review_and_non_review_to_separate_workflows(self):
+        review_app = self.app()
+        review_app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        review_app._relink_paused_dxf_review = Mock(return_value="review")
+
+        self.assertEqual(review_app._relink_dxf(), "review")
+        review_app._relink_paused_dxf_review.assert_called_once_with()
+
+        completed_app = self.app()
+        completed_app.dxf_workflow_status = DxfWorkflowStatus.COMPLETED
+        completed_app._relink_paused_dxf_review = Mock()
+        with patch("main.filedialog.askopenfilename", return_value="") as picker:
+            self.assertIsNone(completed_app._relink_dxf())
+
+        picker.assert_called_once()
+        completed_app._relink_paused_dxf_review.assert_not_called()
+
+    def test_paused_review_exact_relink_preserves_state_and_resumes(self):
+        candidate = self.root / "renamed.dxf"
+        shutil.copy2(self.source, candidate)
+        app = self.app()
+        result = empty_result(self.source)
+        state = review_state(
+            self.source,
+            excluded_sources=[{"role": "beam", "source_handles": ["6EF"]}],
+            review_confirmations={"strut:HS": "ABC123"},
+        )
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = copy.deepcopy(state)
+        app.dxf_review_session = {
+            "source_fingerprint": state["source_fingerprint"],
+            "world_result": result,
+        }
+        app.dxf_asset_status_report = DxfAssetManager().runtime_report(self.source)
+        app.solver_memory["kept"] = object()
+        app.support_candidate_cache["kept"] = object()
+        before_project = app.project_data.to_case_data()
+        before_project_results = app._project_results
+        before_solver = dict(app.solver_memory)
+        before_support_cache = dict(app.support_candidate_cache)
+        captured = {}
+
+        class Dialog:
+            def __init__(self, *_args, **kwargs):
+                captured.update(kwargs)
+
+            def show(self):
+                return DXFImportDialogOutcome(
+                    "pause",
+                    copy.deepcopy(app.dxf_last_import_debug),
+                    "replace",
+                    result,
+                    result,
+                )
+
+        with patch("main.filedialog.askopenfilename", return_value=str(candidate)):
+            with patch("main.messagebox.askretrycancel") as retry:
+                with patch("main.messagebox.askyesno") as confirmation:
+                    with patch("main.DXFImportDialog", Dialog):
+                        action = app._relink_dxf()
+
+        self.assertEqual(action, "pause")
+        retry.assert_not_called()
+        confirmation.assert_not_called()
+        self.assertEqual(
+            app.dxf_last_import_debug["source_path"],
+            str(candidate.resolve()),
+        )
+        self.assertEqual(
+            app.dxf_last_import_debug["excluded_sources"],
+            state["excluded_sources"],
+        )
+        self.assertEqual(
+            app.dxf_last_import_debug["review_confirmations"],
+            state["review_confirmations"],
+        )
+        self.assertIs(captured["initial_world_result"], result)
+        self.assertTrue(captured["resume_review"])
+        self.assertEqual(
+            app._current_dxf_workflow_status(),
+            DxfWorkflowStatus.REVIEW,
+        )
+        self.assertEqual(app.project_data.to_case_data(), before_project)
+        self.assertIs(app._project_results, before_project_results)
+        self.assertEqual(app.solver_memory, before_solver)
+        self.assertEqual(app.support_candidate_cache, before_support_cache)
+        self.assertTrue(app.project_dirty)
+
+    def test_paused_review_relink_file_picker_cancel_is_no_op(self):
+        app = self.app()
+        state = review_state(self.source)
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.project_dirty = False
+        app._ensure_project_service = Mock()
+
+        with patch("main.filedialog.askopenfilename", return_value=""):
+            result = app._relink_dxf()
+
+        self.assertIsNone(result)
+        app._ensure_project_service.assert_not_called()
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertFalse(app.project_dirty)
+
+    def test_paused_review_compatible_recovery_reject_is_no_op(self):
+        candidate = create_dxf(self.root / "changed.dxf", offset=5000)
+        app = self.app()
+        state = review_state(self.source)
+        session = {
+            "source_fingerprint": state["source_fingerprint"],
+            "world_result": empty_result(self.source),
+        }
+        report = DxfAssetManager().runtime_report(self.source)
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_review_session = session
+        app.dxf_asset_status_report = report
+        app.last_dxf_recovery_summary = None
+        app.project_dirty = False
+        summary = object()
+        service = Mock()
+        service.evaluate_paused_review_relink.return_value = SimpleNamespace(
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            plan=object(),
+            summary="compatible",
+            detail_lines=(),
+            recovery_summary=summary,
+        )
+        app._ensure_project_service = Mock(return_value=service)
+
+        with patch("main.filedialog.askopenfilename", return_value=str(candidate)):
+            with patch("main.confirm_review_recovery", return_value=False) as confirm:
+                result = app._relink_paused_dxf_review()
+
+        self.assertIsNone(result)
+        confirm.assert_called_once_with(None, summary)
+        service.commit_paused_review_relink.assert_not_called()
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertIs(app.dxf_review_session, session)
+        self.assertIs(app.dxf_asset_status_report, report)
+        self.assertFalse(app.project_dirty)
+
+    def test_paused_review_compatible_recovery_accepts_and_resumes(self):
+        candidate = create_dxf(self.root / "changed.dxf", offset=5000)
+        app = self.app()
+        state = review_state(self.source)
+        recovered = copy.deepcopy(state)
+        recovered["source_path"] = str(candidate.resolve())
+        recovered["source_fingerprint"] = source_file_fingerprint(candidate)
+        candidate_world = empty_result(candidate)
+        report = DxfAssetManager().runtime_report(candidate)
+        recovery_summary = object()
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_review_session = {
+            "source_fingerprint": state["source_fingerprint"],
+            "world_result": empty_result(self.source),
+        }
+        app.last_dxf_recovery_summary = None
+        app.project_dirty = False
+        before_project = app.project_data.to_case_data()
+        service = Mock()
+        plan = object()
+        service.evaluate_paused_review_relink.return_value = SimpleNamespace(
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            plan=plan,
+            summary="compatible",
+            detail_lines=(),
+            recovery_summary=recovery_summary,
+        )
+        service.commit_paused_review_relink.return_value = SimpleNamespace(
+            accepted=True,
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            relinked_state=recovered,
+            dxf_status_report=report,
+            workflow_status=DxfWorkflowStatus.REVIEW,
+            dirty_reason="recovered",
+            recovery_summary=recovery_summary,
+            candidate_world_result=candidate_world,
+        )
+        app._ensure_project_service = Mock(return_value=service)
+        captured = {}
+
+        class Dialog:
+            def __init__(self, *_args, **kwargs):
+                captured.update(kwargs)
+
+            def show(self):
+                return DXFImportDialogOutcome(
+                    "pause",
+                    copy.deepcopy(recovered),
+                    "replace",
+                    candidate_world,
+                    candidate_world,
+                )
+
+        with patch("main.filedialog.askopenfilename", return_value=str(candidate)):
+            with patch("main.confirm_review_recovery", return_value=True):
+                with patch("main.DXFImportDialog", Dialog):
+                    result = app._relink_paused_dxf_review()
+
+        self.assertEqual(result, "pause")
+        service.commit_paused_review_relink.assert_called_once_with(
+            plan,
+            current_saved_state=state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+        self.assertEqual(app.dxf_last_import_debug, recovered)
+        self.assertIs(
+            app.dxf_review_session["world_result"],
+            candidate_world,
+        )
+        self.assertEqual(
+            app.dxf_review_session["source_fingerprint"],
+            recovered["source_fingerprint"],
+        )
+        self.assertIs(app.last_dxf_recovery_summary, recovery_summary)
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(app.project_data.to_case_data(), before_project)
+        self.assertIs(captured["initial_world_result"], candidate_world)
+        self.assertTrue(captured["resume_review"])
+
+    def test_paused_review_content_mismatch_retries_from_original_state(self):
+        first = create_dxf(self.root / "changed-1.dxf", offset=5000)
+        second = create_dxf(self.root / "changed-2.dxf", offset=9000)
+        app = self.app()
+        state = review_state(self.source)
+        session = {"source_fingerprint": state["source_fingerprint"], "world_result": None}
+        report = DxfAssetManager().runtime_report(self.source)
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_review_session = session
+        app.dxf_asset_status_report = report
+        app.project_dirty = False
+        before_project = app.project_data.to_case_data()
+
+        with patch(
+            "main.filedialog.askopenfilename",
+            side_effect=(str(first), str(second), ""),
+        ):
+            with patch(
+                "main.messagebox.askretrycancel",
+                side_effect=(True, True),
+            ) as retry:
+                result = app._relink_dxf()
+
+        self.assertIsNone(result)
+        self.assertEqual(retry.call_count, 2)
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertIs(app.dxf_review_session, session)
+        self.assertIs(app.dxf_asset_status_report, report)
+        self.assertFalse(app.project_dirty)
+        self.assertEqual(app.project_data.to_case_data(), before_project)
+
+    def test_paused_review_validation_failure_preserves_original_state(self):
+        invalid = self.root / "invalid.dxf"
+        invalid.write_text("not a dxf", encoding="utf-8")
+        app = self.app()
+        state = review_state(self.source)
+        session = {
+            "source_fingerprint": state["source_fingerprint"],
+            "world_result": empty_result(self.source),
+        }
+        report = DxfAssetManager().runtime_report(self.source)
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_review_session = session
+        app.dxf_asset_status_report = report
+        app.project_dirty = False
+
+        with patch("main.filedialog.askopenfilename", return_value=str(invalid)):
+            with patch("main.messagebox.askretrycancel", return_value=False):
+                result = app._relink_dxf()
+
+        self.assertIsNone(result)
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertIs(app.dxf_review_session, session)
+        self.assertIs(app.dxf_asset_status_report, report)
+        self.assertFalse(app.project_dirty)
+        self.assertEqual(
+            app._current_dxf_workflow_status(),
+            DxfWorkflowStatus.REVIEW,
+        )
+
+    def test_missing_resume_source_offers_paused_review_relink(self):
+        app = self.app()
+        state = review_state(
+            self.source,
+            source_path=str(self.root / "missing.dxf"),
+        )
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_asset_status_report = None
+        app._relink_paused_dxf_review = Mock(return_value="pause")
+
+        with patch("main.messagebox.askretrycancel", return_value=True) as retry:
+            result = app._continue_dxf_import()
+
+        self.assertEqual(result, "pause")
+        retry.assert_called_once()
+        app._relink_paused_dxf_review.assert_called_once_with()
+
+    def test_paused_review_relink_adoption_failure_rolls_back(self):
+        candidate = self.root / "candidate.dxf"
+        shutil.copy2(self.source, candidate)
+        app = self.app()
+        state = review_state(self.source)
+        report = DxfAssetManager().runtime_report(self.source)
+        compatibility = object()
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_asset_status_report = report
+        app.last_dxf_compatibility_report = compatibility
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        service = app._ensure_project_service()
+        evaluation = service.evaluate_paused_review_relink(
+            PausedReviewRelinkRequest(
+                candidate_path=candidate,
+                saved_state=state,
+                workflow_status=DxfWorkflowStatus.REVIEW,
+            )
+        )
+        committed = service.commit_paused_review_relink(
+            evaluation.plan,
+            current_saved_state=state,
+            current_workflow_status=DxfWorkflowStatus.REVIEW,
+        )
+        refresh_calls = 0
+
+        def fail_once():
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                raise RuntimeError("refresh failed")
+
+        app._refresh_project_status_display = fail_once
+
+        with self.assertRaises(RuntimeError):
+            app._adopt_paused_review_relink(committed)
+
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertIs(app.dxf_asset_status_report, report)
+        self.assertIs(app.last_dxf_compatibility_report, compatibility)
+        self.assertFalse(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "")
+
+    def test_compatible_recovery_adoption_failure_rolls_back_entire_truth_set(self):
+        candidate = create_dxf(self.root / "candidate-changed.dxf", offset=5000)
+        app = self.app()
+        state = review_state(self.source)
+        old_world = empty_result(self.source)
+        old_session = {
+            "source_fingerprint": state["source_fingerprint"],
+            "world_result": old_world,
+        }
+        old_report = DxfAssetManager().runtime_report(self.source)
+        old_compatibility = object()
+        old_recovery = object()
+        app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
+        app.dxf_last_import_debug = state
+        app.dxf_review_session = old_session
+        app.dxf_asset_status_report = old_report
+        app.last_dxf_compatibility_report = old_compatibility
+        app.last_dxf_recovery_summary = old_recovery
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        recovered = copy.deepcopy(state)
+        recovered["source_path"] = str(candidate.resolve())
+        recovered["source_fingerprint"] = source_file_fingerprint(candidate)
+        result = SimpleNamespace(
+            accepted=True,
+            status=PausedReviewRelinkStatus.COMPATIBLE_RECOVERY_AVAILABLE,
+            relinked_state=recovered,
+            dxf_status_report=DxfAssetManager().runtime_report(candidate),
+            workflow_status=DxfWorkflowStatus.REVIEW,
+            dirty_reason="recovered",
+            recovery_summary=object(),
+            candidate_world_result=empty_result(candidate),
+        )
+        refresh_calls = 0
+
+        def fail_once():
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                raise RuntimeError("refresh failed")
+
+        app._refresh_project_status_display = fail_once
+
+        with self.assertRaises(RuntimeError):
+            app._adopt_paused_review_relink(result)
+
+        self.assertIs(app.dxf_last_import_debug, state)
+        self.assertIs(app.dxf_review_session, old_session)
+        self.assertIs(app.dxf_asset_status_report, old_report)
+        self.assertIs(app.last_dxf_compatibility_report, old_compatibility)
+        self.assertIs(app.last_dxf_recovery_summary, old_recovery)
+        self.assertFalse(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "")
 
     def test_same_name_different_bytes_rejects_resume(self):
         state = review_state(self.source)

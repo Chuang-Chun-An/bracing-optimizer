@@ -136,6 +136,48 @@ class GlobalSolution:
     search_diagnostics: Dict[str, object] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class SupportUnitCandidate:
+    """One Phase 2 choice for one geometry-defined adjacency unit."""
+
+    unit_id: str
+    member_ids: Tuple[str, ...]
+    plans: Tuple[SupportPlan, ...]
+    jack_center: float
+    jack_region_id: int
+    shared_layout_group: str = ""
+
+
+@dataclass(frozen=True)
+class SupportUnitPairEvaluation:
+    first_unit_id: str
+    second_unit_id: str
+    distance: float
+    valid: bool
+    region_difference: int
+    region_penalty: float
+
+
+class SupportUnitAssemblyError(ValueError):
+    """Raised when physical Phase 1 candidates cannot form one unit fact."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        unit_id: str,
+        member_ids: Tuple[str, ...],
+        jack_centers: Tuple[float, ...] = (),
+    ) -> None:
+        self.code = str(code)
+        self.unit_id = str(unit_id)
+        self.member_ids = tuple(member_ids)
+        self.jack_centers = tuple(float(value) for value in jack_centers)
+        super().__init__(
+            f"{self.code}: {self.unit_id} ({', '.join(self.member_ids)})"
+        )
+
+
 # =========================================================
 # 基本參數
 # =========================================================
@@ -174,6 +216,7 @@ SUPPORT_JOINT_PENALTY_WEIGHT = 1200
 SUPPORT_GAP_PENALTY_WEIGHT = 20
 SUPPORT_JACK_EDGE_CLEARANCE = 2500
 SUPPORT_JACK_EDGE_PENALTY = 5000
+SUPPORT_JACK_REGION_PENALTY_WEIGHT = 3000
 SUPPORT_INVALID_BASE_PENALTY = 1_000_000
 SUPPORT_INVALID_FORBIDDEN_JOINT_WEIGHT = 100_000
 SUPPORT_INVALID_GAP_WEIGHT = 1000
@@ -678,6 +721,114 @@ def shared_layout_groups_valid(plans: List[SupportPlan]) -> bool:
             return False
         signatures[group_id] = signature
     return all(count == 2 for count in member_counts.values())
+
+
+def assemble_support_unit_candidates(
+    unit_id: str,
+    candidates_by_member: Dict[str, List[SupportPlan]],
+    *,
+    require_shared_layout: bool,
+) -> List[SupportUnitCandidate]:
+    """Assemble physical Phase 1 plans without pruning shared signatures."""
+
+    member_ids = tuple(sorted(str(item) for item in candidates_by_member))
+    if not member_ids:
+        return []
+    if require_shared_layout and len(member_ids) != 2:
+        raise SupportUnitAssemblyError(
+            "SHARED_LAYOUT_MEMBER_COUNT_INVALID",
+            unit_id=unit_id,
+            member_ids=member_ids,
+        )
+    if not require_shared_layout and len(member_ids) != 1:
+        raise SupportUnitAssemblyError(
+            "SUPPORT_UNIT_MEMBER_COUNT_INVALID",
+            unit_id=unit_id,
+            member_ids=member_ids,
+        )
+
+    indexed: Dict[
+        str,
+        Dict[Tuple[Tuple[str, int], ...], SupportPlan],
+    ] = {}
+    for member_id in member_ids:
+        by_signature = {}
+        for plan in candidates_by_member[member_id]:
+            signature = shared_layout_signature(plan)
+            if signature in by_signature:
+                raise SupportUnitAssemblyError(
+                    "PHASE1_SHARED_SIGNATURE_NOT_UNIQUE",
+                    unit_id=unit_id,
+                    member_ids=(member_id,),
+                )
+            by_signature[signature] = plan
+        indexed[member_id] = by_signature
+
+    if not require_shared_layout:
+        member_id = member_ids[0]
+        return [
+            SupportUnitCandidate(
+                unit_id=str(unit_id),
+                member_ids=(member_id,),
+                plans=(plan,),
+                jack_center=float(plan.jack_center),
+                jack_region_id=int(plan.jack_region_id),
+            )
+            for plan in candidates_by_member[member_id]
+        ]
+
+    common_signatures = set(indexed[member_ids[0]])
+    for member_id in member_ids[1:]:
+        common_signatures.intersection_update(indexed[member_id])
+
+    assembled = []
+    for signature in sorted(common_signatures):
+        plans = tuple(indexed[member_id][signature] for member_id in member_ids)
+        jack_centers = tuple(float(plan.jack_center) for plan in plans)
+        if not all(
+            math.isclose(
+                jack_centers[0],
+                value,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            for value in jack_centers[1:]
+        ):
+            raise SupportUnitAssemblyError(
+                "SHARED_JACK_INVARIANT_VIOLATION",
+                unit_id=unit_id,
+                member_ids=member_ids,
+                jack_centers=jack_centers,
+            )
+        merged_pile_centers = sorted({
+            int(round(value))
+            for plan in plans
+            for value in getattr(plan, "pile_centers", []) or []
+        })
+        group_ids = {
+            str(getattr(plan, "shared_layout_group", "") or "").strip()
+            for plan in plans
+        }
+        group_ids.discard("")
+        if len(group_ids) != 1:
+            raise SupportUnitAssemblyError(
+                "SHARED_LAYOUT_GROUP_ID_MISMATCH",
+                unit_id=unit_id,
+                member_ids=member_ids,
+            )
+        shared_jack_center = jack_centers[0]
+        assembled.append(SupportUnitCandidate(
+            unit_id=str(unit_id),
+            member_ids=member_ids,
+            plans=plans,
+            jack_center=shared_jack_center,
+            jack_region_id=get_jack_region_id(
+                shared_jack_center,
+                merged_pile_centers,
+            ),
+            shared_layout_group=next(iter(group_ids)),
+        ))
+    return assembled
 
 
 def jack_shim_order_signature(plan: SupportPlan) -> Tuple[Tuple[int, str, int], ...]:
@@ -2334,21 +2485,26 @@ def summarize_global_solution_scores(
     material_ratio_weight: float = SUPPORT_MATERIAL_RATIO_WEIGHT,
     material_concentration_threshold: float = SUPPORT_MATERIAL_CONCENTRATION_THRESHOLD,
     material_concentration_weight: float = SUPPORT_MATERIAL_CONCENTRATION_WEIGHT,
+    unit_candidates: Optional[List[SupportUnitCandidate]] = None,
 ) -> Dict[str, object]:
     single_score_total = sum(float(getattr(plan, "score", 0.0) or 0.0) for plan in plans)
     jack_region_penalty = 0.0
     min_jack_distance: Optional[float] = None
     valid_pairs = True
-    for prev_plan, curr_plan in zip(plans, plans[1:]):
-        if plans_share_layout_group(prev_plan, curr_plan):
-            continue
-        distance = abs(float(getattr(prev_plan, "jack_center", 0.0) or 0.0) - float(getattr(curr_plan, "jack_center", 0.0) or 0.0))
-        min_jack_distance = distance if min_jack_distance is None else min(min_jack_distance, distance)
-        ok, penalty = pair_penalty(prev_plan, curr_plan)
-        if not ok:
+    units = list(unit_candidates or _legacy_units_from_plans(plans))
+    pair_evaluations = []
+    for previous, current in zip(units, units[1:]):
+        evaluation = evaluate_support_unit_pair(previous, current)
+        pair_evaluations.append(evaluation)
+        min_jack_distance = (
+            evaluation.distance
+            if min_jack_distance is None
+            else min(min_jack_distance, evaluation.distance)
+        )
+        if not evaluation.valid:
             valid_pairs = False
         else:
-            jack_region_penalty += float(penalty)
+            jack_region_penalty += float(evaluation.region_penalty)
 
     material_ratio_analysis = calculate_material_ratio_analysis(
         plans,
@@ -2380,6 +2536,7 @@ def summarize_global_solution_scores(
         "material_concentration_threshold": float(material_concentration_analysis["threshold"]),
         "material_concentration_weight": float(material_concentration_analysis["weight"]),
         "min_jack_distance": min_jack_distance,
+        "pair_evaluations": pair_evaluations,
         "total_score": total_score,
         "valid_pairs": valid_pairs,
     }
@@ -2394,6 +2551,7 @@ def make_global_solution(
     material_concentration_weight: float = SUPPORT_MATERIAL_CONCENTRATION_WEIGHT,
     valid: Optional[bool] = None,
     reason: str = "",
+    unit_candidates: Optional[List[SupportUnitCandidate]] = None,
 ) -> GlobalSolution:
     score_summary = summarize_global_solution_scores(
         plans,
@@ -2401,6 +2559,7 @@ def make_global_solution(
         material_ratio_weight=material_ratio_weight,
         material_concentration_threshold=material_concentration_threshold,
         material_concentration_weight=material_concentration_weight,
+        unit_candidates=unit_candidates,
     )
     solution_valid = (
         all(plan.valid and not plan.reason for plan in plans)
@@ -2617,27 +2776,191 @@ def global_solution_result_summary(solution: GlobalSolution) -> Dict[str, object
     }
 
 
+def evaluate_support_unit_pair(
+    previous: SupportUnitCandidate,
+    current: SupportUnitCandidate,
+) -> SupportUnitPairEvaluation:
+    """Apply the one shared spacing/region rule to one external boundary."""
+
+    distance = abs(float(previous.jack_center) - float(current.jack_center))
+    valid = distance >= MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+    region_difference = abs(
+        int(previous.jack_region_id) - int(current.jack_region_id)
+    )
+    region_penalty = (
+        float(SUPPORT_JACK_REGION_PENALTY_WEIGHT * region_difference)
+        if valid
+        else 0.0
+    )
+    return SupportUnitPairEvaluation(
+        first_unit_id=previous.unit_id,
+        second_unit_id=current.unit_id,
+        distance=distance,
+        valid=valid,
+        region_difference=region_difference,
+        region_penalty=region_penalty,
+    )
+
+
 def pair_penalty(prev: SupportPlan, curr: SupportPlan) -> Tuple[bool, float]:
-    """
-    回傳：
-    - 是否符合相鄰 jack 間距硬限制
-    - pair 軟限制懲罰
-    """
+    """Backward-compatible physical-plan adapter for a normal-unit pair."""
+
     if plans_share_layout_group(prev, curr):
         return True, 0.0
+    evaluation = evaluate_support_unit_pair(
+        _normal_unit_from_plan(prev),
+        _normal_unit_from_plan(curr),
+    )
+    return evaluation.valid, (
+        evaluation.region_penalty if evaluation.valid else 1_000_000
+    )
 
-    distance = abs(prev.jack_center - curr.jack_center)
 
-    if distance < MIN_JACK_DISTANCE_BETWEEN_SUPPORTS:
-        return False, 1_000_000
+def _normal_unit_from_plan(plan: SupportPlan) -> SupportUnitCandidate:
+    return SupportUnitCandidate(
+        unit_id=str(plan.support_id),
+        member_ids=(str(plan.support_id),),
+        plans=(plan,),
+        jack_center=float(plan.jack_center),
+        jack_region_id=int(plan.jack_region_id),
+        shared_layout_group=str(
+            getattr(plan, "shared_layout_group", "") or ""
+        ).strip(),
+    )
 
-    penalty = 0.0
 
-    # 儘量讓 jack 在相同 region
-    if prev.jack_region_id != curr.jack_region_id:
-        penalty += 3000 * abs(prev.jack_region_id - curr.jack_region_id)
+def _legacy_units_from_plans(
+    plans: List[SupportPlan],
+) -> List[SupportUnitCandidate]:
+    """Compatibility adapter; production solving supplies explicit units."""
 
-    return True, penalty
+    units = []
+    index = 0
+    while index < len(plans):
+        plan = plans[index]
+        group_id = str(
+            getattr(plan, "shared_layout_group", "") or ""
+        ).strip()
+        if not group_id:
+            units.append(_normal_unit_from_plan(plan))
+            index += 1
+            continue
+        grouped = [
+            candidate
+            for candidate in plans
+            if str(
+                getattr(candidate, "shared_layout_group", "") or ""
+            ).strip() == group_id
+        ]
+        if len(grouped) == 2:
+            try:
+                assembled = assemble_support_unit_candidates(
+                    group_id,
+                    {
+                        candidate.support_id: [candidate]
+                        for candidate in grouped
+                    },
+                    require_shared_layout=True,
+                )
+            except SupportUnitAssemblyError:
+                assembled = []
+            if assembled:
+                units.extend(assembled)
+                index += 1
+                while (
+                    index < len(plans)
+                    and plans[index] in grouped
+                ):
+                    index += 1
+                continue
+        units.append(_normal_unit_from_plan(plan))
+        index += 1
+    return units
+
+
+def _normalize_phase2_candidate_sets(
+    candidate_sets,
+) -> List[List[SupportUnitCandidate]]:
+    candidate_sets = list(candidate_sets)
+    normalized = []
+    index = 0
+    while index < len(candidate_sets):
+        candidates = list(candidate_sets[index])
+        if not candidates or isinstance(candidates[0], SupportUnitCandidate):
+            normalized.append(list(candidates))
+            index += 1
+            continue
+        group_id = str(
+            getattr(candidates[0], "shared_layout_group", "") or ""
+        ).strip()
+        if group_id and index + 1 < len(candidate_sets):
+            partner_candidates = list(candidate_sets[index + 1])
+            partner_group = (
+                str(
+                    getattr(
+                        partner_candidates[0],
+                        "shared_layout_group",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                if partner_candidates
+                else ""
+            )
+            if partner_group == group_id:
+                normalized.append(assemble_support_unit_candidates(
+                    group_id,
+                    {
+                        candidates[0].support_id: candidates,
+                        partner_candidates[0].support_id: partner_candidates,
+                    },
+                    require_shared_layout=True,
+                ))
+                index += 2
+                continue
+        normalized.append([
+            _normal_unit_from_plan(candidate) for candidate in candidates
+        ])
+        index += 1
+    return normalized
+
+
+def _flatten_units(
+    units: List[SupportUnitCandidate],
+) -> List[SupportPlan]:
+    return [plan for unit in units for plan in unit.plans]
+
+
+def _unit_pair_snapshots(
+    units: List[SupportUnitCandidate],
+) -> List[Dict[str, object]]:
+    snapshots = []
+    for first, second in zip(units, units[1:]):
+        evaluation = evaluate_support_unit_pair(first, second)
+        snapshots.append({
+            "first_unit_id": evaluation.first_unit_id,
+            "second_unit_id": evaluation.second_unit_id,
+            "first_member_ids": list(first.member_ids),
+            "second_member_ids": list(second.member_ids),
+            "distance": evaluation.distance,
+            "minimum_distance": MIN_JACK_DISTANCE_BETWEEN_SUPPORTS,
+            "valid": evaluation.valid,
+            "region_difference": evaluation.region_difference,
+            "region_penalty": evaluation.region_penalty,
+        })
+    return snapshots
+
+
+def _unit_diagnostic_snapshot(
+    unit: SupportUnitCandidate,
+) -> Dict[str, object]:
+    return {
+        "unit_id": unit.unit_id,
+        "member_ids": list(unit.member_ids),
+        "shared_layout_group": unit.shared_layout_group,
+        "jack_center": unit.jack_center,
+        "jack_region_id": unit.jack_region_id,
+    }
 
 
 def build_global_solution(
@@ -2649,20 +2972,19 @@ def build_global_solution(
     material_concentration_weight: float = SUPPORT_MATERIAL_CONCENTRATION_WEIGHT,
     diagnostics_out: Optional[Dict[str, object]] = None,
 ) -> GlobalSolution:
-    """
-    使用 beam search 選出整體解。
-    避免所有組合暴力枚舉。
-    """
+    """Run Phase 2 over ordered adjacency-unit candidate sets."""
 
-    log(f"全域最佳化開始：支撐數量={len(candidates_by_support)}")
+    candidates_by_unit = _normalize_phase2_candidate_sets(candidates_by_support)
+    log(f"全域最佳化開始：支撐單元數量={len(candidates_by_unit)}")
 
     phase2_diagnostics: Dict[str, object] = {
         "beam_width": int(beam_width),
-        "support_count": len(candidates_by_support),
+        "support_count": len(candidates_by_unit),
+        "unit_count": len(candidates_by_unit),
         "steps": [],
     }
 
-    if not candidates_by_support:
+    if not candidates_by_unit:
         solution = make_global_solution(
             [],
             material_ratio_targets=material_ratio_targets,
@@ -2680,11 +3002,31 @@ def build_global_solution(
         print_global_summary(solution)
         return solution
 
+    if any(not candidates for candidates in candidates_by_unit):
+        solution = fallback_global_solution(
+            candidates_by_unit,
+            material_ratio_targets=material_ratio_targets,
+            material_ratio_weight=material_ratio_weight,
+            material_concentration_threshold=material_concentration_threshold,
+            material_concentration_weight=material_concentration_weight,
+        )
+        phase2_diagnostics["selected_candidate_indices"] = []
+        phase2_diagnostics["adjacency_units"] = []
+        phase2_diagnostics["adjacency_pairs"] = []
+        phase2_diagnostics["adjacent_jack_distances"] = []
+        _finalize_phase2_diagnostics(phase2_diagnostics)
+        phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
+        if diagnostics_out is not None:
+            diagnostics_out.clear()
+            diagnostics_out.update(phase2_diagnostics)
+        print_global_summary(solution)
+        return solution
+
     ratio_targets = dict(material_ratio_targets or default_material_ratio_targets())
 
     # beam item:
     # (sort_key, total_score, single_score_total, jack_region_penalty,
-    #  pattern_counts, plans, candidate_indices)
+    #  pattern_counts, flattened_plans, candidate_indices, selected_units)
     beam: List[Tuple[
         Tuple[float, int, int, Tuple[int, ...]],
         float,
@@ -2693,16 +3035,18 @@ def build_global_solution(
         Counter[Tuple[int, ...]],
         List[SupportPlan],
         List[int],
+        List[SupportUnitCandidate],
     ]] = []
-    for candidate_index, plan in enumerate(candidates_by_support[0]):
-        single_score_total = float(plan.score)
+    for candidate_index, unit_candidate in enumerate(candidates_by_unit[0]):
+        plans = list(unit_candidate.plans)
+        single_score_total = sum(float(plan.score) for plan in plans)
         material_ratio_analysis = calculate_material_ratio_analysis(
-            [plan],
+            plans,
             material_ratio_targets=ratio_targets,
             material_ratio_weight=material_ratio_weight,
         )
         material_concentration_analysis = calculate_material_concentration_analysis(
-            [plan],
+            plans,
             material_concentration_threshold=material_concentration_threshold,
             material_concentration_weight=material_concentration_weight,
         )
@@ -2711,7 +3055,7 @@ def build_global_solution(
             + float(material_ratio_analysis["penalty"])
             + float(material_concentration_analysis["penalty"])
         )
-        pattern_counts = support_pattern_counts([plan])
+        pattern_counts = support_pattern_counts(plans)
         selected_indices = [candidate_index]
         beam.append((
             _pattern_tie_break_key(total_score, pattern_counts, selected_indices),
@@ -2719,8 +3063,9 @@ def build_global_solution(
             single_score_total,
             0.0,
             pattern_counts,
-            [plan],
+            plans,
             selected_indices,
+            [unit_candidate],
         ))
 
     beam.sort(key=lambda x: x[0])
@@ -2729,8 +3074,13 @@ def build_global_solution(
     phase2_diagnostics["steps"].append({
         "support_index": 0,
         "support_id": (
-            candidates_by_support[0][0].support_id
-            if candidates_by_support[0]
+            candidates_by_unit[0][0].unit_id
+            if candidates_by_unit[0]
+            else ""
+        ),
+        "unit_id": (
+            candidates_by_unit[0][0].unit_id
+            if candidates_by_unit[0]
             else ""
         ),
         "beam_state_count_before_adding_support": 0,
@@ -2739,7 +3089,7 @@ def build_global_solution(
         **_beam_state_snapshot(beam),
     })
 
-    for support_idx in range(1, len(candidates_by_support)):
+    for support_idx in range(1, len(candidates_by_unit)):
         new_beam: List[Tuple[
             Tuple[float, int, int, Tuple[int, ...]],
             float,
@@ -2748,6 +3098,7 @@ def build_global_solution(
             Counter[Tuple[int, ...]],
             List[SupportPlan],
             List[int],
+            List[SupportUnitCandidate],
         ]] = []
         beam_state_count_before = len(beam)
 
@@ -2759,40 +3110,28 @@ def build_global_solution(
             pattern_counts,
             selected_plans,
             selected_indices,
+            selected_units,
         ) in beam:
-            prev_plan = selected_plans[-1]
+            previous_unit = selected_units[-1]
 
-            for candidate_index, candidate in enumerate(candidates_by_support[support_idx]):
-                group_id = str(
-                    getattr(candidate, "shared_layout_group", "") or ""
-                ).strip()
-                if group_id:
-                    selected_group_plan = next(
-                        (
-                            selected
-                            for selected in selected_plans
-                            if str(
-                                getattr(selected, "shared_layout_group", "") or ""
-                            ).strip()
-                            == group_id
-                        ),
-                        None,
-                    )
-                    if (
-                        selected_group_plan is not None
-                        and shared_layout_signature(selected_group_plan)
-                        != shared_layout_signature(candidate)
-                    ):
-                        continue
-                ok, penalty = pair_penalty(prev_plan, candidate)
-
-                if not ok:
+            for candidate_index, candidate in enumerate(candidates_by_unit[support_idx]):
+                pair_evaluation = evaluate_support_unit_pair(
+                    previous_unit,
+                    candidate,
+                )
+                if not pair_evaluation.valid:
                     continue
 
-                new_plans = selected_plans + [candidate]
+                candidate_plans = list(candidate.plans)
+                new_plans = selected_plans + candidate_plans
                 new_indices = selected_indices + [candidate_index]
-                new_single_score_total = single_score_total + float(candidate.score)
-                new_jack_region_penalty = jack_region_penalty + float(penalty)
+                new_units = selected_units + [candidate]
+                new_single_score_total = single_score_total + sum(
+                    float(plan.score) for plan in candidate_plans
+                )
+                new_jack_region_penalty = (
+                    jack_region_penalty + pair_evaluation.region_penalty
+                )
                 material_ratio_analysis = calculate_material_ratio_analysis(
                     new_plans,
                     material_ratio_targets=ratio_targets,
@@ -2810,7 +3149,8 @@ def build_global_solution(
                     + float(material_concentration_analysis["penalty"])
                 )
                 new_pattern_counts = pattern_counts.copy()
-                new_pattern_counts[steel_pattern_from_plan(candidate)] += 1
+                for plan in candidate_plans:
+                    new_pattern_counts[steel_pattern_from_plan(plan)] += 1
                 sort_key = _pattern_tie_break_key(
                     new_score,
                     new_pattern_counts,
@@ -2824,6 +3164,7 @@ def build_global_solution(
                     new_pattern_counts,
                     new_plans,
                     new_indices,
+                    new_units,
                 ))
 
         new_beam.sort(key=lambda x: x[0])
@@ -2832,8 +3173,13 @@ def build_global_solution(
         phase2_diagnostics["steps"].append({
             "support_index": support_idx,
             "support_id": (
-                candidates_by_support[support_idx][0].support_id
-                if candidates_by_support[support_idx]
+                candidates_by_unit[support_idx][0].unit_id
+                if candidates_by_unit[support_idx]
+                else ""
+            ),
+            "unit_id": (
+                candidates_by_unit[support_idx][0].unit_id
+                if candidates_by_unit[support_idx]
                 else ""
             ),
             "beam_state_count_before_adding_support": beam_state_count_before,
@@ -2844,17 +3190,21 @@ def build_global_solution(
 
         if not beam:
             solution = fallback_global_solution(
-                candidates_by_support,
+                candidates_by_unit,
                 material_ratio_targets=ratio_targets,
                 material_ratio_weight=material_ratio_weight,
                 material_concentration_threshold=material_concentration_threshold,
                 material_concentration_weight=material_concentration_weight,
             )
             phase2_diagnostics["selected_candidate_indices"] = []
+            fallback_units = list(getattr(solution, "_adjacency_units", []))
+            pair_snapshots = _unit_pair_snapshots(fallback_units)
+            phase2_diagnostics["adjacency_units"] = [
+                _unit_diagnostic_snapshot(unit) for unit in fallback_units
+            ]
+            phase2_diagnostics["adjacency_pairs"] = pair_snapshots
             phase2_diagnostics["adjacent_jack_distances"] = [
-                abs(curr.jack_center - prev.jack_center)
-                for prev, curr in zip(solution.plans, solution.plans[1:])
-                if not plans_share_layout_group(prev, curr)
+                item["distance"] for item in pair_snapshots
             ]
             _finalize_phase2_diagnostics(phase2_diagnostics)
             phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
@@ -2872,6 +3222,7 @@ def build_global_solution(
         _best_pattern_counts,
         best_plans,
         best_candidate_indices,
+        best_units,
     ) = beam[0]
     solution = make_global_solution(
         best_plans,
@@ -2880,23 +3231,36 @@ def build_global_solution(
         material_concentration_threshold=material_concentration_threshold,
         material_concentration_weight=material_concentration_weight,
         reason="",
+        unit_candidates=best_units,
     )
+    solution._adjacency_units = list(best_units)
     phase2_diagnostics["selected_candidate_indices"] = list(best_candidate_indices)
     phase2_diagnostics["selected_candidates"] = [
         {
-            "support_id": plan.support_id,
+            "unit_id": unit.unit_id,
+            "member_ids": list(unit.member_ids),
             "candidate_index": index,
-            "pieces": list(plan.pieces),
-            "jack_center": plan.jack_center,
-            "score": plan.score,
-            "steel_pattern": steel_pattern_from_plan(plan),
+            "plans": [
+                {
+                    "support_id": plan.support_id,
+                    "pieces": list(plan.pieces),
+                    "score": plan.score,
+                    "steel_pattern": steel_pattern_from_plan(plan),
+                }
+                for plan in unit.plans
+            ],
+            "jack_center": unit.jack_center,
+            "jack_region_id": unit.jack_region_id,
         }
-        for index, plan in zip(best_candidate_indices, best_plans)
+        for index, unit in zip(best_candidate_indices, best_units)
     ]
+    pair_snapshots = _unit_pair_snapshots(best_units)
+    phase2_diagnostics["adjacency_units"] = [
+        _unit_diagnostic_snapshot(unit) for unit in best_units
+    ]
+    phase2_diagnostics["adjacency_pairs"] = pair_snapshots
     phase2_diagnostics["adjacent_jack_distances"] = [
-        abs(curr.jack_center - prev.jack_center)
-        for prev, curr in zip(solution.plans, solution.plans[1:])
-        if not plans_share_layout_group(prev, curr)
+        item["distance"] for item in pair_snapshots
     ]
     _finalize_phase2_diagnostics(phase2_diagnostics)
     phase2_diagnostics["result_summary"] = global_solution_result_summary(solution)
@@ -2918,28 +3282,16 @@ def fallback_global_solution(
     若 Phase 2 找不到完全符合 jack 間距的組合，
     則選每支支撐單體分數最低者，並標記為 fallback。
     """
-    plans = []
-    selected_group_signatures: Dict[str, Tuple[Tuple[str, int], ...]] = {}
-
-    for candidates in candidates_by_support:
-        if candidates:
-            group_id = str(
-                getattr(candidates[0], "shared_layout_group", "") or ""
-            ).strip()
-            eligible = list(candidates)
-            if group_id in selected_group_signatures:
-                eligible = [
-                    candidate
-                    for candidate in eligible
-                    if shared_layout_signature(candidate)
-                    == selected_group_signatures[group_id]
-                ]
-            if not eligible:
-                continue
-            selected = min(eligible, key=lambda x: x.score)
-            plans.append(selected)
-            if group_id:
-                selected_group_signatures[group_id] = shared_layout_signature(selected)
+    candidates_by_unit = _normalize_phase2_candidate_sets(candidates_by_support)
+    selected_units = [
+        min(
+            candidates,
+            key=lambda candidate: sum(float(plan.score) for plan in candidate.plans),
+        )
+        for candidates in candidates_by_unit
+        if candidates
+    ]
+    plans = _flatten_units(selected_units)
 
     solution = make_global_solution(
         plans,
@@ -2949,7 +3301,9 @@ def fallback_global_solution(
         material_concentration_weight=material_concentration_weight,
         valid=False,
         reason="找不到完全符合相鄰 jack 間距的整體解，已回傳 fallback",
+        unit_candidates=selected_units,
     )
+    solution._adjacency_units = list(selected_units)
     solution.total_score += 5_000_000
     return solution
 

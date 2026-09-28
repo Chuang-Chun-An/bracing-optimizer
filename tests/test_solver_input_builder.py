@@ -11,6 +11,12 @@ from bracing_optimizer.application.solver_input_builder import (
     SupportInputBuilder,
     WalerInputBuilder,
 )
+from bracing_optimizer.domain.support_adjacency import (
+    ZONING_ANGLE_OUT_OF_TOLERANCE,
+    ZONING_LENGTH_OUT_OF_TOLERANCE,
+    ZONING_PROJECTION_TIE,
+    ZONING_ZERO_LENGTH_AXIS,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -113,7 +119,199 @@ class SupportInputBuilderTests(unittest.TestCase):
         self.assertEqual(config.steel_lengths, [4500, 5000])
         self.assertEqual(model.to_case_data(), before)
 
+    @staticmethod
+    def _geometry_model(rows):
+        return ProjectDataModel(
+            walers=[
+                {"WalerID": "W1", "material_spec": "H350"},
+                {"WalerID": "W2", "material_spec": "H350"},
+            ],
+            struts=[
+                {
+                    "FromWaler": "W1",
+                    "ToWaler": "W2",
+                    "Zoning": "Z1",
+                    "material_spec": "H350",
+                    **row,
+                }
+                for row in rows
+            ],
+            inventory=[{
+                "ItemCode": "S-50",
+                "Spec": "H350",
+                "Usage": "支撐",
+                "Length": 5000,
+                "Qty": 8,
+            }],
+        )
+
+    def test_builds_geometry_order_independent_of_rows_and_endpoints(self):
+        rows = [
+            {"StrutID": "S3", "StartX": 0, "StartY": 3000,
+             "EndX": 10000, "EndY": 3000},
+            {"StrutID": "S1", "StartX": 0, "StartY": 0,
+             "EndX": 10000, "EndY": 0},
+            {"StrutID": "S2", "StartX": 0, "StartY": 1500,
+             "EndX": 10000, "EndY": 1500},
+        ]
+        reversed_rows = [
+            {**row,
+             "StartX": row["EndX"], "StartY": row["EndY"],
+             "EndX": row["StartX"], "EndY": row["StartY"]}
+            for row in reversed(rows)
+        ]
+
+        first = SupportInputBuilder().build_zone(self._geometry_model(rows), "Z1")
+        second = SupportInputBuilder().build_zone(
+            self._geometry_model(reversed_rows), "Z1"
+        )
+
+        def pair_set(result):
+            return {
+                frozenset((pair.first_unit_id, pair.second_unit_id))
+                for pair in result.adjacency_contract.pairs
+            }
+
+        self.assertEqual(pair_set(first), pair_set(second))
+        self.assertEqual(
+            pair_set(first),
+            {frozenset(("S1", "S2")), frozenset(("S2", "S3"))},
+        )
+
+    def test_shared_layout_collapses_before_ordering_and_keeps_both_configs(self):
+        rows = [
+            {"StrutID": "S3", "StartX": 0, "StartY": 3000,
+             "EndX": 10000, "EndY": 3000},
+            {"StrutID": "S2", "StartX": 0, "StartY": 1100,
+             "EndX": 10000, "EndY": 1100, "SharedLayoutGroup": "G1"},
+            {"StrutID": "S1", "StartX": 0, "StartY": 900,
+             "EndX": 10000, "EndY": 900, "SharedLayoutGroup": "G1"},
+        ]
+
+        result = SupportInputBuilder().build_zone(self._geometry_model(rows), "Z1")
+
+        self.assertEqual(len(result.units), 2)
+        shared = next(unit for unit in result.units if unit.unit_id == "G1")
+        self.assertEqual(shared.member_ids, ("S1", "S2"))
+        self.assertEqual(
+            tuple(config.support_id for config in shared.configs),
+            ("S1", "S2"),
+        )
+        self.assertEqual(shared.representative_position, (5000.0, 1000.0))
+        self.assertFalse(hasattr(shared, "representative_length"))
+
+    def test_shared_lane_row_order_does_not_change_pair_set(self):
+        rows = [
+            {"StrutID": "S0", "StartX": 0, "StartY": 0,
+             "EndX": 10000, "EndY": 0},
+            {"StrutID": "S1", "StartX": 0, "StartY": 900,
+             "EndX": 10000, "EndY": 900, "SharedLayoutGroup": "G1"},
+            {"StrutID": "S2", "StartX": 0, "StartY": 1100,
+             "EndX": 10000, "EndY": 1100, "SharedLayoutGroup": "G1"},
+            {"StrutID": "S3", "StartX": 0, "StartY": 2500,
+             "EndX": 10000, "EndY": 2500},
+        ]
+        first = SupportInputBuilder().build_zone(self._geometry_model(rows), "Z1")
+        second_rows = [rows[3], rows[2], rows[0], rows[1]]
+        second = SupportInputBuilder().build_zone(
+            self._geometry_model(second_rows), "Z1"
+        )
+
+        first_pairs = tuple(
+            (pair.first_unit_id, pair.second_unit_id)
+            for pair in first.adjacency_contract.pairs
+        )
+        second_pairs = tuple(
+            (pair.first_unit_id, pair.second_unit_id)
+            for pair in second.adjacency_contract.pairs
+        )
+        self.assertEqual(first_pairs, second_pairs)
+        self.assertEqual(first_pairs, (("S0", "G1"), ("G1", "S3")))
+
+    def test_geometry_failures_are_structured_and_do_not_build_input(self):
+        cases = (
+            (
+                ZONING_ZERO_LENGTH_AXIS,
+                [
+                    {"StrutID": "S1", "StartX": 0, "StartY": 0,
+                     "EndX": 0, "EndY": 0},
+                ],
+            ),
+            (
+                ZONING_ANGLE_OUT_OF_TOLERANCE,
+                [
+                    {"StrutID": "S1", "StartX": 0, "StartY": 0,
+                     "EndX": 10000, "EndY": 0},
+                    {"StrutID": "S2", "StartX": 0, "StartY": 1000,
+                     "EndX": 9900, "EndY": 2500},
+                ],
+            ),
+            (
+                ZONING_LENGTH_OUT_OF_TOLERANCE,
+                [
+                    {"StrutID": "S1", "StartX": 0, "StartY": 0,
+                     "EndX": 10000, "EndY": 0},
+                    {"StrutID": "S2", "StartX": 0, "StartY": 1000,
+                     "EndX": 10006, "EndY": 1000},
+                ],
+            ),
+            (
+                ZONING_PROJECTION_TIE,
+                [
+                    {"StrutID": "S1", "StartX": 0, "StartY": 0,
+                     "EndX": 10000, "EndY": 0},
+                    {"StrutID": "S2", "StartX": 0, "StartY": 1,
+                     "EndX": 10000, "EndY": 1},
+                ],
+            ),
+        )
+
+        for expected_code, rows in cases:
+            with self.subTest(expected_code=expected_code):
+                with self.assertRaises(SolverInputBuildError) as caught:
+                    SupportInputBuilder().build_zone(
+                        self._geometry_model(rows), "Z1"
+                    )
+                self.assertIn(
+                    expected_code,
+                    {issue.code for issue in caught.exception.geometry_issues},
+                )
+
+    def test_confirmed_shared_group_outside_tolerance_is_rejected_for_solve(self):
+        rows = [
+            {"StrutID": "S1", "SharedLayoutGroup": "G1",
+             "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0},
+            {"StrutID": "S2", "SharedLayoutGroup": "G1",
+             "StartX": 0, "StartY": 1000, "EndX": 9900, "EndY": 2500},
+        ]
+
+        with self.assertRaises(SolverInputBuildError) as caught:
+            SupportInputBuilder().build_zone(self._geometry_model(rows), "Z1")
+
+        self.assertIn(
+            ZONING_ANGLE_OUT_OF_TOLERANCE,
+            {issue.code for issue in caught.exception.geometry_issues},
+        )
+
 class WalerInputBuilderTests(unittest.TestCase):
+    def test_rc_waler_remains_in_formal_waler_build_output(self):
+        model = ProjectDataModel(walers=[{
+            "WalerID": "W-RC",
+            "StartX": 0,
+            "StartY": 0,
+            "EndX": 6000,
+            "EndY": 0,
+            "material_spec": "RC",
+        }])
+
+        result = WalerInputBuilder().build_all(model)
+
+        self.assertEqual(set(result), {"W-RC"})
+        self.assertEqual(result["W-RC"].material_spec, "RC")
+        self.assertEqual(result["W-RC"].start_point, (0, 0))
+        self.assertEqual(result["W-RC"].end_point, (6000, 0))
+        self.assertEqual(result["W-RC"].purchasable_lengths, ())
+
     def test_builds_all_walers_and_projects_forbidden_points(self):
         model = ProjectDataModel(
             walers=[{

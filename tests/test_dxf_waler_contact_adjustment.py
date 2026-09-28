@@ -325,6 +325,40 @@ class WalerContactAdjustmentTests(unittest.TestCase):
         self.assertEqual(updated_strut.from_brace_to_waler_end_len, 0)
         self.assertAlmostEqual(corner.new_waler_station_mm, 4500.0)
 
+    def test_refined_corner_axis_is_the_contact_adjustment_baseline(self):
+        refined_corner = replace(
+            _corner(),
+            start=(4540.0, 0.0),
+            end=(5000.0, 460.0),
+            world_start=(4540.0, 0.0),
+            world_end=(5000.0, 460.0),
+        )
+        result = initialize_waler_contact_review(
+            replace(
+                _result(with_corner=False),
+                corner_braces=(refined_corner,),
+            )
+        )
+
+        self.assertEqual(len(result.corner_brace_connections), 1)
+        connection = result.corner_brace_connections[0]
+        self.assertEqual(connection.baseline_waler_attachment, (4540.0, 0.0))
+        self.assertEqual(connection.baseline_strut_attachment, (5000.0, 460.0))
+        self.assertAlmostEqual(connection.strut_hole_station_mm, 460.0)
+        self.assertAlmostEqual(
+            connection.fixed_length_mm,
+            math.hypot(460.0, 460.0),
+        )
+
+        plan = plan_waler_contact_adjustment(result, "W1", **_dimensions())
+
+        self.assertTrue(plan.can_apply, [item.message for item in plan.messages])
+        change = plan.corner_brace_changes[0]
+        self.assertAlmostEqual(change.strut_hole_station_mm, 460.0)
+        self.assertAlmostEqual(change.fixed_length_mm, math.hypot(460.0, 460.0))
+        self.assertEqual(change.new_member.start, (4540.0, 85.0))
+        self.assertEqual(change.new_member.end, (5000.0, 545.0))
+
     def test_beam_and_column_station_rebuild_uses_new_strut_origin(self):
         result = _result(with_corner=False, with_auxiliary=True)
         plan = plan_waler_contact_adjustment(result, "W1", **_dimensions())

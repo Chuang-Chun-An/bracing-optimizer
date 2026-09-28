@@ -78,6 +78,17 @@ class ProjectResultModelTests(unittest.TestCase):
     def test_support_result_round_trip_preserves_runtime_model(self):
         solution = self.support_solution()
         solution.plans[0].shared_layout_group = "G1"
+        solution.search_diagnostics = SolverDiagnostics(
+            solver_type="support",
+            legal_solution_found=True,
+            adjacency_units=[{
+                "unit_id": "G1",
+                "member_ids": ["S1"],
+            }],
+            adjacency_pairs=[],
+            phase2_executed=True,
+        ).to_dict()
+        solution._adjacency_units = [object()]
         source = {
             "type": "support",
             "visible": True,
@@ -93,6 +104,14 @@ class ProjectResultModelTests(unittest.TestCase):
         self.assertEqual(restored["result"].plans[0].material_spec, "H400")
         self.assertEqual(restored["result"].plans[0].shared_layout_group, "G1")
         self.assertEqual(restored["support_visibility"], {"S1": True})
+        self.assertTrue(restored["result"].search_diagnostics["phase2_executed"])
+        self.assertEqual(
+            restored["result"].search_diagnostics["adjacency_units"][0]["unit_id"],
+            "G1",
+        )
+        self.assertFalse(hasattr(restored["result"], "_adjacency_units"))
+        self.assertNotIn("representative_position", str(payload))
+        self.assertNotIn("canonical_direction", str(payload))
 
     def test_material_usage_respects_result_and_support_visibility(self):
         solution = self.support_solution()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import logging
 import re
 import threading
 import tkinter as tk
@@ -23,6 +24,10 @@ from window_layout import configure_responsive_dialog
 
 
 _SUPPORT_ID_PATTERN = re.compile(r"^(.*?)(\d+)$")
+LOGGER = logging.getLogger(__name__)
+SUPPORT_SOLVER_CLOSE_BUSY_MESSAGE = (
+    "支撐最佳化仍在計算中，請等待計算完成後再關閉。"
+)
 
 
 def _compact_support_ids(support_ids) -> str:
@@ -82,6 +87,7 @@ class SupportSolverDialog(SolverDialogThreadBridge):
         self.callback = callback
         self.optimize_support_zone = optimize_support_zone
         self.solution = None
+        self._calculation_running = False
 
         zoning = support_input.zoning
         configs = support_input.configs
@@ -347,12 +353,23 @@ class SupportSolverDialog(SolverDialogThreadBridge):
             material_ratio_weight=support.SUPPORT_MATERIAL_RATIO_WEIGHT,
         )
         self.run_button.configure(state="disabled")
-        thread = threading.Thread(
-            target=self._solver_thread,
-            args=(request,),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._solver_thread,
+                args=(request,),
+                daemon=True,
+            )
+            self._calculation_running = True
+            thread.start()
+        except Exception:
+            self._calculation_running = False
+            self.run_button.configure(state="normal")
+            LOGGER.exception("Support Solver thread start failed")
+            messagebox.showerror(
+                "支撐計算失敗",
+                "無法啟動支撐計算背景工作。",
+                parent=self.dialog,
+            )
 
     def _solver_thread(self, request):
         def gui_logger(*args):
@@ -366,6 +383,9 @@ class SupportSolverDialog(SolverDialogThreadBridge):
                 lambda message=progress.message: self.summary_var.set(message)
             )
 
+        solution = None
+        diagnostics = None
+        worker_error = None
         try:
             result = self.optimize_support_zone.execute(
                 request,
@@ -374,28 +394,43 @@ class SupportSolverDialog(SolverDialogThreadBridge):
             )
             solution = result.solution
             diagnostics = result.diagnostics
-            if solution is not None:
-                self._post_ui(
-                    lambda: self._display_solution(solution, diagnostics),
-                )
-            else:
-                self._post_ui(
-                    lambda: self._display_diagnostics_only(diagnostics),
-                )
-        except Exception:
+        except Exception as exc:
             import traceback
 
+            worker_error = exc
             message = traceback.format_exc()
             self.text_writer.write(message)
-            self._post_ui(
-                lambda: self.summary_var.set(
-                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
-                )
-            )
         finally:
             self._post_ui(
-                lambda: self.run_button.configure(state="normal"),
+                lambda solution=solution,
+                diagnostics=diagnostics,
+                error=worker_error: self._finish_worker(
+                    solution,
+                    diagnostics,
+                    error,
+                )
             )
+
+    def _finish_worker(self, solution, diagnostics, error):
+        try:
+            if error is not None:
+                self.summary_var.set(
+                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
+                )
+            elif solution is not None:
+                self._display_solution(solution, diagnostics)
+            elif diagnostics is not None:
+                self._display_diagnostics_only(diagnostics)
+            else:
+                self.summary_var.set("計算發生錯誤；Solver 未回傳結果。")
+        except Exception:
+            LOGGER.exception("Support Solver result UI callback failed")
+            self.summary_var.set(
+                "計算結果處理發生錯誤；請查看詳細執行訊息。"
+            )
+        finally:
+            self._calculation_running = False
+            self.run_button.configure(state="normal")
 
     def _display_diagnostics_only(self, diagnostics):
         self.summary_var.set(self._format_support_engineer_summary(None, diagnostics))
@@ -610,6 +645,14 @@ class SupportSolverDialog(SolverDialogThreadBridge):
         ]
 
     def _on_close(self):
+        if self._calculation_running:
+            LOGGER.warning("Support dialog close blocked while calculating")
+            messagebox.showwarning(
+                "支撐計算中",
+                SUPPORT_SOLVER_CLOSE_BUSY_MESSAGE,
+                parent=self.dialog,
+            )
+            return
         self._close_ui_bridge()
         self.dialog.destroy()
 

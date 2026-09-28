@@ -12,7 +12,9 @@ from bracing_optimizer.application.optimize_support_zone import (
 )
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.solver_input_builder import (
+    SupportAdjacencyContract,
     SupportInputBuilder,
+    SupportOptimizationUnit,
     SupportZoneInput,
 )
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
@@ -221,8 +223,24 @@ class DoubleSupportSolverTests(unittest.TestCase):
             minimum_unique_solution_count=1,
             support_phase1_retained_candidate_count=1,
         )
+        unit = SupportOptimizationUnit(
+            unit_id="G1",
+            configs=configs,
+            require_shared_layout=True,
+            member_ids=tuple(config.support_id for config in configs),
+        )
         request = OptimizeSupportZoneRequest(
-            input=SupportZoneInput("Z1", configs),
+            input=SupportZoneInput(
+                "Z1",
+                configs,
+                SupportAdjacencyContract(
+                    zoning="Z1",
+                    common_direction=(1.0, 0.0),
+                    row_direction=(0.0, 1.0),
+                    ordered_units=(unit,),
+                    pairs=(),
+                ),
+            ),
             material_ratio_targets=MaterialRatioTargets.normalized(1, 0, 0),
             material_ratio_weight=0,
         )

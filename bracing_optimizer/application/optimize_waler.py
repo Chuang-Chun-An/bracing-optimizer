@@ -38,6 +38,30 @@ ProgressCallback = Callable[[WalerOptimizationProgress], None]
 LogCallback = Callable[..., None]
 
 
+class WalerOptimizationExcludedError(ValueError):
+    """Raised when a Waler is outside material-configuration scope."""
+
+
+def is_rc_waler_material(material_spec: object) -> bool:
+    """Return whether the formal material spec identifies an RC Waler."""
+
+    return str(material_spec or "").strip().casefold() == "rc"
+
+
+def partition_waler_optimization_inputs(
+    inputs: tuple[WalerProblemInput, ...] | list[WalerProblemInput],
+) -> tuple[tuple[WalerProblemInput, ...], tuple[WalerProblemInput, ...]]:
+    """Partition Waler inputs into eligible non-RC and excluded RC groups."""
+
+    eligible = []
+    excluded = []
+    for item in inputs:
+        (excluded if is_rc_waler_material(item.material_spec) else eligible).append(
+            item
+        )
+    return tuple(eligible), tuple(excluded)
+
+
 class OptimizeWaler:
     """Run the complete, GUI-independent Waler optimization workflow."""
 
@@ -76,6 +100,10 @@ class OptimizeWaler:
     ) -> OptimizeWalerResult:
         """Execute synchronously and return solutions, diagnostics, and config."""
 
+        if is_rc_waler_material(request.input.material_spec):
+            raise WalerOptimizationExcludedError(
+                f"圍令 {request.input.waler_id} 為 RC，不進行材料配置最佳化。"
+            )
         cfg = self._build_config(request)
         wales.set_logger(logger or print)
         try:
@@ -334,4 +362,7 @@ __all__ = [
     "OptimizeWalerRequest",
     "OptimizeWalerResult",
     "WalerOptimizationProgress",
+    "WalerOptimizationExcludedError",
+    "is_rc_waler_material",
+    "partition_waler_optimization_inputs",
 ]

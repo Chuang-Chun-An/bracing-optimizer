@@ -8,6 +8,7 @@ from bracing_optimizer.algorithms.waler_global import (
     build_global_candidate,
 )
 from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from main import SupportInputApp
 
@@ -82,6 +83,7 @@ class FakeGlobalResult:
 class WalerGlobalApplyTests(unittest.TestCase):
     def make_app(self):
         app = SupportInputApp.__new__(SupportInputApp)
+        app.project_data = ProjectDataModel()
         app._project_results = ProjectResultModel(result_items={
             "W1-方案1": {
                 "type": "waler",
@@ -105,6 +107,23 @@ class WalerGlobalApplyTests(unittest.TestCase):
         app.update_preview = lambda: None
         app.show_result = lambda _message: None
         return app
+
+    @staticmethod
+    def add_historical_rc_result(app):
+        app.project_data = ProjectDataModel(walers=[
+            {"WalerID": "W1", "material_spec": "H400x400"},
+            {"WalerID": "W2", "material_spec": "RC"},
+            {"WalerID": "W3", "material_spec": "H400x400"},
+        ])
+        app.result_items["W2-方案4"] = {
+            "type": "waler",
+            "result": {
+                "waler_id": "W2",
+                "selected_plan": {"segments": [6_000, 6_000]},
+                "material_spec": "H400x400",
+            },
+            "visible": True,
+        }
 
     def test_apply_replaces_all_selected_walers_once_and_preserves_support(self):
         app = self.make_app()
@@ -161,6 +180,35 @@ class WalerGlobalApplyTests(unittest.TestCase):
         self.assertIn("Z1", staged.result_items)
         self.assertEqual(staged.selected_candidates[0].candidate_rank, 2)
 
+    def test_global_apply_replaces_selected_and_removes_historical_rc_result(self):
+        app = self.make_app()
+        self.add_historical_rc_result(app)
+        app.result_items["W3-方案1"] = {
+            "type": "waler",
+            "result": {
+                "waler_id": "W3",
+                "selected_plan": {"segments": [7_000, 5_000]},
+            },
+            "visible": True,
+        }
+        app._mark_results_updated = lambda: None
+        result = FakeGlobalResult((
+            make_candidate("W1", 1, [5_000, 7_000]),
+            make_candidate("W3", 2, [7_000, 5_000], score=12),
+        ))
+
+        outcome = app._apply_waler_global_result(result)
+
+        self.assertTrue(outcome.committed)
+        identities = {
+            ProjectResultModel.waler_result_identity(result_id, item)
+            for result_id, item in app.result_items.items()
+            if item.get("type") == "waler"
+        }
+        self.assertEqual(identities, {"W1", "W3"})
+        self.assertNotIn("W2-方案4", app.result_items)
+        self.assertIn("Z1", app.result_items)
+
     def test_project_result_model_stages_single_batch_without_mutating_source(self):
         global_item = {
             "type": "waler",
@@ -192,6 +240,7 @@ class WalerGlobalApplyTests(unittest.TestCase):
 
     def test_missing_staged_record_leaves_existing_results_unchanged(self):
         app = self.make_app()
+        self.add_historical_rc_result(app)
         before = copy.deepcopy(app.result_items)
         result = FakeGlobalResult(
             (make_candidate("W1", 1, [5_000, 7_000]),),
@@ -207,6 +256,7 @@ class WalerGlobalApplyTests(unittest.TestCase):
 
     def test_commit_failure_rolls_back_every_waler_result(self):
         app = self.make_app()
+        self.add_historical_rc_result(app)
         before = copy.deepcopy(app.result_items)
         app.project_result = {"old": True}
         app.last_calculated_time = "before"
@@ -237,6 +287,7 @@ class WalerGlobalApplyTests(unittest.TestCase):
 
     def test_result_tree_refresh_failure_keeps_committed_global_results(self):
         app = self.make_app()
+        self.add_historical_rc_result(app)
         app._mark_results_updated = lambda: setattr(app, "project_dirty", True)
         app._refresh_results_tree = lambda **_kwargs: (_ for _ in ()).throw(
             RuntimeError("tree refresh failed")
@@ -254,6 +305,7 @@ class WalerGlobalApplyTests(unittest.TestCase):
         self.assertTrue(
             app.result_items["W1-方案2"]["result"]["global_selected"]
         )
+        self.assertNotIn("W2-方案4", app.result_items)
         payload = ProjectResultModel(
             result_items=app.result_items,
         ).to_payload([])

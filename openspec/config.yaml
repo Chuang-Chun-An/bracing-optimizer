@@ -1,0 +1,171 @@
+schema: spec-driven
+
+context: |
+  專案背景：
+  這是一個地下開挖支撐與圍令最佳化的 Python 桌面應用程式，
+  用於支撐配置、圍令配置、材料配置、DXF 幾何匯入與 Solver 最佳化。
+
+  開發方式：
+  - 一律遵守專案根目錄的 AGENTS.md。
+  - 本專案是既有 brownfield application，不是 greenfield project。
+  - 在提出結構性調整前，必須先閱讀相關現有程式碼。
+  - 不進行與本次 change 無關的 cleanup、refactoring 或重新命名。
+  - 不得因為發現既有 technical debt，就自動把它加入本次 change。
+  - 未經使用者明確要求，不執行 Git state-changing operations。
+  - 未經明確要求，不修改本次 change scope 之外的文件。
+  - 若實作過程發現 Spec、Design 與現有程式存在矛盾，必須停止並回報，
+    不得自行修改需求以配合現有 code。
+
+  長期專案文件：
+  - docs/ARCHITECTURE.md
+    定義 layer responsibility、dependency direction、state ownership、
+    已接受的 architecture exception 與 technical debt。
+
+  - docs/DOMAIN.md
+    定義正式工程概念、Engineering Hard Constraint、Solver Preference、
+    Temporary Solver Heuristic、Implementation Detail 與 known domain gaps。
+
+  - docs/SOLVER.md
+    定義目前 Support Solver、Waler Solver、search、scoring、diagnostics、
+    tuning parameter 與已知 Solver limitations。
+
+  - docs/WORKFLOW.md
+    定義 runtime state、commit / rollback、result lifecycle、
+    manual editing、dirty state、save/load 與 confirmed product gaps。
+
+  長期文件與 OpenSpec 的關係：
+  - 長期文件描述目前系統已成立的 long-term truth。
+  - OpenSpec change 描述本次預計如何改變既有系統。
+  - Change 的 Design 必須符合現有 Architecture，
+    除非該 change 明確提出 architecture change。
+  - Change 完成並驗證後，只有當 long-term truth 確實改變時，
+    才更新對應的 ARCHITECTURE.md、DOMAIN.md、SOLVER.md 或 WORKFLOW.md。
+  - 不得在 implementation 尚未完成前，就把長期文件寫成「新行為已經成立」。
+
+  Architecture Layers：
+  - Presentation：
+    負責 UI、使用者互動與顯示。
+    不應自行推導工程規則或 Solver adjacency。
+
+  - Application：
+    負責 use-case orchestration、
+    Project → Solver contract、
+    workflow coordination 與 transaction boundary。
+
+  - Domain：
+    負責工程世界本身、正式工程概念與 pure engineering rules。
+    不依賴 GUI、檔案格式或 Solver implementation。
+
+  - Algorithms：
+    負責 optimization、search、scoring 與 calculation core。
+    不應自行解讀 Project UI rows、files 或 Presentation state。
+
+  - Infrastructure：
+    負責 persistence、DXF、Excel、CAD、filesystem 與 external adapters。
+
+  工程規則分類：
+  所有 requirement 或 design decision 應盡量區分：
+  - Engineering Hard Constraint
+  - Solver Preference
+  - Temporary Solver Heuristic
+  - Implementation Detail
+
+  不得在沒有明確需求決策時，
+  將 Solver Preference 或 Heuristic 升級成 Engineering Hard Constraint。
+
+  SDD 原則：
+  - Requirement 說明系統應做什麼。
+  - Design 說明在現有 Architecture 中如何實現。
+  - Tasks 說明實作順序與驗證方式。
+  - Implementation 不得重新定義 Requirement。
+  - Test 應驗證正式 Spec 與 Design contract，而不是只驗證目前 code behavior。
+  - Accepted technical debt 不是自動待辦清單。
+
+
+rules:
+  proposal:
+    - 說明這次 change 想改變的 user-visible behavior 或 engineering behavior。
+    - 必須包含清楚的 In Scope 與 Out of Scope。
+    - 明確指出受影響的 capability。
+    - 說明是否預期改變既有 Architecture、Domain、Solver 或 Workflow truth。
+    - Proposal 應精簡，Implementation detail 留到 design.md。
+    - 不要因為現有 code 結構不漂亮，就把 cleanup 自動納入 proposal。
+
+  specs:
+    - 已確認需求視為 authoritative behavior，不是建議。
+    - Requirement 必須描述 observable behavior 或 domain behavior。
+    - 已確認的數值 engineering boundary 不得自行更改。
+    - 必須區分 Engineering Hard Constraint、Solver Preference、
+      Temporary Solver Heuristic 與 Implementation Detail。
+    - 若有 boundary condition，應明確寫出等號邊界，例如 <=、<、=。
+    - 若有 failure behavior，應明確定義 fail、reject、preserve 或 fallback semantics。
+    - 不得重新定義 docs/DOMAIN.md 中已確認的 engineering rule，
+      除非本 change 明確就是要修改該規則。
+    - Open Questions 必須在進入 Design 前關閉，
+      除非它只是純 Implementation Choice。
+
+  design:
+    - design.md 的章節標題與說明文字預設使用繁體中文；
+      程式識別字、檔名、狀態值、資料欄位與指令保留原始英文。
+    - 在分配 layer responsibility 前，必須閱讀 docs/ARCHITECTURE.md。
+    - 明確列出受影響的 layer 與 dependency direction。
+    - 必須包含 Architecture Alignment。
+    - 必須明確說明：
+      這次 change 是沿用既有 Architecture，
+      還是修改 Architecture 本身。
+    - 優先重用既有 boundary 與 contract，
+      不要為單一 feature 建立不必要的大型 abstraction。
+    - 必須指出重要 state / contract 的 single source of truth。
+    - 如果兩份資料可能形成兩個 truth，Design 必須說明如何避免 drift。
+    - 必須說明 backward compatibility 與 persistence impact。
+    - 若 persistence schema 不在 scope，不得因方便而自行新增 schema migration。
+    - 必須記錄重要 rejected alternatives，以及拒絕原因。
+    - 不得把 accepted technical debt 順便納入本次 Design。
+    - Manual editing、diagnostics、summary 等旁路若使用相同工程語意，
+      必須確認它們不會建立第二套邏輯。
+    - 若 Design Discovery 發現 Spec 建立在錯誤 code assumption 上，
+      應先回頭修正 Spec，不得硬寫 code 滿足錯誤假設。
+
+  tasks:
+    - tasks.md 的章節標題與任務敘述預設使用繁體中文；
+      checkbox、任務編號、程式識別字、檔名、狀態值與指令保留原始格式。
+    - 建立 tasks 前，必須閱讀已核准的 specs 與 design。
+    - Tasks 必須依 implementation dependency 排列。
+    - 每個 task 應有明確 scope、affected module 與 verification condition。
+    - 每個重要行為變更都必須有對應測試。
+    - 測試應與 implementation step 一起完成，或緊接在其後。
+    - 不加入與本次 change 無關的 refactoring、cleanup 或 naming change。
+    - 若 long-term Architecture、Domain、Solver 或 Workflow truth
+      在 implementation 後確實改變，
+      必須在接近尾聲時加入對應文件更新 task。
+    - 必須包含 final regression test。
+    - 必須包含 OpenSpec implementation verification。
+    - Task 應切成可以逐步實作、測試與 review 的單位，
+      不鼓勵一次修改整個 feature。
+
+
+operations:
+  apply:
+    guidance:
+      - 依 tasks.md 的 dependency order 實作。
+      - 每個 structural change 前先重新閱讀相關 current code。
+      - 不要提前實作尚未輪到的 future tasks。
+      - 不要在本 task 中順便處理 unrelated technical debt。
+      - 若 implementation 發現與已核准 Spec 或 Design 衝突，停止並回報。
+      - 不得自行修改 requirement 以配合目前 code。
+      - 優先保持既有 transaction、commit、rollback 與 committed-result semantics，
+        除非本 change 明確要修改它。
+      - 每完成一個 meaningful task group，先跑 focused tests。
+      - focused tests 通過後，再進行下一個 task group。
+      - 不因測試失敗而直接大範圍重構；先定位 regression 原因。
+
+  archive:
+    guidance:
+      - 只有在 implementation verification 通過後才 archive。
+      - Archive 前確認所有 tasks 已完成或有明確核准的例外。
+      - Archive 前必須先將 change 的 delta specs 同步至 main specs，並完成 main specs validation；除非使用者明確要求略過同步。
+      - Archive 前確認 main specs 與 implemented behavior 一致。
+      - 若 long-term Architecture、Domain、Solver 或 Workflow truth 已改變，
+        必須確認對應長期文件已更新。
+      - 不得將 unresolved known failure 當成成功完成並 archive。
+      - 不得因 archive 而刪除仍具有 long-term reference value 的文件。

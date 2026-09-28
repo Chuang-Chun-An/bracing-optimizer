@@ -116,6 +116,30 @@ def review_confirmation_signature(
     member = _member_for_item(result, item)
     if member is None:
         return None
+    assembly_members = (member,)
+    if item.role == "beam" and getattr(member, "joist_assembly_key", ""):
+        identity = review_confirmation_identity(item)
+        assembly_members = tuple(
+            sorted(
+                (
+                    candidate
+                    for candidate in result.beams
+                    if canonical_source_identity(
+                        "beam",
+                        candidate.source_handles,
+                    )
+                    == identity
+                    and candidate.joist_assembly_key
+                    == member.joist_assembly_key
+                ),
+                key=lambda candidate: (
+                    candidate.joist_axis_slot
+                    if candidate.joist_axis_slot is not None
+                    else -1,
+                    candidate.id,
+                ),
+            )
+        )
     contact_review = None
     if item.role == "waler":
         contact_review = next(
@@ -126,13 +150,25 @@ def review_confirmation_signature(
             ),
             None,
         )
-    problem_data = sorted(
-        (asdict(problem) for problem in item.problems),
-        key=_canonical_json,
-    )
+    if len(assembly_members) > 1:
+        handles = set(item.source_handles)
+        problem_data = sorted(
+            (
+                asdict(message)
+                for message in result.messages
+                if message.role == "beam"
+                and handles.intersection(message.source_handles)
+            ),
+            key=_canonical_json,
+        )
+    else:
+        problem_data = sorted(
+            (asdict(problem) for problem in item.problems),
+            key=_canonical_json,
+        )
     payload = {
         "role": item.role,
-        "member": asdict(member),
+        "members": [asdict(candidate) for candidate in assembly_members],
         "coordinate_system": asdict(result.coordinate_system),
         "waler_contact_review": contact_review,
         "problems": problem_data,

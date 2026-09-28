@@ -297,40 +297,66 @@ class OptimizeSupportZone:
                 for plan in valid_candidates
             ])
 
-        shared_group_indexes: dict[str, list[int]] = {}
-        for index, config in enumerate(ordered_configs):
-            group_id = str(config.shared_layout_group or "").strip()
-            if group_id:
-                shared_group_indexes.setdefault(group_id, []).append(index)
-        for group_id, indexes in shared_group_indexes.items():
-            common_signatures = None
-            for index in indexes:
-                signatures = {
-                    support.shared_layout_signature(plan)
-                    for plan in candidates_by_support[index]
-                }
-                common_signatures = (
-                    signatures
-                    if common_signatures is None
-                    else common_signatures.intersection(signatures)
+        candidates_by_id = {
+            config.support_id: candidates_by_support[index]
+            for index, config in enumerate(ordered_configs)
+        }
+        status_by_id = {
+            status["config"].support_id: status
+            for status in candidate_statuses
+        }
+        candidates_by_unit = []
+        try:
+            for unit in request.input.units:
+                unit_candidates = support.assemble_support_unit_candidates(
+                    unit.unit_id,
+                    {
+                        config.support_id: candidates_by_id[config.support_id]
+                        for config in unit.configs
+                    },
+                    require_shared_layout=unit.require_shared_layout,
                 )
-            common_signatures = common_signatures or set()
-            for index in indexes:
-                candidates_by_support[index] = [
-                    plan
-                    for plan in candidates_by_support[index]
-                    if support.shared_layout_signature(plan) in common_signatures
-                ]
-                status = candidate_statuses[index]
-                status["shared_layout_group"] = group_id
-                status["shared_candidate_count"] = len(
-                    candidates_by_support[index]
-                )
-                status["actual_valid_count"] = len(candidates_by_support[index])
-                status["sufficient"] = (
-                    len(candidates_by_support[index])
-                    >= target_valid_candidate_count
-                )
+                candidates_by_unit.append(unit_candidates)
+                if unit.require_shared_layout:
+                    for config in unit.configs:
+                        status = status_by_id[config.support_id]
+                        status["shared_layout_group"] = unit.unit_id
+                        status["shared_candidate_count"] = len(unit_candidates)
+                        status["actual_valid_count"] = len(unit_candidates)
+                        status["sufficient"] = (
+                            len(unit_candidates) >= target_valid_candidate_count
+                        )
+        except support.SupportUnitAssemblyError as exc:
+            diagnostics = solver_search.SolverDiagnostics(
+                solver_type="support",
+                legal_solution_found=False,
+                main_issue_category=solver_search.ENGINEERING_CONSTRAINT_LIMITED,
+                main_issue_message=(
+                    f"雙路支撐單元 {exc.unit_id} 的 Jack station 不一致，"
+                    "無法建立全域候選。"
+                    if exc.code == "SHARED_JACK_INVARIANT_VIOLATION"
+                    else f"{exc.code}：支撐單元 {exc.unit_id} 無法建立全域候選。"
+                ),
+                issue_counts={exc.code: 1},
+                affected_component_ids=list(exc.member_ids),
+                stopping_reason="支撐單元 invariant 驗證失敗，Phase 2 未執行",
+                policy_id=policy.policy_id,
+                policy_version=policy.policy_version,
+                validation_issues=[{
+                    "code": exc.code,
+                    "zoning": request.input.zoning,
+                    "unit_ids": [exc.unit_id],
+                    "member_ids": list(exc.member_ids),
+                    "jack_centers": list(exc.jack_centers),
+                    "actual_value": (
+                        max(exc.jack_centers) - min(exc.jack_centers)
+                        if exc.jack_centers else None
+                    ),
+                    "tolerance": 0.0,
+                }],
+                phase2_executed=False,
+            )
+            return None, diagnostics
 
         shortages = [
             status
@@ -360,6 +386,7 @@ class OptimizeSupportZone:
                 stage_records=[],
                 stage_scores=[],
                 final_assessment=None,
+                zoning=request.input.zoning,
             )
             support.log(
                 f"分區 {request.input.zoning} 未進入全域配置："
@@ -393,12 +420,20 @@ class OptimizeSupportZone:
             support.log(f"Beam Width：{stage.beam_width}")
             phase2_diagnostics = {}
             stage_solution = support.build_global_solution(
-                candidates_by_support=candidates_by_support,
+                candidates_by_support=candidates_by_unit,
                 beam_width=stage.beam_width,
                 material_ratio_targets=request.material_ratio_targets.as_dict(),
                 material_ratio_weight=request.material_ratio_weight,
                 diagnostics_out=phase2_diagnostics,
             )
+            stage_solution.search_diagnostics = {
+                "adjacency_units": list(
+                    phase2_diagnostics.get("adjacency_units", []) or []
+                ),
+                "adjacency_pairs": list(
+                    phase2_diagnostics.get("adjacency_pairs", []) or []
+                ),
+            }
             solutions.append(stage_solution)
             if stage_solution.valid:
                 stage_scores.append(float(stage_solution.total_score))
@@ -464,9 +499,14 @@ class OptimizeSupportZone:
             stage_records=stage_records,
             stage_scores=stage_scores,
             final_assessment=final_assessment,
+            zoning=request.input.zoning,
         )
         solution.candidate_diagnostics = candidate_statuses
+        adjacency_snapshots = dict(
+            getattr(solution, "search_diagnostics", {}) or {}
+        )
         solution.search_diagnostics = diagnostics.to_dict()
+        solution.search_diagnostics.update(adjacency_snapshots)
         self._emit_progress(
             on_progress,
             "finalizing",
@@ -513,6 +553,7 @@ class OptimizeSupportZone:
         stage_records,
         stage_scores,
         final_assessment,
+        zoning="",
     ) -> solver_search.SolverDiagnostics:
         policy = self.search_policy
         issue_counts, insufficient_ids, missing_ids, concentrated_ids = (
@@ -582,6 +623,27 @@ class OptimizeSupportZone:
             if stage_records
             else 0
         )
+        search_snapshot = dict(
+            getattr(solution, "search_diagnostics", {}) or {}
+        ) if solution is not None else {}
+        adjacency_units = list(search_snapshot.get("adjacency_units", []) or [])
+        adjacency_pairs = list(search_snapshot.get("adjacency_pairs", []) or [])
+        pair_issues = [
+            {
+                "code": "ADJACENT_JACK_DISTANCE_OUT_OF_TOLERANCE",
+                "zoning": str(zoning),
+                "unit_ids": [
+                    pair.get("first_unit_id", ""),
+                    pair.get("second_unit_id", ""),
+                ],
+                "member_ids": list(pair.get("first_member_ids", []) or [])
+                + list(pair.get("second_member_ids", []) or []),
+                "actual_value": pair.get("distance"),
+                "tolerance": pair.get("minimum_distance"),
+            }
+            for pair in adjacency_pairs
+            if not bool(pair.get("valid", False))
+        ]
         return solver_search.SolverDiagnostics(
             solver_type="support",
             search_status=(
@@ -643,6 +705,10 @@ class OptimizeSupportZone:
             policy_id=policy.policy_id,
             policy_version=policy.policy_version,
             stage_records=stage_records,
+            validation_issues=pair_issues or None,
+            adjacency_units=adjacency_units or None,
+            adjacency_pairs=adjacency_pairs or None,
+            phase2_executed=bool(stage_records),
         )
 
 

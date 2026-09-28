@@ -21,12 +21,12 @@ class DXFImporterWorldGeometryTests(unittest.TestCase):
             self.assertAlmostEqual(actual_point[1], expected_point[1], places=places)
 
     @staticmethod
-    def extract_source_geometry(entity):
+    def extract_source_geometry(entity, *, role="column", layer="COLUMN"):
         handle = str(entity.dxf.handle)
         group = _GeometryGroup(
-            key=f"column:{handle}",
-            role="column",
-            layer="COLUMN",
+            key=f"{role}:{handle}",
+            role=role,
+            layer=layer,
             primitives=[],
             handles=set(),
             entity_types=set(),
@@ -81,6 +81,46 @@ class DXFImporterWorldGeometryTests(unittest.TestCase):
 
         self.assertEqual(len(source_geometry), 1)
         self.assertEqual(source_geometry[0].source_entity_type, "LWPOLYLINE")
+        self.assert_points_almost_equal(source_geometry[0].points, expected)
+        self.assert_points_almost_equal(group.primitives[0].points, expected)
+
+    def test_nested_brace_root_preserves_identity_and_wcs_geometry(self):
+        document = ezdxf.new("R2010")
+        leaf = document.blocks.new("BRACE_LEAF_SECTION")
+        leaf.add_lwpolyline(
+            ((0.0, -150.0), (3000.0, -150.0), (3000.0, 150.0), (0.0, 150.0)),
+            close=True,
+            dxfattribs={"extrusion": (0.0, 0.0, -1.0)},
+        )
+        parent = document.blocks.new("BRACE_PARENT_SECTION")
+        parent.add_blockref(
+            leaf.name,
+            (250.0, 100.0),
+            dxfattribs={"rotation": 15.0},
+        )
+        insert = document.modelspace().add_blockref(
+            parent.name,
+            (5000.0, -3000.0),
+            dxfattribs={
+                "layer": "BRACE",
+                "xscale": -1.0,
+                "yscale": 1.0,
+                "rotation": 40.0,
+            },
+        )
+        leaf_entity = next(recursive_decompose((insert,)))
+        expected = tuple(_point(point) for point in leaf_entity.vertices_in_wcs())
+
+        group, source_geometry = self.extract_source_geometry(
+            insert,
+            role="brace",
+            layer="BRACE",
+        )
+
+        self.assertEqual(group.role, "brace")
+        self.assertEqual(group.root_handle, insert.dxf.handle)
+        self.assertEqual(group.root_entity_type, "INSERT")
+        self.assertEqual({item.source_handle for item in source_geometry}, {insert.dxf.handle})
         self.assert_points_almost_equal(source_geometry[0].points, expected)
         self.assert_points_almost_equal(group.primitives[0].points, expected)
 
@@ -229,6 +269,8 @@ class DXFImporterWorldGeometryTests(unittest.TestCase):
         group, source_geometry = self.extract_source_geometry(insert)
 
         self.assertEqual(len(source_geometry), 1)
+        self.assertEqual(group.root_handle, insert.dxf.handle)
+        self.assertEqual(group.root_entity_type, "INSERT")
         self.assert_points_almost_equal(source_geometry[0].points, expected)
         self.assert_points_almost_equal(group.primitives[0].points, expected)
 

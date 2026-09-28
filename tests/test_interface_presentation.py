@@ -7,6 +7,7 @@ from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 from main import SupportInputApp, SupportSolverDialog, WalerSolverDialog
 from bracing_optimizer.application.optimize_waler import OptimizeWaler, OptimizeWalerRequest
 from bracing_optimizer.application.project_data import ProjectDataModel
+from bracing_optimizer.application.project_results import ProjectResultModel
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.algorithms.solver_search import (
     DEFAULT_SEARCH_POLICY,
@@ -15,6 +16,56 @@ from bracing_optimizer.algorithms.solver_search import (
 
 
 class InterfacePresentationTests(unittest.TestCase):
+    @staticmethod
+    def make_global_waler_preflight_app(*, manually_modified):
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.root = object()
+        app.project_data = object()
+        app.validate_data = Mock(return_value=True)
+        app._show_waler_solver_busy = Mock()
+        app._ensure_waler_solver_guard = Mock(
+            return_value=SimpleNamespace(is_busy=False)
+        )
+        builder = Mock()
+        builder.build_all.return_value = {
+            "W1": SimpleNamespace(
+                waler_id="W1",
+                material_spec="",
+                purchasable_lengths=(),
+            )
+        }
+        app._ensure_solver_input_builders = Mock(
+            return_value=(Mock(), builder)
+        )
+        app._has_modified_waler_results = Mock(
+            return_value=manually_modified
+        )
+        app._apply_waler_global_result = Mock()
+        app.make_waler_global_optimizer = Mock(return_value=object())
+        return app
+
+    @staticmethod
+    def make_single_waler_preflight_app(waler_inputs):
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.root = object()
+        app.project_data = object()
+        app.validate_data = Mock(return_value=True)
+        app.show_result = Mock()
+        app._show_waler_solver_busy = Mock()
+        app._ensure_waler_solver_guard = Mock(
+            return_value=SimpleNamespace(is_busy=False)
+        )
+        builder = Mock()
+        builder.build_all.return_value = waler_inputs
+        app._ensure_solver_input_builders = Mock(
+            return_value=(Mock(), builder)
+        )
+        app._has_modified_waler_results = Mock(return_value=False)
+        app.solver_memory = {}
+        app._store_waler_result = Mock()
+        app.make_waler_optimizer = Mock(return_value=object())
+        return app
+
     def test_solver_dialogs_hide_algorithm_tuning_fields(self):
         support_source = inspect.getsource(SupportSolverDialog.__init__)
         waler_source = inspect.getsource(WalerSolverDialog.__init__)
@@ -108,6 +159,136 @@ class InterfacePresentationTests(unittest.TestCase):
 
         self.assertTrue(app._has_modified_waler_results("W1"))
         self.assertFalse(app._has_modified_waler_results("W2"))
+
+    def test_global_waler_declined_overwrite_stops_before_dialog_and_solver(self):
+        app = self.make_global_waler_preflight_app(manually_modified=True)
+
+        with patch("main.messagebox.askyesno", return_value=False) as confirm:
+            with patch("main.WalerGlobalSolverDialog") as dialog_class:
+                app._open_waler_global_solver()
+
+        confirm.assert_called_once()
+        dialog_class.assert_not_called()
+        app.make_waler_global_optimizer.assert_not_called()
+        app._apply_waler_global_result.assert_not_called()
+
+    def test_global_waler_accepted_overwrite_opens_solver_dialog(self):
+        app = self.make_global_waler_preflight_app(manually_modified=True)
+
+        with patch("main.messagebox.askyesno", return_value=True) as confirm:
+            with patch("main.WalerGlobalSolverDialog") as dialog_class:
+                app._open_waler_global_solver()
+
+        confirm.assert_called_once()
+        dialog_class.assert_called_once()
+        dialog_class.return_value.open.assert_called_once_with()
+
+    def test_global_waler_without_manual_edits_skips_overwrite_prompt(self):
+        app = self.make_global_waler_preflight_app(manually_modified=False)
+
+        with patch("main.messagebox.askyesno") as confirm:
+            with patch("main.WalerGlobalSolverDialog") as dialog_class:
+                app._open_waler_global_solver()
+
+        confirm.assert_not_called()
+        dialog_class.assert_called_once()
+        dialog_class.return_value.open.assert_called_once_with()
+
+    def test_single_waler_selection_excludes_rc_input(self):
+        inputs = {
+            "W-RC": SimpleNamespace(
+                waler_id="W-RC",
+                material_spec=" rc ",
+                purchasable_lengths=(),
+            ),
+            "W1": SimpleNamespace(
+                waler_id="W1",
+                material_spec="H400x400",
+                purchasable_lengths=(5_000,),
+            ),
+        }
+        app = self.make_single_waler_preflight_app(inputs)
+
+        with patch("main.WalerSelectionDialog") as selection_class:
+            selection_class.return_value.open.return_value = None
+            with patch("main.WalerSolverDialog") as solver_class:
+                app._open_waler_solver()
+
+        self.assertEqual(selection_class.call_args.args[1], ["W1"])
+        solver_class.assert_not_called()
+
+    def test_single_waler_all_rc_returns_without_dialog_or_state_change(self):
+        inputs = {
+            "W-RC": SimpleNamespace(
+                waler_id="W-RC",
+                material_spec="RC",
+                purchasable_lengths=(),
+            )
+        }
+        app = self.make_single_waler_preflight_app(inputs)
+        sentinel_results = {"old": object()}
+        app._project_results = ProjectResultModel(result_items=sentinel_results.copy())
+
+        with patch("main.WalerSelectionDialog") as selection_class:
+            with patch("main.WalerSolverDialog") as solver_class:
+                app._open_waler_solver()
+
+        selection_class.assert_not_called()
+        solver_class.assert_not_called()
+        app.make_waler_optimizer.assert_not_called()
+        self.assertEqual(app.result_items, sentinel_results)
+        app.show_result.assert_called_once()
+
+    def test_global_waler_filters_rc_before_inventory_and_overwrite_checks(self):
+        app = self.make_global_waler_preflight_app(manually_modified=True)
+        builder = app._ensure_solver_input_builders.return_value[1]
+        builder.build_all.return_value = {
+            "W-RC": SimpleNamespace(
+                waler_id="W-RC",
+                material_spec="RC",
+                purchasable_lengths=(),
+            ),
+            "W1": SimpleNamespace(
+                waler_id="W1",
+                material_spec="H400x400",
+                purchasable_lengths=(5_000,),
+            ),
+        }
+
+        with patch("main.messagebox.askyesno", return_value=True):
+            with patch("main.WalerGlobalSolverDialog") as dialog_class:
+                app._open_waler_global_solver()
+
+        self.assertEqual(
+            [item.waler_id for item in dialog_class.call_args.args[1]],
+            ["W1"],
+        )
+        app._has_modified_waler_results.assert_called_once_with("W1")
+        dialog_class.return_value.open.assert_called_once_with()
+
+    def test_global_waler_all_rc_returns_without_dialog_or_state_change(self):
+        app = self.make_global_waler_preflight_app(manually_modified=True)
+        app.show_result = Mock()
+        app._project_results = ProjectResultModel(result_items={"old": {}})
+        builder = app._ensure_solver_input_builders.return_value[1]
+        builder.build_all.return_value = {
+            "W-RC": SimpleNamespace(
+                waler_id="W-RC",
+                material_spec="RC",
+                purchasable_lengths=(),
+            )
+        }
+
+        with patch("main.messagebox.askyesno") as confirm:
+            with patch("main.WalerGlobalSolverDialog") as dialog_class:
+                app._open_waler_global_solver()
+
+        confirm.assert_not_called()
+        dialog_class.assert_not_called()
+        app.make_waler_global_optimizer.assert_not_called()
+        app._apply_waler_global_result.assert_not_called()
+        self.assertEqual(app.result_items, {"old": {}})
+        app.show_result.assert_called_once()
 
     def test_applying_waler_segments_updates_the_selected_option_in_place(self):
         app = SupportInputApp.__new__(SupportInputApp)
@@ -203,12 +384,27 @@ class InterfacePresentationTests(unittest.TestCase):
         save_source = inspect.getsource(SupportInputApp.save_project_case)
         load_source = inspect.getsource(SupportInputApp.load_project_case)
         relink_source = inspect.getsource(SupportInputApp._relink_dxf)
+        review_relink_source = inspect.getsource(
+            SupportInputApp._relink_paused_dxf_review
+        )
+        review_adoption_source = inspect.getsource(
+            SupportInputApp._adopt_paused_review_relink
+        )
+        relink_presentation_source = (
+            relink_source + review_relink_source + review_adoption_source
+        )
 
-        self.assertNotIn("DxfAssetManager", save_source + load_source + relink_source)
+        self.assertNotIn(
+            "DxfAssetManager",
+            save_source + load_source + relink_presentation_source,
+        )
         self.assertNotIn("ProjectSerializer", load_source)
-        self.assertNotIn("DxfCompatibilityChecker", relink_source)
-        self.assertNotIn(".compare(", relink_source)
-        self.assertNotIn(".merge_source_references(", relink_source)
+        self.assertNotIn("DxfCompatibilityChecker", relink_presentation_source)
+        self.assertNotIn(".compare(", relink_presentation_source)
+        self.assertNotIn(".merge_source_references(", relink_presentation_source)
+        self.assertNotIn("source_file_fingerprint", relink_presentation_source)
+        self.assertNotIn("review_state_matches_source", relink_presentation_source)
+        self.assertNotIn(".sha256", relink_presentation_source)
 
     def test_project_ui_delegates_project_application_workflows(self):
         dxf_apply_source = inspect.getsource(
@@ -238,20 +434,131 @@ class InterfacePresentationTests(unittest.TestCase):
         editor_source = inspect.getsource(
             SupportInputApp._open_support_plan_editor
         )
+        adoption_source = inspect.getsource(
+            SupportInputApp._adopt_support_plan_edit
+        )
         breakdown_source = inspect.getsource(
             SupportInputApp._format_support_plan_breakdown
         )
 
         self.assertIn("editing_service.stage_edit", editor_source)
+        self.assertIn("self._adopt_support_plan_edit", editor_source)
+        self.assertIn("if not staged.changed", adoption_source)
+        self.assertIn('item["result"] = staged.solution', adoption_source)
+        self.assertNotIn('item["result"] =', editor_source)
         self.assertIn("SupportPlanEditing.analyze_plan", breakdown_source)
         for hidden_rule in (
             "evaluate_single_support",
             "configured_steel_lengths",
+            "_normalize_pieces",
+            "shared_layout_group",
             "support.JACK_LENGTH",
             "support.SHIM_LENGTHS",
             "support.TARGET_GAP",
         ):
-            self.assertNotIn(hidden_rule, editor_source + breakdown_source)
+            self.assertNotIn(
+                hidden_rule,
+                editor_source + adoption_source + breakdown_source,
+            )
+
+    def test_support_plan_no_op_does_not_adopt_or_mutate_result_state(self):
+        for initial_dirty, initial_reason in (
+            (False, ""),
+            (True, "其他尚未儲存的修改"),
+        ):
+            with self.subTest(initial_dirty=initial_dirty):
+                app = SupportInputApp.__new__(SupportInputApp)
+                original_solution = SimpleNamespace(plans=[], valid=True)
+                replacement = SimpleNamespace(plans=[], valid=False)
+                item = {"type": "support", "result": original_solution}
+                persisted = {"marker": "before"}
+                app._project_results = ProjectResultModel(
+                    result_items={"Z1": item},
+                    last_calculated_time="2000-01-01T00:00:00",
+                    persisted_payload=persisted,
+                )
+                app.project_dirty = initial_dirty
+                app.project_dirty_reason = initial_reason
+                app._refresh_results_tree = Mock()
+                app.update_preview = Mock()
+                app.results_tree = Mock()
+                staged = SimpleNamespace(
+                    changed=False,
+                    solution=replacement,
+                )
+
+                adopted = app._adopt_support_plan_edit(
+                    item,
+                    staged,
+                    "Z1",
+                    "S1",
+                )
+
+                self.assertFalse(adopted)
+                self.assertIs(item["result"], original_solution)
+                self.assertEqual(
+                    app.last_calculated_time,
+                    "2000-01-01T00:00:00",
+                )
+                self.assertIs(app.project_result, persisted)
+                self.assertEqual(app.project_dirty, initial_dirty)
+                self.assertEqual(app.project_dirty_reason, initial_reason)
+                app._refresh_results_tree.assert_not_called()
+                app.update_preview.assert_not_called()
+                app.results_tree.exists.assert_not_called()
+
+    def test_support_plan_changed_result_is_adopted_even_when_invalid(self):
+        app = SupportInputApp.__new__(SupportInputApp)
+        original_solution = SimpleNamespace(plans=[], valid=True)
+        changed_solution = SimpleNamespace(
+            plans=[],
+            valid=False,
+            reason="人工配置不合法",
+        )
+        item = {"type": "support", "result": original_solution}
+        app._project_results = ProjectResultModel(
+            result_items={"Z1": item},
+            last_calculated_time="2000-01-01T00:00:00",
+            persisted_payload={"marker": "before"},
+        )
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        app._build_material_summary_payload = Mock(return_value=[])
+        app._refresh_project_status_display = Mock()
+        app._refresh_results_tree = Mock()
+        app.update_preview = Mock()
+        app.results_tree = Mock()
+        app.results_tree.exists.return_value = True
+        app.results_tree.parent.return_value = "support-group"
+        staged = SimpleNamespace(
+            changed=True,
+            solution=changed_solution,
+        )
+
+        adopted = app._adopt_support_plan_edit(
+            item,
+            staged,
+            "Z1",
+            "S1",
+        )
+
+        self.assertTrue(adopted)
+        self.assertIs(item["result"], changed_solution)
+        self.assertNotEqual(
+            app.last_calculated_time,
+            "2000-01-01T00:00:00",
+        )
+        self.assertNotEqual(app.project_result, {"marker": "before"})
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "成果配置已變更")
+        app._refresh_results_tree.assert_called_once_with(
+            selected_id="__support_plan__:Z1:S1"
+        )
+        app.results_tree.item.assert_called_once_with(
+            "support-group",
+            open=True,
+        )
+        app.update_preview.assert_called_once_with(preserve_view=True)
 
     def test_saved_result_summary_uses_engineering_status_not_algorithm_values(self):
         diagnostics = SolverDiagnostics(

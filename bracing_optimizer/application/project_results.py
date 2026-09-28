@@ -331,7 +331,12 @@ class ProjectResultModel:
         self.persisted_payload = self.to_payload(material_summary, now=now)
         return self.persisted_payload
 
-    def stage_waler_global_result(self, global_result) -> GlobalWalerApplyPlan:
+    def stage_waler_global_result(
+        self,
+        global_result,
+        *,
+        excluded_waler_ids: Sequence[str] = (),
+    ) -> GlobalWalerApplyPlan:
         """Validate and stage all result items selected by a global solve."""
 
         solution = getattr(global_result, "solution", None)
@@ -382,12 +387,17 @@ class ProjectResultModel:
         }
 
         staged_items = copy.deepcopy(self.result_items)
-        selected_id_set = set(selected_ids)
+        replacement_id_set = set(selected_ids)
+        replacement_id_set.update(
+            str(waler_id or "").strip()
+            for waler_id in excluded_waler_ids
+            if str(waler_id or "").strip()
+        )
         for result_id in list(staged_items):
             if self.waler_result_identity(
                 result_id,
                 staged_items[result_id],
-            ) in selected_id_set:
+            ) in replacement_id_set:
                 staged_items.pop(result_id)
 
         for candidate in selected_candidates:

@@ -13,7 +13,9 @@ from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.solver_input_builder import InventoryLookup
 
 
-_SUPPORT_JACK_REGION_PENALTY_WEIGHT = 3000
+_SUPPORT_JACK_REGION_PENALTY_WEIGHT = (
+    support.SUPPORT_JACK_REGION_PENALTY_WEIGHT
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,7 @@ class SupportEditContext:
 class SupportPlanEditResult:
     """Staged replacement produced by one support-plan edit."""
 
+    changed: bool
     solution: Any
     plan: Any
     updated_support_ids: tuple[str, ...]
@@ -167,30 +170,77 @@ class SupportPlanEditing:
             options=self.edit_options(config),
         )
 
+    def _zone_input_for_support(self, support_id: str):
+        if (
+            self.project_data is None
+            or self.support_input_builder is None
+            or not hasattr(self.support_input_builder, "build_zone")
+            or not hasattr(self.project_data, "struts")
+        ):
+            return None
+        row = next(
+            (
+                item for item in self.project_data.struts
+                if str(item.get("StrutID", "") or "").strip()
+                == str(support_id or "").strip()
+            ),
+            None,
+        )
+        if row is None:
+            raise ValueError(f"找不到支撐 {support_id} 的 Project 幾何資料。")
+        zoning = str(row.get("Zoning", "") or "").strip()
+        return self.support_input_builder.build_zone(self.project_data, zoning)
+
     @staticmethod
-    def validate_pieces(config, pieces: Sequence[tuple[str, int]]) -> SupportPieceValidation:
+    def _assemble_solution_units(solution, zone_input):
+        if zone_input is None:
+            return None
+        plans_by_id = {
+            str(getattr(plan, "support_id", "") or ""): plan
+            for plan in list(getattr(solution, "plans", []) or [])
+        }
+        assembled = []
+        for unit in zone_input.units:
+            member_plans = {}
+            for member_id in unit.member_ids:
+                plan = plans_by_id.get(member_id)
+                if plan is None:
+                    raise ValueError(f"找不到支撐方案 {member_id}。")
+                member_plans[member_id] = [plan]
+            candidates = support.assemble_support_unit_candidates(
+                unit.unit_id,
+                member_plans,
+                require_shared_layout=unit.require_shared_layout,
+            )
+            if len(candidates) != 1:
+                raise ValueError(f"支撐單元 {unit.unit_id} 無法建立唯一人工方案。")
+            assembled.append(candidates[0])
+        return assembled
+
+    @staticmethod
+    def _normalize_pieces(
+        pieces: Sequence[tuple[str, int]],
+    ) -> tuple[tuple[str, int], ...]:
         try:
-            normalized = [
+            normalized = tuple(
                 (str(kind).strip().lower(), int(round(float(length))))
                 for kind, length in pieces
-            ]
-        except (TypeError, ValueError):
-            return SupportPieceValidation(
-                valid=False,
-                issue_code="invalid_piece_format",
-                message="❌ 類型或長度格式錯誤",
             )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("類型或長度格式錯誤") from exc
 
         if any(
             kind not in ("steel", "shim", "jack") or length <= 0
             for kind, length in normalized
         ):
-            return SupportPieceValidation(
-                valid=False,
-                issue_code="invalid_piece_format",
-                message="❌ 類型或長度格式錯誤",
-            )
+            raise ValueError("類型或長度格式錯誤")
+        return normalized
 
+    @staticmethod
+    def _validate_normalized_pieces(
+        config,
+        normalized: Sequence[tuple[str, int]],
+    ) -> SupportPieceValidation:
         jack_count = sum(1 for kind, _length in normalized if kind == "jack")
         if jack_count != 1:
             return SupportPieceValidation(
@@ -221,6 +271,22 @@ class SupportPlanEditing:
                 )
         return SupportPieceValidation(valid=True)
 
+    @classmethod
+    def validate_pieces(
+        cls,
+        config,
+        pieces: Sequence[tuple[str, int]],
+    ) -> SupportPieceValidation:
+        try:
+            normalized = cls._normalize_pieces(pieces)
+        except (TypeError, ValueError):
+            return SupportPieceValidation(
+                valid=False,
+                issue_code="invalid_piece_format",
+                message="❌ 類型或長度格式錯誤",
+            )
+        return cls._validate_normalized_pieces(config, normalized)
+
     def stage_edit(
         self,
         solution,
@@ -231,14 +297,14 @@ class SupportPlanEditing:
 
         support_id = str(support_id or "")
         context = self.edit_context(solution, support_id)
-        validation = self.validate_pieces(context.config, pieces)
-        if validation.issue_code == "invalid_piece_format":
-            raise ValueError(validation.message)
-
-        normalized_pieces = [
-            (str(kind).strip().lower(), int(round(float(length))))
-            for kind, length in pieces
-        ]
+        try:
+            normalized_pieces = self._normalize_pieces(pieces)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("❌ 類型或長度格式錯誤") from exc
+        validation = self._validate_normalized_pieces(
+            context.config,
+            normalized_pieces,
+        )
         source_plans = list(getattr(solution, "plans", []) or [])
         shared_group = str(
             getattr(context.plan, "shared_layout_group", "") or ""
@@ -254,6 +320,47 @@ class SupportPlanEditing:
             if shared_group
             else [support_id]
         )
+        source_plans_by_id = {
+            str(getattr(plan, "support_id", "") or ""): plan
+            for plan in source_plans
+        }
+        changed = False
+        for member_id in target_ids:
+            member_plan = source_plans_by_id.get(member_id)
+            try:
+                current_pieces = self._normalize_pieces(
+                    getattr(member_plan, "pieces", ())
+                )
+            except (TypeError, ValueError):
+                changed = True
+                break
+            if current_pieces != normalized_pieces:
+                changed = True
+                break
+
+        if not changed:
+            unit_candidates = getattr(solution, "_adjacency_units", None)
+            neighbor_checks = tuple(
+                self.neighbor_checks(
+                    solution,
+                    support_id,
+                    unit_candidates=unit_candidates,
+                )
+            )
+            return SupportPlanEditResult(
+                changed=False,
+                solution=solution,
+                plan=context.plan,
+                updated_support_ids=(),
+                validation=validation,
+                neighbor_checks=neighbor_checks,
+                analysis=self.analyze_plan(
+                    context.plan,
+                    neighbor_checks,
+                    solution,
+                ),
+            )
+
         configs = {}
         for member_id in target_ids:
             config = self.config_by_id(member_id)
@@ -277,16 +384,29 @@ class SupportPlanEditing:
             raise ValueError(f"找不到支撐方案 {support_id}。")
 
         staged_solution.plans = staged_plans
-        self.recalculate_global_solution(staged_solution)
+        zone_input = self._zone_input_for_support(support_id)
+        unit_candidates = self._assemble_solution_units(
+            staged_solution,
+            zone_input,
+        )
+        self.recalculate_global_solution(
+            staged_solution,
+            unit_candidates=unit_candidates,
+        )
         edited_plan = next(
             plan
             for plan in staged_solution.plans
             if str(getattr(plan, "support_id", "")) == support_id
         )
         neighbor_checks = tuple(
-            self.neighbor_checks(staged_solution, support_id)
+            self.neighbor_checks(
+                staged_solution,
+                support_id,
+                unit_candidates=unit_candidates,
+            )
         )
         return SupportPlanEditResult(
+            changed=True,
             solution=staged_solution,
             plan=edited_plan,
             updated_support_ids=tuple(updated_ids),
@@ -398,7 +518,7 @@ class SupportPlanEditing:
         )
 
     @staticmethod
-    def recalculate_global_solution(solution):
+    def recalculate_global_solution(solution, *, unit_candidates=None):
         plans = list(getattr(solution, "plans", []) or [])
         valid = all(
             getattr(plan, "valid", False) and not getattr(plan, "reason", "")
@@ -407,14 +527,24 @@ class SupportPlanEditing:
         reasons = []
         if not support.shared_layout_groups_valid(plans):
             reasons.append("雙路支撐群組的材料配置不一致")
-        for previous, current in zip(plans, plans[1:]):
-            ok, _penalty = support.pair_penalty(previous, current)
-            if not ok:
-                valid = False
-                reasons.append(
-                    f"{getattr(previous, 'support_id', '')} 與 "
-                    f"{getattr(current, 'support_id', '')} 千斤頂距離不足"
-                )
+        units = list(unit_candidates) if unit_candidates is not None else None
+        if units is not None:
+            for previous, current in zip(units, units[1:]):
+                evaluation = support.evaluate_support_unit_pair(previous, current)
+                if not evaluation.valid:
+                    valid = False
+                    reasons.append(
+                        f"{previous.unit_id} 與 {current.unit_id} 千斤頂距離不足"
+                    )
+        else:
+            for previous, current in zip(plans, plans[1:]):
+                ok, _penalty = support.pair_penalty(previous, current)
+                if not ok:
+                    valid = False
+                    reasons.append(
+                        f"{getattr(previous, 'support_id', '')} 與 "
+                        f"{getattr(current, 'support_id', '')} 千斤頂距離不足"
+                    )
         recalculated = support.make_global_solution(
             plans,
             material_ratio_targets=(
@@ -428,6 +558,7 @@ class SupportPlanEditing:
             ),
             valid=valid,
             reason="；".join(reasons),
+            unit_candidates=units,
         )
         for attribute in (
             "total_score",
@@ -442,6 +573,8 @@ class SupportPlanEditing:
         ):
             setattr(solution, attribute, getattr(recalculated, attribute))
         solution.valid = valid
+        if units is not None:
+            solution._adjacency_units = units
         solution.group_penalty = (
             recalculated.jack_region_penalty
             + recalculated.material_ratio_penalty
@@ -457,8 +590,40 @@ class SupportPlanEditing:
         return None
 
     @staticmethod
-    def neighbor_checks(solution, support_id: str) -> list[dict]:
+    def neighbor_checks(
+        solution,
+        support_id: str,
+        *,
+        unit_candidates=None,
+    ) -> list[dict]:
         plans = list(getattr(solution, "plans", []) or [])
+        if unit_candidates is not None:
+            units = list(unit_candidates)
+            unit_index = next(
+                (
+                    index for index, unit in enumerate(units)
+                    if str(support_id) in unit.member_ids
+                ),
+                None,
+            )
+            if unit_index is None:
+                return []
+            checks = []
+            if unit_index > 0:
+                checks.append(SupportPlanEditing._neighbor_unit_check(
+                    units[unit_index - 1],
+                    units[unit_index],
+                    relation="前一支支撐",
+                    current_is_second=True,
+                ))
+            if unit_index + 1 < len(units):
+                checks.append(SupportPlanEditing._neighbor_unit_check(
+                    units[unit_index],
+                    units[unit_index + 1],
+                    relation="下一支支撐",
+                    current_is_second=False,
+                ))
+            return checks
         index = next(
             (
                 position
@@ -513,6 +678,36 @@ class SupportPlanEditing:
                 )
             )
         return checks
+
+    @staticmethod
+    def _neighbor_unit_check(
+        first,
+        second,
+        *,
+        relation: str,
+        current_is_second: bool,
+    ):
+        evaluation = support.evaluate_support_unit_pair(first, second)
+        current = second if current_is_second else first
+        neighbor = first if current_is_second else second
+        return {
+            "relation": relation,
+            "support_id": "、".join(neighbor.member_ids),
+            "unit_id": neighbor.unit_id,
+            "member_ids": neighbor.member_ids,
+            "distance": evaluation.distance,
+            "ok": evaluation.valid,
+            "penalty": float(evaluation.region_penalty),
+            "current_region": current.jack_region_id,
+            "neighbor_region": neighbor.jack_region_id,
+            "minimum_distance": float(
+                support.MIN_JACK_DISTANCE_BETWEEN_SUPPORTS
+            ),
+            "region_penalty_weight": float(
+                support.SUPPORT_JACK_REGION_PENALTY_WEIGHT
+            ),
+            "region_penalty": float(evaluation.region_penalty),
+        }
 
     @staticmethod
     def _neighbor_check(first, second, *, relation: str, current_is_second: bool):

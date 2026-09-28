@@ -18,6 +18,10 @@ from bracing_optimizer.presentation.field_labels import (
 )
 
 from .controllers import SelectionController
+from .corner_brace_repair import (
+    CornerBraceRepairCandidate,
+    CornerBraceRepairPlan,
+)
 from .geometry import Point, _distance, _midpoint
 from .importer import DXFImporter, default_layer_mapping_for_file
 from .models import (
@@ -73,6 +77,7 @@ from .review_confirmation import (
     FORMAL_REVIEW_ROLES,
     review_item_can_be_confirmed,
 )
+from .review_recovery import RecoveryCategory, RecoverySummary
 from .review_workflow import (
     DXFReviewSnapshot,
     DXFReviewWorkflow,
@@ -94,6 +99,47 @@ class DXFImportDialogOutcome:
     import_mode: str
     result: DXFImportResult | None = None
     world_result: DXFImportResult | None = None
+
+
+def format_review_recovery_summary(summary: RecoverySummary) -> str:
+    """Format the planner-owned recovery meaning without recalculating it."""
+
+    labels = {
+        RecoveryCategory.PRESERVED: "已保留",
+        RecoveryCategory.REQUIRES_REVIEW: "需重新檢查",
+        RecoveryCategory.DISABLED: "已停用",
+    }
+    lines = ["候選 DXF 內容不同，但可建立恢復後的 Review："]
+    for category in RecoveryCategory:
+        entries = summary.entries_for(category)
+        lines.append(f"\n{labels[category]}：{summary.counts[category]} 項")
+        lines.extend(
+            f"• {entry.label}：{entry.description}"
+            for entry in entries
+        )
+    lines.append("\n是否採用此恢復結果並繼續 DXF Review？")
+    return "\n".join(lines)
+
+
+def confirm_review_recovery(
+    parent: Any,
+    summary: RecoverySummary,
+    *,
+    askyesno: Any | None = None,
+) -> bool:
+    """Collect the one explicit acceptance required for compatible recovery."""
+
+    if askyesno is None:
+        from tkinter import messagebox
+
+        askyesno = messagebox.askyesno
+    return bool(
+        askyesno(
+            "採用 DXF Review 恢復結果",
+            format_review_recovery_summary(summary),
+            parent=parent,
+        )
+    )
 
 
 class DXFImportDialog:
@@ -314,6 +360,10 @@ class DXFImportDialog:
         self.review_state: dict[str, Any] = {}
         self.waler_adjustment_preview_plan: WalerContactAdjustmentPlan | None = None
         self._waler_adjustment_overlay_items: list[int] = []
+        self.corner_brace_repair_plan: CornerBraceRepairPlan | None = None
+        self.corner_brace_repair_candidate_id = ""
+        self.corner_brace_repair_window: Any = None
+        self._corner_brace_repair_overlay_items: list[int] = []
         self._contact_panel_waler_id = ""
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.selected_problem: ProblemRecord | None = None
@@ -1254,6 +1304,13 @@ class DXFImportDialog:
             command=self._read_cad_engineering_line,
         )
         self.cad_engineering_line_button.pack(side="left", padx=(10, 0))
+        self.corner_brace_repair_button = self.ttk.Button(
+            self.geometry_tools_frame,
+            text="修補角撐",
+            command=self._open_corner_brace_repair_preview,
+            state="disabled",
+        )
+        self.corner_brace_repair_button.pack(side="left", padx=(10, 0))
 
         self.source_tools_frame = self.ttk.Frame(self.modification_tools_frame)
         self.source_tools_frame.grid(
@@ -2404,6 +2461,197 @@ class DXFImportDialog:
             return item
         return self._review_item_for_member_id(self.selected_member_id)
 
+    def _open_corner_brace_repair_preview(self) -> None:
+        """Plan first; only hard-eligible candidates enter the modal preview."""
+
+        from tkinter import messagebox
+
+        item = self._selected_review_item()
+        reason = self.corner_brace_repair_disabled_reason(item)
+        if reason:
+            messagebox.showwarning("修補角撐", reason, parent=self.window)
+            return
+        assert item is not None
+        try:
+            plan = self.review_workflow.plan_corner_brace_repair(item.key)
+        except DXFImportError as exc:
+            messagebox.showwarning("修補角撐", str(exc), parent=self.window)
+            return
+        self.corner_brace_repair_plan = plan
+        self.corner_brace_repair_candidate_id = ""
+        self._clear_corner_brace_repair_overlay()
+        if not plan.candidates:
+            details = "\n".join(plan.diagnostics) or "沒有候選通過全部安全條件。"
+            messagebox.showwarning(
+                "無可套用的角撐修補候選",
+                details,
+                parent=self.window,
+            )
+            return
+        self._show_corner_brace_repair_window(plan)
+
+    def _show_corner_brace_repair_window(
+        self,
+        plan: CornerBraceRepairPlan,
+    ) -> None:
+        existing = self.corner_brace_repair_window
+        if existing is not None:
+            try:
+                existing.destroy()
+            except self.tk.TclError:
+                pass
+        window = self.tk.Toplevel(self.window)
+        self.corner_brace_repair_window = window
+        window.title("角撐修補預覽")
+        window.transient(self.window)
+        window.protocol("WM_DELETE_WINDOW", self._cancel_corner_brace_repair)
+        body = self.ttk.Frame(window, padding=10)
+        body.pack(fill="both", expand=True)
+        self.ttk.Label(
+            body,
+            text="下列項目均已通過 residual、reference 與有限構件交點檢查；仍需明確套用。",
+            wraplength=720,
+            justify="left",
+        ).pack(fill="x", pady=(0, 6))
+        tree = self.ttk.Treeview(
+            body,
+            columns=("relationship", "length", "primary", "secondary"),
+            show="headings",
+            height=min(max(len(plan.candidates), 2), 8),
+            selectmode="browse",
+        )
+        self.corner_brace_repair_tree = tree
+        for column, label, width in (
+            ("relationship", "目標 Waler / Strut", 190),
+            ("length", "長度 mm", 100),
+            ("primary", "Automatic primary", 145),
+            ("secondary", "Manual secondary", 145),
+        ):
+            tree.heading(column, text=label)
+            tree.column(column, width=width, anchor="center")
+        for candidate in plan.candidates:
+            tree.insert(
+                "",
+                "end",
+                iid=candidate.id,
+                values=(
+                    f"{candidate.target_waler_id} / {candidate.target_strut_id}",
+                    f"{candidate.fixed_length_mm:.1f}",
+                    ", ".join(ref.member_id for ref in candidate.primary_references),
+                    ", ".join(ref.member_id for ref in candidate.secondary_references) or "—",
+                ),
+            )
+        tree.pack(fill="both", expand=True)
+        tree.bind("<<TreeviewSelect>>", self._on_corner_brace_repair_candidate_selected)
+        self.corner_brace_repair_detail_var = self.tk.StringVar(
+            value="請選擇候選以預覽 target residual 與 proposed axis。"
+        )
+        self.ttk.Label(
+            body,
+            textvariable=self.corner_brace_repair_detail_var,
+            wraplength=720,
+            justify="left",
+        ).pack(fill="x", pady=6)
+        if plan.diagnostics:
+            self.ttk.Label(
+                body,
+                text="\n".join(plan.diagnostics),
+                foreground="#795548",
+                wraplength=720,
+                justify="left",
+            ).pack(fill="x", pady=(0, 6))
+        actions = self.ttk.Frame(body)
+        actions.pack(fill="x")
+        self.corner_brace_repair_apply_button = self.ttk.Button(
+            actions,
+            text="套用所選修補",
+            command=self._apply_corner_brace_repair,
+            state="disabled",
+        )
+        self.corner_brace_repair_apply_button.pack(side="right", padx=(6, 0))
+        self.ttk.Button(
+            actions,
+            text="取消",
+            command=self._cancel_corner_brace_repair,
+        ).pack(side="right")
+        if len(plan.candidates) == 1:
+            tree.selection_set(plan.candidates[0].id)
+            tree.focus(plan.candidates[0].id)
+            self._on_corner_brace_repair_candidate_selected()
+
+    def _selected_corner_brace_repair_candidate(
+        self,
+    ) -> CornerBraceRepairCandidate | None:
+        plan = self.corner_brace_repair_plan
+        if plan is None or not self.corner_brace_repair_candidate_id:
+            return None
+        return next(
+            (
+                candidate
+                for candidate in plan.candidates
+                if candidate.id == self.corner_brace_repair_candidate_id
+            ),
+            None,
+        )
+
+    def _on_corner_brace_repair_candidate_selected(self, _event: Any = None) -> None:
+        tree = getattr(self, "corner_brace_repair_tree", None)
+        selection = tree.selection() if tree is not None else ()
+        self.corner_brace_repair_candidate_id = str(selection[0]) if selection else ""
+        candidate = self._selected_corner_brace_repair_candidate()
+        button = getattr(self, "corner_brace_repair_apply_button", None)
+        if button is not None:
+            button.configure(state="normal" if candidate is not None else "disabled")
+        if candidate is None:
+            self._clear_corner_brace_repair_overlay()
+            return
+        primary = ", ".join(ref.member_id for ref in candidate.primary_references)
+        secondary = ", ".join(ref.member_id for ref in candidate.secondary_references) or "—"
+        self.corner_brace_repair_detail_var.set(
+            f"Proposed axis: {candidate.world_start} → {candidate.world_end}\n"
+            f"Target: {candidate.target_waler_id} / {candidate.target_strut_id}\n"
+            f"Automatic primary: {primary}; repaired secondary: {secondary}\n"
+            + "\n".join(candidate.diagnostics)
+        )
+        self._draw_corner_brace_repair_overlay(candidate)
+
+    def _apply_corner_brace_repair(self) -> None:
+        from tkinter import messagebox
+
+        plan = self.corner_brace_repair_plan
+        candidate = self._selected_corner_brace_repair_candidate()
+        if plan is None or candidate is None:
+            return
+        try:
+            mutation = self.review_workflow.commit_corner_brace_repair(
+                plan,
+                candidate.id,
+                explicit_adoption=True,
+            )
+        except DXFImportError as exc:
+            messagebox.showwarning(
+                "角撐修補需重新預覽",
+                str(exc),
+                parent=self.corner_brace_repair_window or self.window,
+            )
+            return
+        self._cancel_corner_brace_repair()
+        self._sync_review_workflow_state()
+        self._refresh_result_views(preview_dirty=RenderDirty.FULL_SCENE)
+        self._show_workflow_confirmation_invalidations(mutation)
+
+    def _cancel_corner_brace_repair(self) -> None:
+        self._clear_corner_brace_repair_overlay()
+        self.corner_brace_repair_plan = None
+        self.corner_brace_repair_candidate_id = ""
+        window = self.corner_brace_repair_window
+        self.corner_brace_repair_window = None
+        if window is not None:
+            try:
+                window.destroy()
+            except self.tk.TclError:
+                pass
+
     def _is_review_item_confirmed(self, item: ReviewItem | None) -> bool:
         return self.review_workflow.is_review_item_confirmed(item)
 
@@ -3123,6 +3371,24 @@ class DXFImportDialog:
         for key, variable in variables.items():
             variable.set(values.get(key, "—") or "—")
 
+    @staticmethod
+    def corner_brace_repair_disabled_reason(item: ReviewItem | None) -> str:
+        """Return an empty string only for safely identifiable repair subjects."""
+
+        if item is None:
+            return "請先選取角撐或待修角撐來源。"
+        if item.status == "excluded":
+            return "已排除的 DXF 來源不能修補角撐。"
+        if item.role != "corner_brace":
+            return "只有 CornerBrace 可使用角撐修補。"
+        if not normalize_source_handles(item.source_handles):
+            return "角撐修補需要明確的 DXF source identity。"
+        if item.status == "recognized" and item.member_id:
+            return ""
+        if item.status == "unresolved" and item.member_id is None:
+            return ""
+        return "此 Review item 不是可修補的正式或 unresolved CornerBrace。"
+
     def _update_modification_tools(
         self,
         item: ReviewItem | None,
@@ -3144,9 +3410,11 @@ class DXFImportDialog:
         source_supported = bool(
             item is not None and item.role and item.source_handles
         )
+        repair_supported = not self.corner_brace_repair_disabled_reason(item)
 
         self.endpoint_tools_frame.pack_forget()
         self.cad_engineering_line_button.pack_forget()
+        self.corner_brace_repair_button.pack_forget()
         if has_candidates:
             self.endpoint_tools_frame.pack(side="left")
         if cad_supported:
@@ -3154,7 +3422,12 @@ class DXFImportDialog:
             self.cad_temp_status_label.grid()
         else:
             self.cad_temp_status_label.grid_remove()
-        if has_candidates or cad_supported:
+        if repair_supported:
+            self.corner_brace_repair_button.configure(state="normal")
+            self.corner_brace_repair_button.pack(side="left", padx=(10, 0))
+        else:
+            self.corner_brace_repair_button.configure(state="disabled")
+        if has_candidates or cad_supported or repair_supported:
             self.geometry_tools_frame.grid()
         else:
             self.geometry_tools_frame.grid_remove()
@@ -3164,7 +3437,7 @@ class DXFImportDialog:
         else:
             self.source_tools_frame.grid_remove()
             self.source_exclusion_status_label.grid_remove()
-        if has_candidates or cad_supported or source_supported:
+        if has_candidates or cad_supported or repair_supported or source_supported:
             frame.grid()
         else:
             frame.grid_remove()
@@ -3410,6 +3683,10 @@ class DXFImportDialog:
             self.material_spec_status_var.set(
                 f"已依圖面寬度 {member.source_width:g} mm 自動辨認；可人工改選。"
             )
+        elif member.material_spec_source == "auto_hatch":
+            self.material_spec_status_var.set(
+                "已依 Waler 圖層填充來源自動辨認為 RC；可人工改選。"
+            )
         elif member.material_spec_source == "manual":
             self.material_spec_status_var.set("已採用人工選擇。")
         elif member.source_width <= 0.0:
@@ -3563,6 +3840,9 @@ class DXFImportDialog:
             state="normal" if plan.can_apply else "disabled"
         )
         self._draw_waler_adjustment_overlay()
+        repair_candidate = self._selected_corner_brace_repair_candidate()
+        if repair_candidate is not None:
+            self._draw_corner_brace_repair_overlay(repair_candidate)
         self._show_waler_adjustment_plan(plan)
 
     def _show_waler_adjustment_plan(
@@ -4403,6 +4683,9 @@ class DXFImportDialog:
         self._update_preview_selection_overlay(update_associations=True)
         self._update_temporary_line_overlay()
         self._draw_waler_adjustment_overlay()
+        repair_candidate = self._selected_corner_brace_repair_candidate()
+        if repair_candidate is not None:
+            self._draw_corner_brace_repair_overlay(repair_candidate)
         self._draw_coordinate_axis_layer()
         self._update_source_layer_visibility()
         for layer in PreviewRenderer.LAYERS:
@@ -5132,6 +5415,61 @@ class DXFImportDialog:
             self.canvas.tag_raise("temporary_overlay")
         self.performance_diagnostics.temporary_overlay_updates += 1
         self.performance_diagnostics.record("temporary_overlay", started_at)
+
+    def _clear_corner_brace_repair_overlay(self) -> None:
+        canvas = getattr(self, "canvas", None)
+        stale = set(getattr(self, "_corner_brace_repair_overlay_items", ()))
+        if canvas is not None:
+            for item_id in stale:
+                try:
+                    canvas.delete(item_id)
+                except self.tk.TclError:
+                    pass
+        if hasattr(self, "preview_scene"):
+            self.preview_scene.temporary_line_items[:] = [
+                item_id
+                for item_id in self.preview_scene.temporary_line_items
+                if item_id not in stale
+            ]
+        self._corner_brace_repair_overlay_items = []
+
+    def _draw_corner_brace_repair_overlay(
+        self,
+        candidate: CornerBraceRepairCandidate,
+    ) -> None:
+        """Draw residual evidence and the selected eligible proposed axis."""
+
+        self._clear_corner_brace_repair_overlay()
+        if (
+            self.preview_renderer is None
+            or self.preview_transform is None
+            or self.result is None
+            or self.corner_brace_repair_plan is None
+        ):
+            return
+        coordinate_system = self.result.coordinate_system
+
+        def draw(line: tuple[Point, Point], **options: Any) -> None:
+            displayed = (
+                coordinate_system.transform(line[0]),
+                coordinate_system.transform(line[1]),
+            )
+            item_id = self.preview_renderer.create_line(
+                "temporary_overlay",
+                *self._project_preview_point(displayed[0]),
+                *self._project_preview_point(displayed[1]),
+                **options,
+            )
+            self._corner_brace_repair_overlay_items.append(item_id)
+
+        for residual in self.corner_brace_repair_plan.residual_segments:
+            draw(residual, fill="#fb8c00", width=2, dash=(4, 3))
+        draw(
+            (candidate.world_start, candidate.world_end),
+            fill="#0d47a1",
+            width=5,
+        )
+        self.canvas.tag_raise("temporary_overlay")
 
     def _draw_waler_adjustment_overlay(self) -> None:
         """Draw proposed affected geometry without replacing the formal result."""

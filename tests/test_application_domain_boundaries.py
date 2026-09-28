@@ -49,6 +49,23 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
             )
         )
 
+    def test_completed_relink_and_paused_review_recovery_are_distinct_contracts(self):
+        from bracing_optimizer.application.project_service import (
+            PausedReviewRelinkRequest,
+            RelinkDxfRequest,
+        )
+
+        self.assertIsNot(PausedReviewRelinkRequest, RelinkDxfRequest)
+        self.assertNotIn(
+            "project_rows",
+            PausedReviewRelinkRequest.__dataclass_fields__,
+        )
+        self.assertIn("project_rows", RelinkDxfRequest.__dataclass_fields__)
+        self.assertIn(
+            "workflow_status",
+            PausedReviewRelinkRequest.__dataclass_fields__,
+        )
+
     def test_solver_core_and_use_cases_do_not_import_external_adapters(self):
         forbidden = {
             "cad_builder",
@@ -104,6 +121,19 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
                     f"{module_name} must not depend on an outer layer",
                 )
 
+    def test_support_algorithm_consumes_contract_without_project_geometry(self):
+        self.assertFalse(
+            imports_any(
+                "bracing_optimizer/algorithms/support.py",
+                {
+                    "bracing_optimizer.domain.project_domain",
+                    "bracing_optimizer.domain.support_adjacency",
+                    "bracing_optimizer.application.project_data",
+                    "bracing_optimizer.application.solver_input_builder",
+                },
+            )
+        )
+
     def test_domain_policy_modules_do_not_import_application_or_solver_modules(self):
         forbidden = {
             "cad_builder",
@@ -127,6 +157,7 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
         for module_name in (
             "bracing_optimizer/domain/material_rules.py",
             "bracing_optimizer/domain/project_domain.py",
+            "bracing_optimizer/domain/support_adjacency.py",
         ):
             with self.subTest(module=module_name):
                 self.assertFalse(

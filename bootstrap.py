@@ -21,6 +21,8 @@ from bracing_optimizer.application.optimize_support_zone import OptimizeSupportZ
 from bracing_optimizer.application.optimize_waler import OptimizeWaler
 from bracing_optimizer.application.optimize_waler_global import OptimizeWalerGlobal
 from bracing_optimizer.infrastructure.project_persistence import (
+    DXF_AMBIGUITY_TOLERANCE_MM,
+    DXF_GEOMETRY_TOLERANCE_MM,
     DxfAssetManager,
     DxfCompatibilityChecker,
 )
@@ -30,6 +32,7 @@ from bracing_optimizer.application.solver_input_builder import (
     WalerInputBuilder,
 )
 from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
+from dxf_import.review_recovery_planner import ReviewRecoveryPlanner
 
 
 RESOURCE_DIR = Path(__file__).resolve().parent
@@ -52,6 +55,10 @@ def build_project_service(
     return ProjectService(
         dxf_asset_manager or DxfAssetManager(),
         dxf_compatibility_checker or DxfCompatibilityChecker(),
+        ReviewRecoveryPlanner(
+            geometry_tolerance_mm=DXF_GEOMETRY_TOLERANCE_MM,
+            ambiguity_tolerance_mm=DXF_AMBIGUITY_TOLERANCE_MM,
+        ),
     )
 
 

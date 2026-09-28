@@ -11,9 +11,13 @@ from typing import Any, Mapping, Sequence
 try:
     import ezdxf
     from ezdxf.disassemble import recursive_decompose as _recursive_decompose
+    from ezdxf.lldxf.const import BOUNDARY_PATH_EXTERNAL
+    from ezdxf.math import Vec3
 except ImportError:  # pragma: no cover - only a broken installation
     ezdxf = None
     _recursive_decompose = None
+    BOUNDARY_PATH_EXTERNAL = 1
+    Vec3 = None
 
 from .candidate_points import (
     attach_auxiliary_components,
@@ -24,15 +28,20 @@ from .candidate_points import (
 )
 from .geometry import (
     Point,
+    _angle_difference_deg,
     _distance,
+    _dot,
     _length,
+    _line_distance,
     _midpoint,
     _point,
     _same_point,
+    _unit,
 )
 from .models import (
     AuxiliaryComponent,
     Beam,
+    BeamCrossing,
     BlockInstanceInfo,
     Brace,
     Column,
@@ -60,17 +69,35 @@ from .recognition import (
     _GeometryGroup,
     _Primitive,
     _candidate_from_group,
+    _characterize_waler_candidate_envelope,
+    _build_waler_span_context,
     _corner_brace_candidates_from_group,
     _deduplicate_candidates,
     _engineering_line_candidates,
+    _finalize_contextual_strut_waler_spans,
     _mline_center_path,
     _refine_corner_brace_axis_intersections,
-    _select_waler_inner_lines,
+    _route_bim_joist_block,
+    _route_component_like_member_block,
+    _route_component_like_strut_block,
+    _resolve_waler_contact_geometry,
+)
+from .joist_recognition import (
+    JoistColumnStationReference,
+    JoistContextSnapshot,
+    JoistMemberReference,
+)
+from .hatch_waler_recognition import (
+    HatchBoundaryPath,
+    HatchWalerRecognition,
+    HatchWalerSource,
+    recognize_hatch_waler,
 )
 from .validation import validate_duplicate_engineering_members
 from .support_pairing import detect_double_support_candidates
 from .waler_contact_adjustment import initialize_waler_contact_review
 from .material_recognition import recognize_result_material_specs
+from .waler_contact_face import extract_waler_envelope_facts
 
 
 def _lwpolyline_world_vertices(entity: Any) -> list[Point]:
@@ -89,6 +116,96 @@ def _solid_trace_world_vertices(entity: Any) -> list[Point]:
     """Return graphical SOLID/TRACE vertices normalized from OCS to WCS."""
 
     return [_point(vertex) for vertex in entity.wcs_vertices()]
+
+
+def _segment_is_hatch_boundary_evidence(
+    segment: tuple[Point, Point],
+    hatch_boundaries: Sequence[tuple[Point, Point]],
+    tolerances: GeometryTolerances,
+) -> bool:
+    """Return whether a complete segment matches a HATCH exterior chain."""
+
+    axis = _unit(*segment)
+    segment_length = _length(*segment)
+    if axis is None or segment_length <= 0.0:
+        return False
+    intervals: list[tuple[float, float]] = []
+    for boundary in hatch_boundaries:
+        if (
+            _angle_difference_deg(segment, boundary)
+            > tolerances.parallel_angle_tolerance_deg
+        ):
+            continue
+        if max(
+            _line_distance(boundary[0], *segment),
+            _line_distance(boundary[1], *segment),
+        ) > tolerances.collinear_tolerance_mm:
+            continue
+        stations = tuple(
+            _dot(
+                (point[0] - segment[0][0], point[1] - segment[0][1]),
+                axis,
+            )
+            for point in boundary
+        )
+        intervals.append((min(stations), max(stations)))
+    if not intervals:
+        return False
+
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if not merged or start > merged[-1][1] + tolerances.endpoint_tolerance_mm:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+
+    required_ratio = tolerances.minimum_projection_overlap_ratio
+    for start, end in merged:
+        overlap = max(0.0, min(segment_length, end) - max(0.0, start))
+        chain_length = end - start
+        if chain_length <= 0.0:
+            continue
+        if (
+            overlap / segment_length >= required_ratio
+            and overlap / chain_length >= required_ratio
+            and start <= tolerances.endpoint_tolerance_mm
+            and end >= segment_length - tolerances.endpoint_tolerance_mm
+        ):
+            return True
+    return False
+
+
+def _group_is_hatch_boundary_evidence(
+    group: _GeometryGroup,
+    hatch_boundary_scopes: Sequence[Sequence[tuple[Point, Point]]],
+    tolerances: GeometryTolerances,
+) -> bool:
+    """Claim only top-level LINE/POLYLINE geometry fully matching HATCH edges."""
+
+    if str(group.root_entity_type).strip().upper() not in {
+        "LINE",
+        "LWPOLYLINE",
+        "POLYLINE",
+    }:
+        return False
+    if not group.primitives:
+        return False
+    segments = tuple(
+        segment
+        for primitive in group.primitives
+        for segment in primitive.segments()
+    )
+    return bool(segments) and all(
+        any(
+            _segment_is_hatch_boundary_evidence(
+                segment,
+                hatch_boundaries,
+                tolerances,
+            )
+            for hatch_boundaries in hatch_boundary_scopes
+        )
+        for segment in segments
+    )
 
 
 class DXFImporter:
@@ -195,9 +312,9 @@ class DXFImporter:
             "waler",
             "strut",
             "brace",
+            "corner_brace",
             "column",
             "beam",
-            "corner_brace",
         )
         preview_only_roles = ("continuous_wall", "auxiliary")
         supported_roles = (*engineering_roles, *preview_only_roles)
@@ -265,12 +382,27 @@ class DXFImporter:
         source_texts: list[SourceText] = []
         source_counts: dict[str, int] = {}
         candidates_by_role: dict[str, list[_Candidate]] = {}
+        waler_context = ()
+        joist_context = JoistContextSnapshot()
+        contextual_geometry_finalized = False
         normalized_exclusions = normalize_excluded_sources(excluded_sources)
         excluded_handles_by_role: dict[str, set[str]] = defaultdict(set)
         for excluded in normalized_exclusions:
             excluded_handles_by_role[excluded.role].update(excluded.source_handles)
 
         for role in engineering_roles:
+            if role == "beam":
+                messages.extend(
+                    _resolve_waler_contact_geometry(
+                        candidates_by_role,
+                        tolerances,
+                    )
+                )
+                joist_context = self._build_joist_context(
+                    candidates_by_role,
+                    tolerances,
+                )
+                contextual_geometry_finalized = True
             layers = selected[role]
             role_candidates: list[_Candidate] = []
             source_counts[role] = 0
@@ -281,15 +413,139 @@ class DXFImporter:
                 entities = self.entities_on_layer(layer)
                 source_counts[role] += len(entities)
                 debug_start = len(debug)
+                hatch_entities = (
+                    tuple(
+                        entity
+                        for entity in entities
+                        if entity.dxftype() == "HATCH"
+                    )
+                    if role == "waler"
+                    else ()
+                )
+                general_entities = (
+                    tuple(
+                        entity
+                        for entity in entities
+                        if entity.dxftype() != "HATCH"
+                    )
+                    if hatch_entities
+                    else entities
+                )
+                hatch_boundary_scopes: list[
+                    tuple[tuple[Point, Point], ...]
+                ] = []
                 groups = self._geometry_groups(
                     role,
                     layer,
-                    entities,
+                    general_entities,
                     debug,
                     source_geometry,
                 )
-                role_group_count += len(groups)
                 excluded_handles = excluded_handles_by_role.get(role, set())
+                for hatch in hatch_entities:
+                    source = self._extract_hatch_waler_source(
+                        hatch,
+                        layer,
+                        source_geometry,
+                    )
+                    outcome = recognize_hatch_waler(source, tolerances)
+                    if outcome.exterior_segments:
+                        hatch_boundary_scopes.append(outcome.exterior_segments)
+                    role_group_count += 1
+                    normalized_handle = source.handle.strip().upper()
+                    if normalized_handle in excluded_handles:
+                        excluded_group_count += 1
+                        debug.append(
+                            EntityDebugInfo(
+                                role,
+                                layer,
+                                "HATCH",
+                                source.handle,
+                                "excluded",
+                                "info",
+                                detail="HATCH RC 圍令來源已依 Review 決策排除。",
+                            )
+                        )
+                        continue
+                    active_group_count += 1
+                    debug.append(
+                        EntityDebugInfo(
+                            role,
+                            layer,
+                            "HATCH",
+                            source.handle,
+                            "read",
+                            "info" if outcome.status == "recognized" else "error",
+                            detail=outcome.message,
+                        )
+                    )
+                    if outcome.status == "recognized":
+                        role_candidates.append(
+                            self._candidate_from_hatch_waler(outcome, tolerances)
+                        )
+                    else:
+                        messages.append(
+                            ValidationMessage(
+                                "error",
+                                outcome.code,
+                                outcome.message,
+                                "waler",
+                                (source.handle,),
+                            )
+                        )
+
+                claimed_groups = tuple(
+                    group
+                    for group in groups
+                    if _group_is_hatch_boundary_evidence(
+                        group,
+                        hatch_boundary_scopes,
+                        tolerances,
+                    )
+                )
+                if claimed_groups:
+                    claimed_handles = {
+                        str(handle)
+                        for group in claimed_groups
+                        for handle in group.handles
+                    }
+                    groups = [group for group in groups if group not in claimed_groups]
+                    for index in range(debug_start, len(debug)):
+                        item = debug[index]
+                        if item.handle in claimed_handles and item.status == "read":
+                            debug[index] = replace(
+                                item,
+                                status="boundary_evidence",
+                                detail=(
+                                    "此幾何與 Waler HATCH 外框等價；保留為預覽證據，"
+                                    "不再進入一般構件辨識。"
+                                ),
+                            )
+
+                beam_bim_scope = False
+                if role == "beam":
+                    scope_routes = tuple(
+                        _route_bim_joist_block(
+                            group,
+                            tolerances,
+                            joist_context,
+                        )
+                        for group in groups
+                    )
+                    beam_bim_scope = any(
+                        route.handled
+                        and (
+                            route.candidates
+                            or not route.messages
+                            or any(
+                                message.code != "BIM_JOIST_DETAIL_IGNORED"
+                                for message in route.messages
+                            )
+                        )
+                        for route in scope_routes
+                    )
+
+                role_group_count += len(groups)
                 if excluded_handles:
                     active_groups = []
                     for group in groups:
@@ -318,7 +574,41 @@ class DXFImporter:
                             role,
                         )
                     )
-                groups = self._merge_related_line_groups(groups, tolerances)
+                general_groups: list[_GeometryGroup] = []
+                for group in groups:
+                    if role == "beam" and beam_bim_scope:
+                        joist_route = _route_bim_joist_block(
+                            group,
+                            tolerances,
+                            joist_context,
+                        )
+                        if joist_route.handled:
+                            messages.extend(joist_route.messages)
+                            role_candidates.extend(joist_route.candidates)
+                            continue
+                    block_route = (
+                        _route_component_like_strut_block(
+                            group,
+                            tolerances,
+                            waler_context=waler_context,
+                        )
+                        if role == "strut"
+                        else _route_component_like_member_block(
+                            group,
+                            tolerances,
+                        )
+                    )
+                    if not block_route.handled:
+                        general_groups.append(group)
+                        continue
+                    messages.extend(block_route.messages)
+                    if block_route.candidate is not None:
+                        role_candidates.append(block_route.candidate)
+
+                groups = self._merge_related_line_groups(
+                    general_groups,
+                    tolerances,
+                )
                 for group in groups:
                     if role == "corner_brace":
                         corner_candidates, corner_messages = (
@@ -384,6 +674,14 @@ class DXFImporter:
                             )
                         )
                         continue
+                    if role == "waler":
+                        messages.extend(
+                            _characterize_waler_candidate_envelope(
+                                candidate,
+                                group,
+                                tolerances,
+                            )
+                        )
                     component_length = (
                         sum(
                             _length(start, end)
@@ -421,6 +719,8 @@ class DXFImporter:
             deduplicated, duplicate_messages = _deduplicate_candidates(role_candidates, role, tolerances)
             messages.extend(duplicate_messages)
             candidates_by_role[role] = deduplicated
+            if role == "waler":
+                waler_context = _build_waler_span_context(deduplicated)
             all_geometry_explicitly_excluded = bool(
                 role_group_count
                 and not active_group_count
@@ -451,13 +751,13 @@ class DXFImporter:
                     source_geometry,
                 )
 
-        _select_waler_inner_lines(candidates_by_role)
-        messages.extend(
-            _refine_corner_brace_axis_intersections(
-                candidates_by_role,
-                tolerances,
+        if not contextual_geometry_finalized:
+            messages.extend(
+                _resolve_waler_contact_geometry(
+                    candidates_by_role,
+                    tolerances,
+                )
             )
-        )
         self._validate_one_model_per_source(candidates_by_role, messages)
         walers = tuple(self._make_waler(index, candidate) for index, candidate in enumerate(candidates_by_role["waler"], 1))
         struts = tuple(self._make_strut(index, candidate) for index, candidate in enumerate(candidates_by_role["strut"], 1))
@@ -466,9 +766,30 @@ class DXFImporter:
             self._make_auxiliary(Column, "C", "column", index, candidate)
             for index, candidate in enumerate(candidates_by_role["column"], 1)
         )
+        beam_candidates = list(candidates_by_role["beam"])
+        bim_positions = [
+            index
+            for index, candidate in enumerate(beam_candidates)
+            if candidate.joist_assembly_key
+        ]
+        ordered_bim = iter(
+            sorted(
+                (beam_candidates[index] for index in bim_positions),
+                key=lambda candidate: (
+                    candidate.start,
+                    candidate.end,
+                    candidate.joist_axis_slot
+                    if candidate.joist_axis_slot is not None
+                    else -1,
+                ),
+            )
+        )
+        for index in bim_positions:
+            beam_candidates[index] = next(ordered_bim)
+        candidates_by_role["beam"] = beam_candidates
         beams = tuple(
             self._make_auxiliary(Beam, "BM", "beam", index, candidate)
-            for index, candidate in enumerate(candidates_by_role["beam"], 1)
+            for index, candidate in enumerate(beam_candidates, 1)
         )
         corner_braces = tuple(
             self._make_auxiliary(
@@ -675,6 +996,122 @@ class DXFImporter:
         except (TypeError, ValueError):
             return 0.0
 
+    @staticmethod
+    def _hatch_point_to_wcs(entity: Any, point: Any) -> Point:
+        elevation = float(getattr(entity.dxf.elevation, "z", 0.0) or 0.0)
+        if Vec3 is None:  # pragma: no cover - guarded by the importer dependency
+            raise DXFImportError("尚未安裝 ezdxf；無法解析 HATCH boundary。")
+        world = entity.ocs().to_wcs(
+            Vec3(float(point[0]), float(point[1]), elevation)
+        )
+        return _point(world)
+
+    @classmethod
+    def _extract_hatch_waler_source(
+        cls,
+        entity: Any,
+        layer: str,
+        source_geometry: list[SourceGeometry],
+    ) -> HatchWalerSource:
+        """Translate one top-level Waler HATCH boundary from OCS to WCS."""
+
+        handle = str(getattr(entity.dxf, "handle", "") or "NO_HANDLE_HATCH")
+        paths: list[HatchBoundaryPath] = []
+        for boundary_path in entity.paths:
+            segments: list[tuple[Point, Point]] = []
+            unsupported: list[str] = []
+            path_name = type(boundary_path).__name__
+            if path_name == "EdgePath":
+                for edge in boundary_path.edges:
+                    if type(edge).__name__ != "LineEdge":
+                        unsupported.append(type(edge).__name__)
+                        continue
+                    segments.append(
+                        (
+                            cls._hatch_point_to_wcs(entity, edge.start),
+                            cls._hatch_point_to_wcs(entity, edge.end),
+                        )
+                    )
+            elif path_name == "PolylinePath":
+                vertices = tuple(boundary_path.vertices)
+                if any(abs(float(vertex[2])) > 0.0 for vertex in vertices):
+                    unsupported.append("PolylineBulge")
+                points = tuple(
+                    cls._hatch_point_to_wcs(entity, vertex)
+                    for vertex in vertices
+                )
+                segments.extend(zip(points, points[1:]))
+                if bool(boundary_path.is_closed) and len(points) > 2:
+                    segments.append((points[-1], points[0]))
+            else:
+                unsupported.append(path_name)
+
+            for start, end in segments:
+                source_geometry.append(
+                    SourceGeometry(
+                        "waler",
+                        handle,
+                        (start, end),
+                        False,
+                        layer,
+                        "HATCH",
+                    )
+                )
+            paths.append(
+                HatchBoundaryPath(
+                    tuple(segments),
+                    is_external=bool(
+                        int(getattr(boundary_path, "path_type_flags", 0))
+                        & BOUNDARY_PATH_EXTERNAL
+                    ),
+                    unsupported_geometry=tuple(sorted(set(unsupported))),
+                )
+            )
+        return HatchWalerSource(handle, layer, tuple(paths))
+
+    @staticmethod
+    def _candidate_from_hatch_waler(
+        outcome: HatchWalerRecognition,
+        tolerances: GeometryTolerances,
+    ) -> _Candidate:
+        if outcome.status != "recognized" or outcome.axis is None:
+            raise ValueError("Only a recognized HATCH Waler can become a candidate")
+        source_points = tuple(
+            dict.fromkeys(
+                point
+                for segment in outcome.exterior_segments
+                for point in segment
+            )
+        )
+        envelope = extract_waler_envelope_facts(
+            outcome.boundary_lines,
+            tolerances,
+            source_handles=(outcome.source_handle,),
+            component_key=f"waler:{outcome.source_handle}",
+            qualified_exterior_faces=outcome.boundary_lines,
+            provenance_kind="hatch_exterior",
+        )
+        return _Candidate(
+            outcome.axis[0],
+            outcome.axis[1],
+            "hatch_rc_outline_axis",
+            True,
+            outcome.source_width,
+            outcome.confidence,
+            outcome.source_layer,
+            {outcome.source_handle},
+            {"HATCH"},
+            [],
+            {f"waler:{outcome.source_handle}"},
+            [],
+            boundary_lines=outcome.boundary_lines,
+            recognized_axis=outcome.axis,
+            source_points=source_points,
+            material_spec=outcome.material_spec,
+            material_spec_source=outcome.material_spec_source,
+            waler_envelope_facts=envelope.facts,
+        )
+
     def _geometry_groups(
         self,
         role: str,
@@ -688,7 +1125,15 @@ class DXFImporter:
         for entity in entities:
             handle = str(getattr(entity.dxf, "handle", "") or f"NO_HANDLE_{len(groups)}")
             group = _GeometryGroup(
-                f"{role}:{handle}", role, layer, [], {handle}, set(), []
+                key=f"{role}:{handle}",
+                role=role,
+                layer=layer,
+                primitives=[],
+                handles={handle},
+                entity_types=set(),
+                block_instances=[],
+                root_handle=handle,
+                root_entity_type=entity.dxftype(),
             )
             if entity.dxftype() in self.TEXT_TYPES:
                 ignored_text += 1
@@ -739,6 +1184,9 @@ class DXFImporter:
         block_name: str = "",
     ) -> None:
         entity_type = entity.dxftype()
+        if group.root_handle is None and not group.root_entity_type:
+            group.root_handle = root_handle
+            group.root_entity_type = entity_type
         group.handles.add(root_handle)
         if entity_type in self.TEXT_TYPES:
             debug.append(
@@ -874,7 +1322,15 @@ class DXFImporter:
         groups: Sequence[_GeometryGroup],
         tolerances: GeometryTolerances,
     ) -> list[_GeometryGroup]:
-        line_groups = [group for group in groups if len(group.primitives) == 1 and group.primitives[0].entity_type == "LINE"]
+        line_groups = [
+            group
+            for group in groups
+            if (
+                str(group.root_entity_type).strip().upper() != "INSERT"
+                and len(group.primitives) == 1
+                and group.primitives[0].entity_type == "LINE"
+            )
+        ]
         others = [group for group in groups if group not in line_groups]
         unseen = set(range(len(line_groups)))
         while unseen:
@@ -907,13 +1363,25 @@ class DXFImporter:
                 continue
             merged_groups = [line_groups[index] for index in component]
             merged = _GeometryGroup(
-                "+".join(sorted(group.key for group in merged_groups)),
-                merged_groups[0].role,
-                merged_groups[0].layer,
-                [primitive for group in merged_groups for primitive in group.primitives],
-                set().union(*(group.handles for group in merged_groups)),
-                set().union(*(group.entity_types for group in merged_groups)),
-                [instance for group in merged_groups for instance in group.block_instances],
+                key="+".join(sorted(group.key for group in merged_groups)),
+                role=merged_groups[0].role,
+                layer=merged_groups[0].layer,
+                primitives=[
+                    primitive
+                    for group in merged_groups
+                    for primitive in group.primitives
+                ],
+                handles=set().union(*(group.handles for group in merged_groups)),
+                entity_types=set().union(
+                    *(group.entity_types for group in merged_groups)
+                ),
+                block_instances=[
+                    instance
+                    for group in merged_groups
+                    for instance in group.block_instances
+                ],
+                root_handle=None,
+                root_entity_type="LINE",
             )
             others.append(merged)
         return others
@@ -944,6 +1412,27 @@ class DXFImporter:
                     # A fabrication INSERT legitimately contains the left and
                     # right corner braces around one Strut.
                     continue
+                if (
+                    role == "beam"
+                    and count == 2
+                    and len(
+                        {
+                            candidate.joist_assembly_key
+                            for candidate in source_candidates
+                        }
+                    )
+                    == 1
+                    and "" not in {
+                        candidate.joist_assembly_key
+                        for candidate in source_candidates
+                    }
+                    and {
+                        candidate.joist_axis_slot
+                        for candidate in source_candidates
+                    }
+                    == {0, 1}
+                ):
+                    continue
                 messages.append(
                     ValidationMessage(
                         "critical",
@@ -953,6 +1442,76 @@ class DXFImporter:
                         (handle,),
                     )
                 )
+
+    @classmethod
+    def _build_joist_context(
+        cls,
+        candidates_by_role: Mapping[str, Sequence[_Candidate]],
+        tolerances: GeometryTolerances,
+    ) -> JoistContextSnapshot:
+        """Freeze formal upstream geometry before Beam recognition starts."""
+
+        struts = tuple(
+            cls._make_strut(index, candidate)
+            for index, candidate in enumerate(
+                candidates_by_role.get("strut", ()),
+                1,
+            )
+        )
+        braces = tuple(
+            cls._make_brace(index, candidate)
+            for index, candidate in enumerate(
+                candidates_by_role.get("brace", ()),
+                1,
+            )
+        )
+        columns = tuple(
+            cls._make_auxiliary(Column, "C", "column", index, candidate)
+            for index, candidate in enumerate(
+                candidates_by_role.get("column", ()),
+                1,
+            )
+        )
+        _struts, associated_columns, _beams, _associations, _messages = (
+            associate_components_to_struts(
+                struts,
+                columns,
+                (),
+                tolerances,
+            )
+        )
+        return JoistContextSnapshot(
+            struts=tuple(
+                JoistMemberReference(
+                    strut.id,
+                    strut.world_start or strut.start,
+                    strut.world_end or strut.end,
+                    strut.source_handles,
+                    strut.source_width,
+                )
+                for strut in struts
+            ),
+            braces=tuple(
+                JoistMemberReference(
+                    brace.id,
+                    brace.world_start or brace.start,
+                    brace.world_end or brace.end,
+                    brace.source_handles,
+                    brace.source_width,
+                )
+                for brace in braces
+            ),
+            column_stations=tuple(
+                JoistColumnStationReference(
+                    column.id,
+                    column.associated_strut_id,
+                    float(column.association_station),
+                )
+                for column in associated_columns
+                if column.associated_strut_id
+                and column.association_station is not None
+            ),
+        )
 
     @staticmethod
     def _make_waler(index: int, candidate: _Candidate) -> Waler:
@@ -965,6 +1524,8 @@ class DXFImporter:
             tuple(dict.fromkeys(candidate.warnings)), tuple(candidate.block_instances),
             line_candidates=line_candidates,
             selected_candidate_id=line_candidates[0].id,
+            material_spec=candidate.material_spec,
+            material_spec_source=candidate.material_spec_source,
         )
 
     @staticmethod
@@ -1012,10 +1573,29 @@ class DXFImporter:
                 candidate.start,
                 candidate.end,
             )
+            beam_id = f"{prefix}{index}"
             beam_path_changes = {
                 "world_path": tuple(world_path),
                 "local_path": tuple(world_path),
                 "path": tuple(world_path),
+                "joist_assembly_key": candidate.joist_assembly_key,
+                "joist_axis_slot": candidate.joist_axis_slot,
+                "crossings": tuple(
+                    BeamCrossing(
+                        beam_id,
+                        contact.member_id,
+                        contact.point,
+                        contact.point,
+                        contact.member_station,
+                        0,
+                        _distance(contact.source_contact_point, contact.point),
+                        contact.recognition_method,
+                        contact.source_contact_point,
+                        contact.source_contact_point,
+                    )
+                    for contact in candidate.joist_contacts
+                    if contact.member_role == "strut"
+                ),
             }
         return component_type(
             f"{prefix}{index}",
@@ -1121,6 +1701,19 @@ Y29_LAYER_MAPPING = {
     "角撐": "角撐",
 }
 
+Y05_LAYER_MAPPING = {
+    "I-WALL": "連續壁",
+    "0": "連續壁",
+    "圍令": "圍令",
+    "支撐": "支撐",
+    "托梁": "托梁",
+    "斜撐": "斜撐",
+    "S-BEAM": "角撐",
+    "S-GRID": "輔助線",
+    "S-GRID-IDEN": "輔助線",
+    "S-COLS": "中間柱",
+}
+
 # Backwards-compatible name for the original Y1A defaults.  The import dialog
 # uses default_layer_mapping_for_file() so these defaults never leak to an
 # unrelated DXF merely because it contains the same layer name.
@@ -1129,6 +1722,7 @@ DEFAULT_LAYER_MAPPING = Y1A_LAYER_MAPPING
 LAYER_MAPPING_BY_FILENAME = {
     "y1a擋土支撐簡化版.dxf": Y1A_LAYER_MAPPING,
     "y29_test.dxf": Y29_LAYER_MAPPING,
+    "670-co-y05-fw-圖紙 - 005 - y05站 安全支撐系統 第一層支撐平面圖.dxf": Y05_LAYER_MAPPING,
 }
 
 

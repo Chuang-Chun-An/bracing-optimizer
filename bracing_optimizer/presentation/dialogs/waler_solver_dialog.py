@@ -24,6 +24,9 @@ from ..result_formatters import format_waler_score_breakdown
 
 LOGGER = logging.getLogger(__name__)
 WALER_SOLVER_BUSY_MESSAGE = "目前已有圍令計算正在執行，請等待完成後再試。"
+WALER_SOLVER_CLOSE_BUSY_MESSAGE = (
+    "圍令最佳化仍在計算中，請等待計算完成後再關閉。"
+)
 
 
 class WalerSolverDialog(SolverDialogThreadBridge):
@@ -56,6 +59,7 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         self.material_ratio_targets = MaterialRatioTargets.normalized(20, 50, 30)
         self.current_results = None
         self.solver_key = None
+        self._calculation_running = False
 
         waler_id = self.waler_id
         start_point = self.start_point
@@ -409,9 +413,11 @@ class WalerSolverDialog(SolverDialogThreadBridge):
                 args=(request, lease),
                 daemon=True,
             )
+            self._calculation_running = True
             thread.start()
         except Exception:
             lease.release()
+            self._calculation_running = False
             self.run_button.configure(state="normal")
             LOGGER.exception("Single Waler Solver thread start failed")
             messagebox.showerror(
@@ -428,6 +434,9 @@ class WalerSolverDialog(SolverDialogThreadBridge):
                 message += "\n"
             self.text_writer.write(message)
 
+        results = None
+        diagnostics = None
+        worker_error = None
         try:
             result = self.optimize_waler.execute(
                 request,
@@ -440,23 +449,43 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             results = list(result.solutions)
             diagnostics = result.diagnostics
             self._save_solver_memory(results, diagnostics)
-            self._post_ui(
-                lambda: self._display_results(results, diagnostics=diagnostics)
-            )
-        except Exception:
+        except Exception as exc:
             import traceback
 
+            worker_error = exc
             msg = traceback.format_exc()
             self.text_writer.write(msg)
-            self._post_ui(
-                lambda: self.summary_var.set(
-                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
-                )
-            )
         finally:
             lease.release()
             LOGGER.info("Single Waler Solver finish: %s", self.waler_id)
-            self._post_ui(lambda: self.run_button.configure(state="normal"))
+            self._post_ui(
+                lambda results=results,
+                diagnostics=diagnostics,
+                error=worker_error: self._finish_worker(
+                    results,
+                    diagnostics,
+                    error,
+                )
+            )
+
+    def _finish_worker(self, results, diagnostics, error):
+        try:
+            if error is not None:
+                self.summary_var.set(
+                    "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
+                )
+            elif results is not None:
+                self._display_results(results, diagnostics=diagnostics)
+            else:
+                self.summary_var.set("計算發生錯誤；Solver 未回傳結果。")
+        except Exception:
+            LOGGER.exception("Single Waler result UI callback failed")
+            self.summary_var.set(
+                "計算結果處理發生錯誤；請查看詳細執行訊息。"
+            )
+        finally:
+            self._calculation_running = False
+            self.run_button.configure(state="normal")
 
     def _waler_ratio_targets(self):
         return self.material_ratio_targets.as_dict()
@@ -554,6 +583,14 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         )
 
     def _on_close(self):
+        if self._calculation_running:
+            LOGGER.warning("Single Waler dialog close blocked while calculating")
+            messagebox.showwarning(
+                "圍令計算中",
+                WALER_SOLVER_CLOSE_BUSY_MESSAGE,
+                parent=self.dialog,
+            )
+            return
         self._close_ui_bridge()
         self.dialog.destroy()
 

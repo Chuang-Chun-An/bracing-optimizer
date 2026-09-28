@@ -124,6 +124,62 @@ class _Button:
 
 
 class ReviewConfirmationTests(unittest.TestCase):
+    def test_paired_joist_confirmation_covers_both_siblings(self):
+        result = _result()
+        first = replace(
+            result.beams[0],
+            id="BM1",
+            source_handles=("PAIR",),
+            joist_assembly_key="PAIR",
+            joist_axis_slot=0,
+        )
+        second = replace(
+            first,
+            id="BM2",
+            start=(0.0, 518.0),
+            end=(1000.0, 518.0),
+            world_start=(0.0, 518.0),
+            world_end=(1000.0, 518.0),
+            joist_axis_slot=1,
+        )
+        result = replace(result, beams=(first, second))
+        items = {
+            item.member_id: item
+            for item in build_review_items(result)
+            if item.role == "beam"
+        }
+
+        confirmations = confirm_review_item(result, items["BM1"])
+
+        self.assertTrue(
+            review_item_is_confirmed(result, items["BM1"], confirmations)
+        )
+        self.assertTrue(
+            review_item_is_confirmed(result, items["BM2"], confirmations)
+        )
+
+        changed_second = replace(second, end=(1200.0, 518.0))
+        changed = replace(result, beams=(first, changed_second))
+        changed_items = {
+            item.member_id: item
+            for item in build_review_items(changed)
+            if item.role == "beam"
+        }
+        self.assertFalse(
+            review_item_is_confirmed(
+                changed,
+                changed_items["BM1"],
+                confirmations,
+            )
+        )
+        self.assertFalse(
+            review_item_is_confirmed(
+                changed,
+                changed_items["BM2"],
+                confirmations,
+            )
+        )
+
     def test_legacy_review_state_without_confirmations_is_empty(self):
         self.assertEqual(
             review_confirmations_from_state({"review_state_version": 1}),

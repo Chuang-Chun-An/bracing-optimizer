@@ -40,6 +40,10 @@ PROBLEM_SEVERITY_RANK = {
 }
 
 _RECOGNITION_CODES = {
+    "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+    "HATCH_WALER_BOUNDARY_INVALID",
+    "HATCH_WALER_ENGINEERING_LINE_FAILED",
+    "HATCH_WALER_UNSUPPORTED_BOUNDARY",
     "WALER_ENGINEERING_LINE_FAILED",
     "WALER_RECOGNITION_FAILED",
     "STRUT_CENTERLINE_FAILED",
@@ -54,13 +58,30 @@ _RECOGNITION_CODES = {
     "CORNER_BRACE_RECOGNITION_FAILED",
     "AMBIGUOUS_CENTERLINE",
     "AMBIGUOUS_INNER_LINE",
+    "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+    "BIM_BLOCK_WALER_FINALIZE_FAILED",
+    "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+    "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+    "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+    "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+    "BIM_JOIST_PAIR_AMBIGUOUS",
+    "BIM_JOIST_PAIR_SPACING_INVALID",
+    "BIM_JOIST_PAIR_UNPAIRED",
+    "BIM_JOIST_RECOGNITION_FAILED",
+    "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+    "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+    "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+    "BIM_JOIST_WHOLE_SOURCE_AXIS_FAILED",
     "COMPONENT_TOO_SHORT",
     "MULTIPLE_MODELS_FROM_ONE_SOURCE",
     "ZERO_LENGTH_COMPONENT",
 }
 _ENDPOINT_CODES = {
+    "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+    "BRACE_AXIS_EXTENDED_TO_WALER",
     "BRACE_NOT_CONNECTED",
     "BRACE_ONE_END_NOT_CONNECTED",
+    "BRACE_SAME_WALER_CONNECTION",
     "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
     "CANDIDATE_LINE_DIRECTION_CHANGED",
     "CANDIDATE_LINE_TOO_SHORT",
@@ -393,7 +414,19 @@ def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOvervi
             message.role == role
             and message.severity in ERROR_SEVERITIES
             and message.code
-            in {f"{role.upper()}_RECOGNITION_FAILED", engineering_line_code}
+            in {
+                f"{role.upper()}_RECOGNITION_FAILED",
+                engineering_line_code,
+                "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+                "HATCH_WALER_BOUNDARY_INVALID",
+                "HATCH_WALER_ENGINEERING_LINE_FAILED",
+                "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+                "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+                "BIM_BLOCK_WALER_FINALIZE_FAILED",
+                "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+                "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+                "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+            }
             for message in result.messages
         )
         if members and not failed:
@@ -457,7 +490,11 @@ def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOvervi
 
     failed_engineering_lines = sum(
         "CENTERLINE_FAILED" in message.code
-        or message.code == "WALER_ENGINEERING_LINE_FAILED"
+        or message.code
+        in {
+            "WALER_ENGINEERING_LINE_FAILED",
+            "HATCH_WALER_ENGINEERING_LINE_FAILED",
+        }
         for message in result.messages
     )
     if failed_engineering_lines:
