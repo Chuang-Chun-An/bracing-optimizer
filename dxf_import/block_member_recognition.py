@@ -20,6 +20,7 @@ from .geometry import (
     _ordered_line,
     _projection_overlap_ratio,
     _same_point,
+    _segment_intersection_point,
     _unit,
 )
 from .models import GeometryTolerances
@@ -46,7 +47,7 @@ class FragmentEvidenceKind(str, Enum):
 
 
 class _CandidateAuthorityTier(IntEnum):
-    """Whole-source evidence order for contextual Strut center authority."""
+    """Whole-source evidence order for member center authority."""
 
     TOPOLOGY = 1
     WHOLE_ROOT_ENVELOPE = 2
@@ -90,6 +91,36 @@ class BlockMemberRecognitionInput:
             raise ValueError("Root entity type is required")
         if not self.role.strip():
             raise ValueError("Root role is required")
+
+
+@dataclass(frozen=True)
+class BraceOutlineMeasurement:
+    """One deterministic interpretation of a complete closed Brace body."""
+
+    axis: tuple[Point, Point]
+    representative_width: float
+    rail_lines: tuple[tuple[Point, Point], tuple[Point, Point]]
+    terminal_cut_lines: tuple[tuple[Point, Point], tuple[Point, Point]]
+    confidence: float
+    geometry_signature: tuple[float, ...]
+
+    def __post_init__(self) -> None:
+        axis = _ordered_line(*self.axis)
+        rails = tuple(sorted(_ordered_line(*line) for line in self.rail_lines))
+        cuts = tuple(_ordered_line(*line) for line in self.terminal_cut_lines)
+        if _length(*axis) <= NUMERIC_EPSILON:
+            raise ValueError("Brace outline measurement requires a non-zero axis")
+        if len(rails) != 2 or any(_length(*line) <= NUMERIC_EPSILON for line in rails):
+            raise ValueError("Brace outline measurement requires two finite rails")
+        if len(cuts) != 2 or any(_length(*line) <= NUMERIC_EPSILON for line in cuts):
+            raise ValueError("Brace outline measurement requires two finite terminal cuts")
+        if not math.isfinite(self.representative_width) or self.representative_width <= 0.0:
+            raise ValueError("Brace outline width must be positive and finite")
+        if not math.isfinite(self.confidence) or not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("Brace outline confidence must be between zero and one")
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "rail_lines", rails)
+        object.__setattr__(self, "terminal_cut_lines", cuts)
 
 
 @dataclass(frozen=True)
@@ -319,6 +350,23 @@ class _ContextualCandidate:
     span: _WalerSpanSelection
 
 
+def brace_body_width_is_eligible(
+    measured_width_mm: float,
+    tolerances: GeometryTolerances | None = None,
+) -> bool:
+    """Return whether a measured Brace body satisfies the hard width rule.
+
+    This is deliberately a pure strict comparison.  Matching tolerances,
+    display rounding, and floating-point epsilons do not relax the rule.
+    """
+
+    settings = tolerances or GeometryTolerances()
+    return (
+        math.isfinite(measured_width_mm)
+        and measured_width_mm > settings.minimum_brace_body_width_mm
+    )
+
+
 def _canonical_unit(segment: tuple[Point, Point]) -> Point | None:
     direction = _unit(*segment)
     if direction is None:
@@ -343,6 +391,550 @@ def _primitive_segments(
         _ordered_line(start, end)
         for start, end in pairs
         if _distance(start, end) > NUMERIC_EPSILON
+    )
+
+
+def _closed_cycle_points_from_segments(
+    segments: Sequence[tuple[Point, Point]],
+    tolerances: GeometryTolerances,
+) -> tuple[Point, ...] | None:
+    """Return one deterministic, unbranched cycle from unordered segments."""
+
+    usable = tuple(
+        _ordered_line(*segment)
+        for segment in segments
+        if _length(*segment) > NUMERIC_EPSILON
+    )
+    if len(usable) < 3 or len(set(usable)) != len(usable):
+        return None
+
+    endpoints = tuple(point for segment in usable for point in segment)
+    parents = list(range(len(endpoints)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(first: int, second: int) -> None:
+        first_root, second_root = find(first), find(second)
+        if first_root == second_root:
+            return
+        if first_root < second_root:
+            parents[second_root] = first_root
+        else:
+            parents[first_root] = second_root
+
+    for first_index, first_point in enumerate(endpoints):
+        for second_index in range(first_index + 1, len(endpoints)):
+            if _same_point(
+                first_point,
+                endpoints[second_index],
+                tolerances.endpoint_tolerance_mm,
+            ):
+                union(first_index, second_index)
+
+    node_points: dict[int, list[Point]] = {}
+    for index, point in enumerate(endpoints):
+        node_points.setdefault(find(index), []).append(point)
+    canonical_points = {
+        node: (
+            math.fsum(sorted(point[0] for point in points)) / len(points),
+            math.fsum(sorted(point[1] for point in points)) / len(points),
+        )
+        for node, points in node_points.items()
+    }
+
+    adjacency: dict[int, list[tuple[int, int]]] = {}
+    edge_nodes: list[tuple[int, int]] = []
+    for edge_index in range(len(usable)):
+        first_node = find(edge_index * 2)
+        second_node = find(edge_index * 2 + 1)
+        if first_node == second_node:
+            return None
+        edge_nodes.append((first_node, second_node))
+        adjacency.setdefault(first_node, []).append((edge_index, second_node))
+        adjacency.setdefault(second_node, []).append((edge_index, first_node))
+    if len(adjacency) != len(usable) or any(len(items) != 2 for items in adjacency.values()):
+        return None
+
+    start = min(adjacency, key=lambda node: canonical_points[node])
+    first_edge, first_neighbor = min(
+        adjacency[start],
+        key=lambda item: (canonical_points[item[1]], item[0]),
+    )
+    ordered_nodes = [start]
+    used_edges = {first_edge}
+    previous, current = start, first_neighbor
+    while current != start:
+        ordered_nodes.append(current)
+        options = tuple(
+            (edge_index, neighbor)
+            for edge_index, neighbor in adjacency[current]
+            if edge_index not in used_edges and neighbor != previous
+        )
+        if len(options) != 1:
+            return None
+        edge_index, next_node = options[0]
+        used_edges.add(edge_index)
+        previous, current = current, next_node
+        if len(ordered_nodes) > len(usable):
+            return None
+    if len(used_edges) != len(usable):
+        return None
+    return tuple(canonical_points[node] for node in ordered_nodes)
+
+
+def _merge_closed_cycle_collinear_points(
+    points: Sequence[Point],
+    tolerances: GeometryTolerances,
+) -> tuple[Point, ...] | None:
+    values = list(points)
+    if len(values) > 2 and _same_point(values[0], values[-1], NUMERIC_EPSILON):
+        values.pop()
+    deduplicated: list[Point] = []
+    for point in values:
+        if not deduplicated or not _same_point(
+            point,
+            deduplicated[-1],
+            NUMERIC_EPSILON,
+        ):
+            deduplicated.append(point)
+    values = deduplicated
+    if len(values) < 3:
+        return None
+
+    changed = True
+    while changed and len(values) > 3:
+        changed = False
+        for index in range(len(values)):
+            previous = values[index - 1]
+            current = values[index]
+            following = values[(index + 1) % len(values)]
+            if (
+                _angle_difference_deg(
+                    (previous, current),
+                    (current, following),
+                )
+                <= tolerances.parallel_angle_tolerance_deg
+            ):
+                del values[index]
+                changed = True
+                break
+
+    edges = tuple(
+        (values[index], values[(index + 1) % len(values)])
+        for index in range(len(values))
+    )
+    for first_index, first in enumerate(edges):
+        for second_index in range(first_index + 1, len(edges)):
+            if second_index in {
+                first_index + 1,
+                (first_index - 1) % len(edges),
+            }:
+                continue
+            if _segment_intersection_point(first, edges[second_index]) is not None:
+                return None
+    return tuple(values)
+
+
+def _brace_outline_measurement_from_cycle(
+    cycle: Sequence[Point],
+    tolerances: GeometryTolerances,
+) -> BraceOutlineMeasurement | None:
+    normalized = _merge_closed_cycle_collinear_points(cycle, tolerances)
+    if normalized is None or len(normalized) != 4:
+        return None
+
+    edges = tuple(
+        _ordered_line(normalized[index], normalized[(index + 1) % 4])
+        for index in range(4)
+    )
+    center = (
+        math.fsum(point[0] for point in normalized) / len(normalized),
+        math.fsum(point[1] for point in normalized) / len(normalized),
+    )
+    covariance_xx = math.fsum((point[0] - center[0]) ** 2 for point in normalized)
+    covariance_yy = math.fsum((point[1] - center[1]) ** 2 for point in normalized)
+    covariance_xy = math.fsum(
+        (point[0] - center[0]) * (point[1] - center[1])
+        for point in normalized
+    )
+    if covariance_xx + covariance_yy <= NUMERIC_EPSILON:
+        return None
+    principal_angle = math.atan2(
+        2.0 * covariance_xy,
+        covariance_xx - covariance_yy,
+    ) / 2.0
+    principal_direction = _canonical_unit(
+        ((0.0, 0.0), (math.cos(principal_angle), math.sin(principal_angle)))
+    )
+    if principal_direction is None:
+        return None
+
+    measurements: list[BraceOutlineMeasurement] = []
+    for first_index in (0, 1):
+        second_index = (first_index + 2) % 4
+        first_rail, second_rail = edges[first_index], edges[second_index]
+        if (
+            _length(*first_rail) < tolerances.minimum_component_length_mm
+            or _length(*second_rail) < tolerances.minimum_component_length_mm
+            or _angle_difference_deg(first_rail, second_rail)
+            > tolerances.parallel_angle_tolerance_deg
+            or _angle_difference_deg(
+                first_rail,
+                ((0.0, 0.0), principal_direction),
+            )
+            > tolerances.parallel_angle_tolerance_deg
+        ):
+            continue
+
+        direction = _canonical_unit(first_rail)
+        if direction is None:
+            continue
+        first_range = tuple(sorted(_dot(point, direction) for point in first_rail))
+        second_range = tuple(sorted(_dot(point, direction) for point in second_rail))
+        longitudinal_overlap = (
+            min(first_range[1], second_range[1])
+            - max(first_range[0], second_range[0])
+        )
+        if longitudinal_overlap <= NUMERIC_EPSILON:
+            continue
+
+        cut_indices = ((first_index + 1) % 4, (first_index + 3) % 4)
+        cuts = tuple(edges[index] for index in cut_indices)
+        if any(
+            _angle_difference_deg(cut, first_rail)
+            <= tolerances.parallel_angle_tolerance_deg
+            for cut in cuts
+        ):
+            continue
+
+        normal = -direction[1], direction[0]
+        first_offset = _dot(_midpoint(*first_rail), normal)
+        second_offset = _dot(_midpoint(*second_rail), normal)
+        width = abs(second_offset - first_offset)
+        if not (
+            tolerances.collinear_tolerance_mm
+            < width
+            <= tolerances.maximum_component_width_mm
+        ):
+            continue
+
+        transverse_center = (first_offset + second_offset) / 2.0
+        longitudinal_values = tuple(
+            _dot(point, direction) for point in normalized
+        )
+        midline = (
+            (
+                direction[0] * min(longitudinal_values)
+                + normal[0] * transverse_center,
+                direction[1] * min(longitudinal_values)
+                + normal[1] * transverse_center,
+            ),
+            (
+                direction[0] * max(longitudinal_values)
+                + normal[0] * transverse_center,
+                direction[1] * max(longitudinal_values)
+                + normal[1] * transverse_center,
+            ),
+        )
+        intersections = tuple(
+            _line_segment_intersection_point(
+                midline,
+                cut,
+                tolerances.endpoint_tolerance_mm,
+            )
+            for cut in cuts
+        )
+        if any(point is None for point in intersections):
+            continue
+        finite_intersections = tuple(
+            point for point in intersections if point is not None
+        )
+        axis = _ordered_line(*finite_intersections)
+        axis_length = _length(*axis)
+        if (
+            axis_length < tolerances.minimum_component_length_mm
+            or axis_length / width < tolerances.minimum_slenderness_ratio
+        ):
+            continue
+
+        ordered_cuts = tuple(
+            cut
+            for _station, cut in sorted(
+                (
+                    (_dot(point, direction), cut)
+                    for point, cut in zip(finite_intersections, cuts)
+                ),
+                key=lambda item: (item[0], item[1]),
+            )
+        )
+        signature_values = tuple(
+            coordinate
+            for line in (*tuple(sorted((first_rail, second_rail))), *ordered_cuts)
+            for point in line
+            for coordinate in point
+        )
+        measurements.append(
+            BraceOutlineMeasurement(
+                axis=axis,
+                representative_width=width,
+                rail_lines=(first_rail, second_rail),
+                terminal_cut_lines=ordered_cuts,
+                confidence=0.99,
+                geometry_signature=signature_values,
+            )
+        )
+
+    unique: list[BraceOutlineMeasurement] = []
+    for measurement in sorted(
+        measurements,
+        key=lambda item: (item.axis, item.representative_width, item.geometry_signature),
+    ):
+        if any(
+            _axes_equivalent(measurement.axis, existing.axis, tolerances)
+            and abs(measurement.representative_width - existing.representative_width)
+            <= tolerances.width_tolerance_mm
+            for existing in unique
+        ):
+            continue
+        unique.append(measurement)
+    return unique[0] if len(unique) == 1 else None
+
+
+def _brace_outline_measurement_from_segments(
+    segments: Sequence[tuple[Point, Point]],
+    tolerances: GeometryTolerances,
+) -> BraceOutlineMeasurement | None:
+    cycle = _closed_cycle_points_from_segments(segments, tolerances)
+    if cycle is None:
+        return None
+    return _brace_outline_measurement_from_cycle(cycle, tolerances)
+
+
+def brace_outline_measurement(
+    points: Sequence[Point],
+    tolerances: GeometryTolerances | None = None,
+) -> BraceOutlineMeasurement | None:
+    """Measure one complete closed Brace outline from its finite boundary."""
+
+    settings = tolerances or GeometryTolerances()
+    values = list(points)
+    if len(values) > 2 and _same_point(values[0], values[-1], NUMERIC_EPSILON):
+        values.pop()
+    if len(values) < 3:
+        return None
+    return _brace_outline_measurement_from_cycle(values, settings)
+
+
+def _brace_supporting_side_measurement(
+    segments: Sequence[tuple[Point, Point]],
+    points: Sequence[Point],
+    tolerances: GeometryTolerances,
+) -> tuple[
+    Point,
+    Point,
+    float,
+    float,
+    tuple[tuple[Point, Point], tuple[Point, Point]],
+] | None:
+    """Measure a Brace outline from two source-supported longitudinal sides.
+
+    The width is never taken from an axis-aligned or rotated bounding box.
+    Only two opposite, direction-compatible boundary bands that each support
+    the main longitudinal corridor may define the physical body envelope.
+    """
+
+    usable_segments = tuple(
+        _ordered_line(*segment)
+        for segment in segments
+        if _length(*segment) > NUMERIC_EPSILON
+    )
+    unique_points = tuple(sorted(set(points)))
+    if len(usable_segments) < 2 or len(unique_points) < 3:
+        return None
+
+    orientation_seeds: list[Point] = []
+    for segment in sorted(usable_segments):
+        direction = _canonical_unit(segment)
+        if direction is None:
+            continue
+        direction_line = ((0.0, 0.0), direction)
+        if any(
+            _angle_difference_deg(direction_line, ((0.0, 0.0), existing))
+            <= tolerances.parallel_angle_tolerance_deg
+            for existing in orientation_seeds
+        ):
+            continue
+        orientation_seeds.append(direction)
+
+    measurements: list[
+        tuple[
+            float,
+            tuple[Point, Point],
+            float,
+            tuple[tuple[Point, Point], tuple[Point, Point]],
+        ]
+    ] = []
+    for direction in orientation_seeds:
+        normal = -direction[1], direction[0]
+        root_projection = tuple(_dot(point, direction) for point in unique_points)
+        root_start, root_end = min(root_projection), max(root_projection)
+        root_extent = root_end - root_start
+        if root_extent < tolerances.minimum_component_length_mm:
+            continue
+
+        evidence: list[tuple[float, tuple[float, float]]] = []
+        for segment in usable_segments:
+            if (
+                _angle_difference_deg(segment, ((0.0, 0.0), direction))
+                > tolerances.parallel_angle_tolerance_deg
+            ):
+                continue
+            evidence.append(
+                (
+                    _dot(_midpoint(*segment), normal),
+                    tuple(sorted(_dot(point, direction) for point in segment)),
+                )
+            )
+        bands: list[list[tuple[float, tuple[float, float]]]] = []
+        for item in sorted(evidence, key=lambda value: (value[0], value[1])):
+            matching = next(
+                (
+                    band
+                    for band in bands
+                    if abs(item[0] - median(entry[0] for entry in band))
+                    <= tolerances.collinear_tolerance_mm
+                ),
+                None,
+            )
+            if matching is None:
+                bands.append([item])
+            else:
+                matching.append(item)
+
+        supporting_bands = tuple(
+            (
+                median(item[0] for item in band),
+                tuple(item[1] for item in band),
+            )
+            for band in bands
+            if _merged_interval_length(tuple(item[1] for item in band))
+            / root_extent
+            >= tolerances.minimum_projection_overlap_ratio
+        )
+        if len(supporting_bands) < 2:
+            continue
+        ordered_bands = tuple(sorted(supporting_bands, key=lambda item: item[0]))
+        first_band, second_band = ordered_bands[0], ordered_bands[-1]
+        width = second_band[0] - first_band[0]
+        if not (
+            tolerances.collinear_tolerance_mm
+            < width
+            <= tolerances.maximum_component_width_mm
+        ):
+            continue
+        if root_extent / width < tolerances.minimum_slenderness_ratio:
+            continue
+
+        transverse_center = (first_band[0] + second_band[0]) / 2.0
+        axis = _ordered_line(
+            (
+                direction[0] * root_start + normal[0] * transverse_center,
+                direction[1] * root_start + normal[1] * transverse_center,
+            ),
+            (
+                direction[0] * root_end + normal[0] * transverse_center,
+                direction[1] * root_end + normal[1] * transverse_center,
+            ),
+        )
+
+        def supporting_line(
+            band: tuple[float, tuple[tuple[float, float], ...]],
+        ) -> tuple[Point, Point]:
+            band_start = min(interval[0] for interval in band[1])
+            band_end = max(interval[1] for interval in band[1])
+            return _ordered_line(
+                (
+                    direction[0] * band_start + normal[0] * band[0],
+                    direction[1] * band_start + normal[1] * band[0],
+                ),
+                (
+                    direction[0] * band_end + normal[0] * band[0],
+                    direction[1] * band_end + normal[1] * band[0],
+                ),
+            )
+
+        coverage = min(
+            _merged_interval_length(first_band[1]) / root_extent,
+            _merged_interval_length(second_band[1]) / root_extent,
+        )
+        measurements.append(
+            (
+                coverage,
+                axis,
+                width,
+                (supporting_line(first_band), supporting_line(second_band)),
+            )
+        )
+
+    if not measurements:
+        return None
+    measurements.sort(key=lambda item: (-item[0], item[1], -item[2]))
+    best = measurements[0]
+    if any(
+        abs(best[0] - contender[0])
+        <= tolerances.ambiguous_candidate_score_delta
+        and not _axes_equivalent(best[1], contender[1], tolerances)
+        for contender in measurements[1:]
+    ):
+        return None
+    confidence = min(0.99, 0.90 + best[0] * 0.09)
+    return best[1][0], best[1][1], best[2], confidence, best[3]
+
+
+def brace_outline_centerline(
+    points: Sequence[Point],
+    tolerances: GeometryTolerances | None = None,
+) -> tuple[
+    Point,
+    Point,
+    float,
+    float,
+    tuple[tuple[Point, Point], tuple[Point, Point]],
+] | None:
+    """Return a Brace outline axis and measured outer supporting sides."""
+
+    settings = tolerances or GeometryTolerances()
+    topology_measurement = brace_outline_measurement(points, settings)
+    if topology_measurement is not None:
+        return (
+            topology_measurement.axis[0],
+            topology_measurement.axis[1],
+            topology_measurement.representative_width,
+            topology_measurement.confidence,
+            topology_measurement.rail_lines,
+        )
+    values = list(points)
+    if len(values) > 2 and _same_point(values[0], values[-1], NUMERIC_EPSILON):
+        values.pop()
+    if len(values) < 3:
+        return None
+    segments = tuple(
+        _ordered_line(values[index], values[(index + 1) % len(values)])
+        for index in range(len(values))
+        if _distance(values[index], values[(index + 1) % len(values)])
+        > NUMERIC_EPSILON
+    )
+    normalized = _merge_closed_cycle_collinear_points(tuple(values), settings)
+    if normalized is None or len(normalized) == 4:
+        return None
+    return _brace_supporting_side_measurement(
+        segments,
+        tuple(values),
+        settings,
     )
 
 
@@ -1358,6 +1950,55 @@ def _recognize_topology_guarded_member(
     )
 
 
+def _brace_topology_candidates(
+    source: BlockMemberRecognitionInput,
+    members: Sequence[_TopologyMember],
+    tolerances: GeometryTolerances,
+) -> tuple[_ComponentCandidate, ...]:
+    """Build only source-supported, reliably measured topology candidates."""
+
+    candidates: list[_ComponentCandidate] = []
+    single_closed_body = len(members) == 1
+    for member in members:
+        measurement = _brace_outline_measurement_from_segments(
+            member.segment_keys,
+            tolerances,
+        )
+        if measurement is None:
+            continue
+        axis = measurement.axis
+        width = measurement.representative_width
+        supporting_sides = measurement.rail_lines
+        if not single_closed_body and not _legacy_axis_covers_source(
+            axis,
+            source,
+            tolerances,
+        ):
+            continue
+        fragments = tuple(
+            _FragmentAxis(
+                side,
+                width,
+                FragmentEvidenceKind.OUTLINE,
+                (),
+            )
+            for side in supporting_sides
+        )
+        candidates.append(
+            _ComponentCandidate(
+                axis,
+                width,
+                fragments,
+                sum(_length(*side) for side in supporting_sides),
+                1.0,
+                1.0,
+                _CandidateAuthorityTier.TOPOLOGY,
+            )
+        )
+    candidates.sort(key=lambda item: (item.axis, -item.representative_width))
+    return tuple(candidates)
+
+
 def _consolidated_brace_candidate_outcome(
     candidates: Sequence[_ComponentCandidate],
     tolerances: GeometryTolerances,
@@ -2141,12 +2782,231 @@ def _recognize_contextual_strut(
     )
 
 
+def _brace_has_component_like_body_evidence(
+    topology_members: Sequence[_TopologyMember],
+    fragments: Sequence[_FragmentAxis],
+    whole_root_candidates: Sequence[_ComponentCandidate],
+    local_candidates: Sequence[_ComponentCandidate],
+    tolerances: GeometryTolerances,
+) -> bool:
+    """Classify a Brace root before any candidate may become authoritative."""
+
+    if topology_members:
+        return True
+    strong_fragments = tuple(fragment for fragment in fragments if fragment.is_strong)
+    if len(strong_fragments) < 2:
+        return False
+    return any(
+        candidate.root_extent_coverage
+        >= tolerances.bim_minimum_longitudinal_evidence_ratio
+        for candidate in (*whole_root_candidates, *local_candidates)
+    )
+
+
+def _maximal_brace_envelope_candidates(
+    candidates: Sequence[_ComponentCandidate],
+    tolerances: GeometryTolerances,
+) -> tuple[_ComponentCandidate, ...]:
+    """Discard nested same-corridor envelopes before authority grouping."""
+
+    retained: list[_ComponentCandidate] = []
+    for candidate in candidates:
+        direction = _canonical_unit(candidate.axis)
+        if direction is None:
+            continue
+        normal = -direction[1], direction[0]
+        center = _dot(_midpoint(*candidate.axis), normal)
+        candidate_interval = (
+            center - candidate.representative_width / 2.0,
+            center + candidate.representative_width / 2.0,
+        )
+        contained = False
+        for other in candidates:
+            if other is candidate or (
+                _angle_difference_deg(candidate.axis, other.axis)
+                > tolerances.parallel_angle_tolerance_deg
+            ):
+                continue
+            other_direction = _canonical_unit(other.axis)
+            if other_direction is None:
+                continue
+            other_normal = -other_direction[1], other_direction[0]
+            other_center = _dot(_midpoint(*other.axis), other_normal)
+            other_interval = (
+                other_center - other.representative_width / 2.0,
+                other_center + other.representative_width / 2.0,
+            )
+            if (
+                other.representative_width
+                > candidate.representative_width + NUMERIC_EPSILON
+                and other_interval[0]
+                <= candidate_interval[0] + tolerances.collinear_tolerance_mm
+                and other_interval[1]
+                >= candidate_interval[1] - tolerances.collinear_tolerance_mm
+                and _projection_overlap_ratio(candidate.axis, other.axis)
+                >= tolerances.minimum_projection_overlap_ratio
+            ):
+                contained = True
+                break
+        if not contained:
+            retained.append(candidate)
+    return tuple(
+        sorted(
+            retained,
+            key=lambda item: (
+                item.axis,
+                -item.representative_width,
+                -item.root_extent_coverage,
+            ),
+        )
+    )
+
+
+def _brace_candidate_groups(
+    candidates: Sequence[_ComponentCandidate],
+    tolerances: GeometryTolerances,
+) -> tuple[tuple[_ComponentCandidate, ...], ...]:
+    groups: list[list[_ComponentCandidate]] = []
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (item.axis, -item.representative_width),
+    ):
+        matching = next(
+            (
+                group
+                for group in groups
+                if all(
+                    _axes_equivalent(candidate.axis, existing.axis, tolerances)
+                    for existing in group
+                )
+            ),
+            None,
+        )
+        if matching is None:
+            groups.append([candidate])
+        else:
+            matching.append(candidate)
+    return tuple(tuple(group) for group in groups)
+
+
+def _recognize_component_like_brace(
+    source: BlockMemberRecognitionInput,
+    settings: GeometryTolerances,
+) -> BlockMemberRecognitionOutcome:
+    """Recognize one component-like Brace by validated authority tiers."""
+
+    topology_members = _extract_topology_members(source.primitives, settings)
+    fragments = _extract_fragment_axes(source.primitives, settings)
+    topology_candidates = _brace_topology_candidates(
+        source,
+        topology_members,
+        settings,
+    )
+    whole_root_candidates = _maximal_brace_envelope_candidates(
+        _whole_root_envelope_candidates(source, settings),
+        settings,
+    )
+    local_candidates = _component_candidates(source, fragments, settings)
+
+    if not _brace_has_component_like_body_evidence(
+        topology_members,
+        fragments,
+        whole_root_candidates,
+        local_candidates,
+        settings,
+    ):
+        return BlockMemberRecognitionOutcome.not_applicable()
+
+    all_candidates = (
+        *topology_candidates,
+        *whole_root_candidates,
+        *local_candidates,
+    )
+    for tier in _CandidateAuthorityTier:
+        tier_candidates = tuple(
+            candidate
+            for candidate in all_candidates
+            if candidate.authority_tier is tier
+        )
+        legal_candidates = tuple(
+            candidate
+            for candidate in tier_candidates
+            if (
+                brace_body_width_is_eligible(
+                    candidate.representative_width,
+                    settings,
+                )
+                and candidate.evidence_ratio
+                >= settings.bim_minimum_longitudinal_evidence_ratio
+                and (
+                    candidate.root_extent_coverage
+                    >= settings.minimum_projection_overlap_ratio
+                    or (
+                        tier is _CandidateAuthorityTier.WHOLE_ROOT_ENVELOPE
+                        and _legacy_axis_covers_source(
+                            candidate.axis,
+                            source,
+                            settings,
+                        )
+                    )
+                )
+            )
+        )
+        if not legal_candidates:
+            continue
+        groups = _brace_candidate_groups(legal_candidates, settings)
+        if len(groups) != 1:
+            return BlockMemberRecognitionOutcome.ambiguous(
+                "BIM_BLOCK_CONFLICTING_WHOLE_AXES"
+            )
+        group = groups[0]
+        representative = min(
+            group,
+            key=lambda item: (
+                -_length(*item.axis),
+                -item.representative_width,
+                item.axis,
+            ),
+        )
+        representative_width = max(
+            candidate.representative_width for candidate in group
+        )
+        return BlockMemberRecognitionOutcome.recognized(
+            representative.axis,
+            representative_width=representative_width,
+            confidence=max(candidate.evidence_ratio for candidate in group),
+            accepted_fragment_count=max(
+                1,
+                sum(len(candidate.fragments) for candidate in group),
+            ),
+        )
+
+    measured_widths = tuple(
+        candidate.representative_width
+        for candidate in all_candidates
+        if math.isfinite(candidate.representative_width)
+        and candidate.representative_width > NUMERIC_EPSILON
+    )
+    diagnostic_code = (
+        "BRACE_BODY_WIDTH_TOO_SMALL"
+        if measured_widths
+        and not any(
+            brace_body_width_is_eligible(width, settings)
+            for width in measured_widths
+        )
+        else "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE"
+    )
+    return BlockMemberRecognitionOutcome.failed(diagnostic_code)
+
+
 def _recognize_component_like_member(
     source: BlockMemberRecognitionInput,
     settings: GeometryTolerances,
     *,
     role: str,
 ) -> BlockMemberRecognitionOutcome:
+    if role == "brace":
+        return _recognize_component_like_brace(source, settings)
     topology_outcome = _recognize_topology_guarded_member(source, settings)
     if topology_outcome is not None:
         return topology_outcome

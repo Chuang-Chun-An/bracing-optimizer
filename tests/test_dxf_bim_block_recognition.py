@@ -15,6 +15,7 @@ from bracing_optimizer.application.project_data import ProjectDataModel
 from dxf_import.candidate_points import set_cad_engineering_line
 from dxf_import.importer import DXFImporter, Y1A_LAYER_MAPPING, Y29_LAYER_MAPPING
 from dxf_import.block_member_recognition import (
+    BraceOutlineMeasurement,
     BlockMemberPrimitive,
     BlockMemberRecognitionInput,
     BlockMemberRecognitionOutcome,
@@ -26,6 +27,9 @@ from dxf_import.block_member_recognition import (
     _extract_fragment_axes,
     _extract_topology_members,
     _whole_root_envelope_candidates,
+    brace_body_width_is_eligible,
+    brace_outline_centerline,
+    brace_outline_measurement,
     recognize_component_like_member,
     recognize_component_like_strut,
 )
@@ -647,10 +651,21 @@ def _add_unreliable_extent_strut_insert(document):
 
 def _add_unreliable_extent_brace_insert(document):
     block = document.blocks.new("UNRELIABLE_EXTENT_BIM_BRACE")
-    block.add_line((4500.0, -150.0), (7500.0, -150.0))
-    block.add_line((4500.0, 150.0), (7500.0, 150.0))
+    for start, end in ((2000.0, 5000.0), (7000.0, 10000.0)):
+        block.add_line((start, -150.0), (end, -150.0))
+        block.add_line((start, 150.0), (end, 150.0))
     block.add_line((0.0, -40.0), (0.0, 40.0))
     block.add_line((12000.0, -40.0), (12000.0, 40.0))
+    return document.modelspace().add_blockref(
+        block.name,
+        (0.0, 0.0),
+        dxfattribs={"layer": BRACE_LAYER},
+    )
+
+
+def _add_too_narrow_brace_insert(document):
+    block = document.blocks.new("TOO_NARROW_BIM_BRACE")
+    _add_rectangle(block, 0.0, 12000.0, 250.0)
     return document.modelspace().add_blockref(
         block.name,
         (0.0, 0.0),
@@ -867,7 +882,7 @@ class Y05BraceSourceCharacterizationTests(unittest.TestCase):
             for source, adopted in zip(record["pure"][1], member[:2])
         )
         self.assertAlmostEqual(extension_distances[0], 425.205551, places=3)
-        self.assertAlmostEqual(extension_distances[1], 425.205551, places=3)
+        self.assertAlmostEqual(extension_distances[1], 398.335494, places=3)
         self.assertEqual(
             record["result_messages"].count("BRACE_AXIS_EXTENDED_TO_WALER"),
             2,
@@ -886,7 +901,7 @@ class Y05BraceSourceCharacterizationTests(unittest.TestCase):
             math.dist(source, adopted)
             for source, adopted in zip(record["pure"][1], member[:2])
         )
-        self.assertAlmostEqual(endpoint_movements[0], 502.705551, places=3)
+        self.assertAlmostEqual(endpoint_movements[0], 398.335494, places=3)
         self.assertLessEqual(
             endpoint_movements[1],
             GeometryTolerances().connection_tolerance_mm,
@@ -900,6 +915,61 @@ class Y05BraceSourceCharacterizationTests(unittest.TestCase):
             1,
         )
         self.assertNotIn("BRACE_ONE_END_NOT_CONNECTED", record["result_messages"])
+
+
+@unittest.skipUnless(Y05_DXF_PATH is not None, "Y05 DXF test asset unavailable")
+class Y05BraceCenterAuthorityRegressionTests(unittest.TestCase):
+    def test_b8_rejects_local_160_width_and_uses_300_outer_envelope(self):
+        importer = DXFImporter(Y05_DXF_PATH).read()
+        groups = importer._geometry_groups(
+            "brace",
+            "斜撐",
+            importer.entities_on_layer("斜撐"),
+            [],
+            [],
+        )
+        group = next(
+            item for item in groups if item.root_handle in {"DD9", "1D0A"}
+        )
+        source = _recognition_source_from_group(group)
+        fragments = _extract_fragment_axes(source.primitives, importer.tolerances)
+        local_candidates = _component_candidates(
+            source,
+            fragments,
+            importer.tolerances,
+        )
+
+        self.assertTrue(
+            any(
+                math.isclose(
+                    candidate.representative_width,
+                    160.015241636,
+                    abs_tol=1e-6,
+                )
+                and not brace_body_width_is_eligible(
+                    candidate.representative_width,
+                    importer.tolerances,
+                )
+                for candidate in local_candidates
+            )
+        )
+        outcome = recognize_component_like_member(source, importer.tolerances)
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertAlmostEqual(outcome.representative_width, 300.0, places=6)
+
+        records = {
+            item["source_handle"]: item
+            for item in _y05_brace_characterization()
+        }
+        record = records["DD9" if "DD9" in records else "1D0A"]
+        self.assertEqual(len(record["formal"]), 1)
+        member = record["formal"][0]
+        self.assertEqual(member[4], "bim_block_whole_axis")
+        self.assertEqual(member[2:4], ("W14", "W13"))
+        self.assertAlmostEqual(member[0][0], -37000.0, places=3)
+        self.assertAlmostEqual(member[0][1], -18368.859, places=3)
+        self.assertAlmostEqual(member[1][0], -32168.859, places=3)
+        self.assertAlmostEqual(member[1][1], -23200.0, places=3)
 
 
 class BIMBlockRootGroupingCharacterizationTests(unittest.TestCase):
@@ -1417,7 +1487,7 @@ class BIMBlockCandidateIntegrationTests(unittest.TestCase):
             }.intersection(message.code for message in result.messages)
         )
 
-    def test_recognized_brace_with_one_waler_keeps_axis_and_connection_error(self):
+    def test_recognized_brace_with_one_waler_keeps_axis_but_no_partial_connection(self):
         document = _new_document()
         document.modelspace().add_line(
             (0.0, -1000.0),
@@ -1431,8 +1501,10 @@ class BIMBlockCandidateIntegrationTests(unittest.TestCase):
         self.assertEqual(len(result.braces), 1)
         member = result.braces[0]
         self.assertEqual((member.start, member.end), ((0.0, 0.0), (12000.0, 0.0)))
-        self.assertEqual(member.from_waler, "W1")
-        self.assertEqual(member.to_waler, "")
+        self.assertEqual((member.from_waler, member.to_waler), ("", ""))
+        self.assertFalse(member.has_formal_connection)
+        self.assertEqual(member.recommended_start_point_id, "")
+        self.assertEqual(member.recommended_end_point_id, "")
         self.assertIn(
             "BRACE_ONE_END_NOT_CONNECTED",
             {message.code for message in result.messages},
@@ -2034,6 +2106,36 @@ class BIMBlockProblemIntegrationTests(unittest.TestCase):
             _add_unreliable_extent_strut_insert,
             "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
         )
+
+    def test_too_narrow_brace_creates_one_unresolved_root_source(self):
+        document = _new_document()
+        _add_horizontal_strut_walers(document)
+        insert = _add_too_narrow_brace_insert(document)
+
+        result = _convert_document(document)
+        problem_records = build_problem_records(result)
+        review_items = build_review_items(result, problem_records)
+        source_identity = (insert.dxf.handle,)
+
+        self.assertFalse(result.can_import)
+        self.assertFalse(
+            any(source_identity[0] in member.source_handles for member in result.braces)
+        )
+        self.assertEqual(
+            tuple(
+                record.code
+                for record in problem_records
+                if record.source_handles == source_identity
+            ),
+            ("BRACE_BODY_WIDTH_TOO_SMALL",),
+        )
+        unresolved = tuple(
+            item
+            for item in review_items
+            if item.status == "unresolved" and item.source_handles == source_identity
+        )
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0].role, "brace")
 
 
 class BIMBlockReviewLifecycleIntegrationTests(unittest.TestCase):
@@ -3466,7 +3568,556 @@ class BlockMemberComponentClassificationTests(unittest.TestCase):
         )
 
 
-class BraceBlockMemberPolicyTests(unittest.TestCase):
+class _BraceRecognitionTestCase(unittest.TestCase):
+    tolerances = GeometryTolerances()
+
+    @staticmethod
+    def source(primitives, *, root_handle="BRACE-FIXTURE"):
+        return BlockMemberRecognitionInput(
+            root_handle=root_handle,
+            root_entity_type="INSERT",
+            role="brace",
+            primitives=tuple(primitives),
+        )
+
+    @staticmethod
+    def rectangle(start, end, *, width=300.0, center_y=0.0):
+        half_width = width / 2.0
+        return BlockMemberPrimitive(
+            (
+                (start, center_y - half_width),
+                (end, center_y - half_width),
+                (end, center_y + half_width),
+                (start, center_y + half_width),
+            ),
+            True,
+            "LWPOLYLINE",
+        )
+
+    @staticmethod
+    def group(primitives, *, root_handle="BRACE-GENERAL"):
+        return _GeometryGroup(
+            key=f"brace:{root_handle}",
+            role="brace",
+            layer=BRACE_LAYER,
+            primitives=[
+                _Primitive(
+                    list(primitive.points),
+                    primitive.closed,
+                    primitive.entity_type,
+                    root_handle,
+                    primitive.source_width,
+                )
+                for primitive in primitives
+            ],
+            handles={root_handle},
+            entity_types={"INSERT", *(item.entity_type for item in primitives)},
+            block_instances=[],
+            root_handle=root_handle,
+            root_entity_type="INSERT",
+        )
+
+
+class BraceBodyWidthPolicyTests(_BraceRecognitionTestCase):
+    def test_strict_threshold_is_not_relaxed_by_tolerance_or_rounding(self):
+        permissive_matching = replace(
+            self.tolerances,
+            width_tolerance_mm=500.0,
+        )
+
+        self.assertFalse(brace_body_width_is_eligible(250.0, permissive_matching))
+        self.assertTrue(brace_body_width_is_eligible(250.001, permissive_matching))
+        self.assertFalse(brace_body_width_is_eligible(249.9999, self.tolerances))
+
+    def test_centerline_only_width_remains_unknown_and_is_not_gated(self):
+        primitive = BlockMemberPrimitive(
+            ((0.0, 0.0), (12000.0, 0.0)),
+            False,
+            "LINE",
+        )
+
+        candidate, messages = _candidate_from_group(
+            self.group((primitive,)),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.recognition_method, "existing_centerline")
+        self.assertEqual(candidate.source_width, 0.0)
+        self.assertEqual(messages, [])
+
+    def test_brace_width_rule_is_separate_from_other_250_and_600_rules(self):
+        self.assertEqual(self.tolerances.minimum_brace_body_width_mm, 250.0)
+        self.assertEqual(self.tolerances.connection_tolerance_mm, 250.0)
+        self.assertEqual(
+            self.tolerances.minimum_corner_brace_rail_separation_mm,
+            250.0,
+        )
+        self.assertEqual(self.tolerances.maximum_brace_axis_extension_mm, 600.0)
+
+
+class BraceClosedOutlineWidthTests(_BraceRecognitionTestCase):
+    def test_skew_cut_measurement_uses_finite_terminal_intersections(self):
+        points = (
+            (0.0, -200.0),
+            (5117.64, -200.0),
+            (4538.31, 200.0),
+            (579.34, 200.0),
+        )
+
+        measurement = brace_outline_measurement(points, self.tolerances)
+
+        self.assertIsInstance(measurement, BraceOutlineMeasurement)
+        assert measurement is not None
+        rail_lengths = sorted(math.dist(*rail) for rail in measurement.rail_lines)
+        self.assertAlmostEqual(rail_lengths[0] / rail_lengths[1], 0.7736, places=4)
+        self.assertLess(
+            rail_lengths[0] / rail_lengths[1],
+            self.tolerances.minimum_projection_overlap_ratio,
+        )
+        self.assertAlmostEqual(measurement.representative_width, 400.0)
+        self.assertAlmostEqual(measurement.axis[0][0], 289.67, places=2)
+        self.assertAlmostEqual(measurement.axis[1][0], 4827.975, places=3)
+
+    def test_skew_cut_measurement_is_invariant_to_cycle_start_and_direction(self):
+        points = (
+            (0.0, -200.0),
+            (2500.0, -200.0),
+            (5117.64, -200.0),
+            (4538.31, 200.0),
+            (2500.0, 200.0),
+            (579.34, 200.0),
+        )
+        variants = (
+            points,
+            points[2:] + points[:2],
+            tuple(reversed(points)),
+        )
+
+        measurements = tuple(
+            brace_outline_measurement(variant, self.tolerances)
+            for variant in variants
+        )
+
+        self.assertTrue(all(item is not None for item in measurements))
+        first = measurements[0]
+        assert first is not None
+        for measurement in measurements[1:]:
+            assert measurement is not None
+            self.assertEqual(measurement.axis, first.axis)
+            self.assertAlmostEqual(
+                measurement.representative_width,
+                first.representative_width,
+            )
+            self.assertEqual(measurement.rail_lines, first.rail_lines)
+            self.assertEqual(measurement.terminal_cut_lines, first.terminal_cut_lines)
+
+    def test_near_triangle_with_one_short_rail_is_not_closed_topology(self):
+        points = (
+            (0.0, -200.0),
+            (5000.0, -200.0),
+            (5000.0, 200.0),
+            (4950.0, 200.0),
+        )
+
+        self.assertIsNone(brace_outline_measurement(points, self.tolerances))
+        self.assertIsNone(brace_outline_centerline(points, self.tolerances))
+
+    def test_terminal_cut_parallel_with_rails_is_not_closed_topology(self):
+        points = (
+            (0.0, -200.0),
+            (20000.0, -200.0),
+            (32000.0, 200.0),
+            (12000.0, 200.0),
+        )
+
+        self.assertIsNone(brace_outline_measurement(points, self.tolerances))
+        self.assertIsNone(brace_outline_centerline(points, self.tolerances))
+
+    def test_rails_without_positive_longitudinal_overlap_are_not_closed_topology(self):
+        points = (
+            (0.0, -200.0),
+            (5000.0, -200.0),
+            (10001.0, 200.0),
+            (5001.0, 200.0),
+        )
+
+        self.assertIsNone(brace_outline_measurement(points, self.tolerances))
+        self.assertIsNone(brace_outline_centerline(points, self.tolerances))
+
+    def test_rectangular_measurement_matches_legacy_axis_and_width(self):
+        points = (
+            (0.0, -150.0),
+            (12000.0, -150.0),
+            (12000.0, 150.0),
+            (0.0, 150.0),
+        )
+
+        measurement = brace_outline_measurement(points, self.tolerances)
+        compatibility = brace_outline_centerline(points, self.tolerances)
+
+        self.assertIsNotNone(measurement)
+        self.assertIsNotNone(compatibility)
+        assert measurement is not None and compatibility is not None
+        self.assertEqual(measurement.axis, ((0.0, 0.0), (12000.0, 0.0)))
+        self.assertAlmostEqual(measurement.representative_width, 300.0)
+        self.assertEqual(compatibility[:2], measurement.axis)
+        self.assertAlmostEqual(compatibility[2], measurement.representative_width)
+
+    @unittest.skipUnless(Y29_DXF_PATH.is_file(), "Y29 DXF fixture unavailable")
+    def test_y29_71a_measurement_records_actual_skew_cut_geometry(self):
+        entity = ezdxf.readfile(Y29_DXF_PATH).entitydb.get("71A")
+        points = tuple(
+            (float(x), float(y))
+            for x, y, *_unused in entity.get_points()
+        )
+
+        measurement = brace_outline_measurement(points, self.tolerances)
+
+        self.assertIsNotNone(measurement)
+        assert measurement is not None
+        rail_lengths = sorted(math.dist(*rail) for rail in measurement.rail_lines)
+        self.assertAlmostEqual(rail_lengths[0], 3958.970, places=3)
+        self.assertAlmostEqual(rail_lengths[1], 5117.638, places=3)
+        self.assertAlmostEqual(rail_lengths[0] / rail_lengths[1], 0.7736, places=4)
+        self.assertAlmostEqual(measurement.representative_width, 400.0, places=3)
+        self.assertAlmostEqual(measurement.axis[0][0], 230552.691, places=3)
+        self.assertAlmostEqual(measurement.axis[0][1], -457043.396, places=3)
+        self.assertAlmostEqual(measurement.axis[1][0], 234567.188, places=3)
+        self.assertAlmostEqual(measurement.axis[1][1], -459160.000, places=3)
+
+    def test_slanted_end_plates_do_not_define_brace_width(self):
+        points = (
+            (0.0, -150.0),
+            (12000.0, -150.0),
+            (11900.0, 150.0),
+            (100.0, 150.0),
+        )
+
+        measurement = brace_outline_centerline(points, self.tolerances)
+
+        self.assertIsNotNone(measurement)
+        self.assertAlmostEqual(measurement[2], 300.0)
+        self.assertAlmostEqual(measurement[0][1], 0.0)
+        self.assertAlmostEqual(measurement[1][1], 0.0)
+
+    def test_short_protruding_detail_does_not_inflate_width(self):
+        points = (
+            (0.0, -150.0),
+            (12000.0, -150.0),
+            (12000.0, 150.0),
+            (7000.0, 150.0),
+            (7000.0, 220.0),
+            (6500.0, 220.0),
+            (6500.0, 150.0),
+            (0.0, 150.0),
+        )
+
+        measurement = brace_outline_centerline(points, self.tolerances)
+
+        self.assertIsNotNone(measurement)
+        self.assertAlmostEqual(measurement[2], 300.0)
+
+    def test_internal_web_line_does_not_replace_outer_supporting_sides(self):
+        primitives = (
+            self.rectangle(0.0, 12000.0, width=300.0),
+            BlockMemberPrimitive(((0.0, 0.0), (12000.0, 0.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source(primitives),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertAlmostEqual(outcome.representative_width, 300.0)
+        self.assertEqual(outcome.whole_axis, ((0.0, 0.0), (12000.0, 0.0)))
+
+    def test_outline_without_two_supported_sides_has_unreliable_width(self):
+        points = (
+            (0.0, -150.0),
+            (12000.0, -150.0),
+            (11800.0, 100.0),
+            (8000.0, 250.0),
+            (4000.0, 100.0),
+            (200.0, 200.0),
+        )
+
+        self.assertIsNone(brace_outline_centerline(points, self.tolerances))
+
+    def test_unreliable_topology_can_recover_from_legal_whole_root_envelope(self):
+        irregular = BlockMemberPrimitive(
+            (
+                (1000.0, -80.0),
+                (11000.0, -80.0),
+                (10800.0, 20.0),
+                (6000.0, 80.0),
+                (1200.0, 20.0),
+            ),
+            True,
+            "LWPOLYLINE",
+        )
+        outer_rails = (
+            BlockMemberPrimitive(((0.0, -150.0), (12000.0, -150.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 150.0), (12000.0, 150.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source((irregular, *outer_rails)),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertAlmostEqual(outcome.representative_width, 300.0)
+        self.assertEqual(outcome.whole_axis, ((0.0, 0.0), (12000.0, 0.0)))
+
+
+class BraceComponentLikeEvidenceTests(_BraceRecognitionTestCase):
+    def test_skew_closed_topology_uses_same_axis_in_general_and_component_routes(self):
+        points = (
+            (0.0, -200.0),
+            (5117.64, -200.0),
+            (4538.31, 200.0),
+            (579.34, 200.0),
+        )
+        primitive = BlockMemberPrimitive(points, True, "LWPOLYLINE")
+        measurement = brace_outline_measurement(points, self.tolerances)
+
+        outcome = recognize_component_like_member(
+            self.source((primitive,)),
+            self.tolerances,
+        )
+        candidate, messages = _candidate_from_group(
+            self.group((primitive,), root_handle="SKEW-SHARED"),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNotNone(measurement)
+        assert measurement is not None
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertEqual(outcome.whole_axis, measurement.axis)
+        self.assertAlmostEqual(
+            outcome.representative_width,
+            measurement.representative_width,
+        )
+        self.assertIsNotNone(candidate)
+        assert candidate is not None
+        self.assertEqual((candidate.start, candidate.end), measurement.axis)
+        self.assertEqual(candidate.recognition_method, "closed_outline_axis")
+        self.assertEqual(candidate.handles, {"SKEW-SHARED"})
+        self.assertEqual(messages, [])
+
+    def test_open_rails_below_global_overlap_gate_do_not_use_topology_exception(self):
+        rails = (
+            BlockMemberPrimitive(((0.0, -200.0), (5117.64, -200.0)), False, "LINE"),
+            BlockMemberPrimitive(((579.34, 200.0), (4538.31, 200.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source(rails),
+            self.tolerances,
+        )
+        candidate, _messages = _candidate_from_group(
+            self.group(rails, root_handle="OPEN-SKEW"),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertEqual(self.tolerances.minimum_projection_overlap_ratio, 0.8)
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.NOT_APPLICABLE)
+        self.assertIsNone(candidate)
+
+    def test_single_open_parallel_pair_is_not_component_like(self):
+        rails = (
+            BlockMemberPrimitive(((0.0, -150.0), (12000.0, -150.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 150.0), (12000.0, 150.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(self.source(rails), self.tolerances)
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.NOT_APPLICABLE)
+
+    def test_complete_body_topology_is_component_like(self):
+        outcome = recognize_component_like_member(
+            self.source((self.rectangle(0.0, 12000.0),)),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertEqual(outcome.representative_width, 300.0)
+
+    def test_local_pair_and_unconnected_terminal_details_are_not_component_like(self):
+        primitives = (
+            BlockMemberPrimitive(((4500.0, -200.0), (7500.0, -200.0)), False, "LINE"),
+            BlockMemberPrimitive(((4500.0, 200.0), (7500.0, 200.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, -40.0), (0.0, 40.0)), False, "LINE"),
+            BlockMemberPrimitive(((12000.0, -40.0), (12000.0, 40.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source(primitives),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.NOT_APPLICABLE)
+
+
+class BraceCenterAuthorityTests(_BraceRecognitionTestCase):
+    def test_unique_legal_topology_cannot_be_overridden_by_lower_tier(self):
+        primitives = (
+            self.rectangle(0.0, 12000.0, width=300.0),
+            BlockMemberPrimitive(((0.0, 200.0), (12000.0, 200.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 500.0), (12000.0, 500.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source(primitives),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertEqual(outcome.whole_axis, ((0.0, 0.0), (12000.0, 0.0)))
+        self.assertEqual(outcome.representative_width, 300.0)
+
+    def test_illegal_topology_width_yields_to_legal_outer_envelope(self):
+        narrow_outline = self.rectangle(0.0, 12000.0, width=160.0)
+        outer_rails = (
+            BlockMemberPrimitive(((0.0, -150.0), (12000.0, -150.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 150.0), (12000.0, 150.0)), False, "LINE"),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source((narrow_outline, *outer_rails)),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.RECOGNIZED)
+        self.assertAlmostEqual(outcome.representative_width, 300.0)
+        self.assertEqual(outcome.whole_axis, ((0.0, 0.0), (12000.0, 0.0)))
+
+    def test_multiple_legal_candidates_in_highest_tier_are_ambiguous(self):
+        outlines = (
+            self.rectangle(0.0, 12000.0, width=300.0, center_y=-150.0),
+            self.rectangle(0.0, 12000.0, width=300.0, center_y=150.0),
+        )
+
+        outcome = recognize_component_like_member(
+            self.source(outlines),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.AMBIGUOUS)
+        self.assertEqual(outcome.diagnostic_code, "BIM_BLOCK_CONFLICTING_WHOLE_AXES")
+
+    def test_all_measured_candidates_at_threshold_fail_terminally(self):
+        outcome = recognize_component_like_member(
+            self.source((self.rectangle(0.0, 12000.0, width=250.0),)),
+            self.tolerances,
+        )
+
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.FAILED)
+        self.assertEqual(outcome.diagnostic_code, "BRACE_BODY_WIDTH_TOO_SMALL")
+
+
+class BraceGeneralBodyWidthGateTests(_BraceRecognitionTestCase):
+    def test_component_route_keeps_terminal_width_failure_on_exact_root(self):
+        route = _route_component_like_member_block(
+            self.group(
+                (self.rectangle(0.0, 12000.0, width=250.0),),
+                root_handle="BRACE-WIDTH-ROOT",
+            ),
+            self.tolerances,
+        )
+
+        self.assertTrue(route.handled)
+        self.assertIsNone(route.candidate)
+        self.assertEqual(len(route.messages), 1)
+        self.assertEqual(route.messages[0].code, "BRACE_BODY_WIDTH_TOO_SMALL")
+        self.assertEqual(route.messages[0].source_handles, ("BRACE-WIDTH-ROOT",))
+
+    def test_mline_width_uses_strict_gate(self):
+        for width, expected_candidate in ((250.0, False), (250.001, True)):
+            with self.subTest(width=width):
+                primitive = BlockMemberPrimitive(
+                    ((0.0, 0.0), (12000.0, 0.0)),
+                    False,
+                    "MLINE",
+                    source_width=width,
+                )
+                candidate, messages = _candidate_from_group(
+                    self.group((primitive,), root_handle=f"MLINE-{width}"),
+                    "brace",
+                    self.tolerances,
+                )
+                self.assertEqual(candidate is not None, expected_candidate)
+                self.assertEqual(
+                    any(message.code == "BRACE_BODY_WIDTH_TOO_SMALL" for message in messages),
+                    not expected_candidate,
+                )
+
+    def test_outline_and_explicit_centerline_cannot_bypass_gate(self):
+        primitives = (
+            self.rectangle(0.0, 12000.0, width=250.0),
+            BlockMemberPrimitive(((0.0, 0.0), (12000.0, 0.0)), False, "LINE"),
+        )
+
+        candidate, messages = _candidate_from_group(
+            self.group(primitives),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNone(candidate)
+        self.assertIn("BRACE_BODY_WIDTH_TOO_SMALL", {message.code for message in messages})
+
+    def test_outline_just_above_threshold_is_legal(self):
+        candidate, messages = _candidate_from_group(
+            self.group((self.rectangle(0.0, 12000.0, width=250.001),)),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate.recognition_method, "closed_outline_axis")
+        self.assertAlmostEqual(candidate.source_width, 250.001, places=6)
+        self.assertEqual(messages, [])
+
+    def test_parallel_pair_gate_runs_before_selection(self):
+        primitives = (
+            BlockMemberPrimitive(((0.0, -125.0), (12000.0, -125.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 125.0), (12000.0, 125.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, -150.0005), (12000.0, -150.0005)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 150.0005), (12000.0, 150.0005)), False, "LINE"),
+        )
+
+        candidate, _messages = _candidate_from_group(
+            self.group(primitives),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNotNone(candidate)
+        self.assertGreater(candidate.source_width, 250.0)
+
+    def test_all_parallel_pairs_at_threshold_return_blocking_diagnostic(self):
+        primitives = (
+            BlockMemberPrimitive(((0.0, -125.0), (12000.0, -125.0)), False, "LINE"),
+            BlockMemberPrimitive(((0.0, 125.0), (12000.0, 125.0)), False, "LINE"),
+        )
+
+        candidate, messages = _candidate_from_group(
+            self.group(primitives),
+            "brace",
+            self.tolerances,
+        )
+
+        self.assertIsNone(candidate)
+        self.assertEqual({message.code for message in messages}, {"BRACE_BODY_WIDTH_TOO_SMALL"})
+
+
+class BraceBlockMemberPolicyTests(_BraceRecognitionTestCase):
     tolerances = GeometryTolerances()
 
     @staticmethod
@@ -3665,7 +4316,7 @@ class BraceBlockMemberPolicyTests(unittest.TestCase):
                 False,
                 "LINE",
             )
-            for y_coordinate in (-500.0, -300.0, 300.0, 500.0)
+            for y_coordinate in (-500.0, -200.0, 200.0, 500.0)
         )
 
         outcome = recognize_component_like_member(
@@ -3772,7 +4423,7 @@ class BraceBlockMemberPolicyTests(unittest.TestCase):
         self.assertIs(ambiguous.status, BlockMemberRecognitionStatus.AMBIGUOUS)
         self.assertIs(fallback.status, BlockMemberRecognitionStatus.NOT_APPLICABLE)
 
-    def test_local_pair_without_supported_terminal_extent_fails(self):
+    def test_local_pair_without_supported_terminal_extent_is_not_component_like(self):
         primitives = (
             BlockMemberPrimitive(((4500.0, -200.0), (7500.0, -200.0)), False, "LINE"),
             BlockMemberPrimitive(((4500.0, 200.0), (7500.0, 200.0)), False, "LINE"),
@@ -3785,11 +4436,7 @@ class BraceBlockMemberPolicyTests(unittest.TestCase):
             self.tolerances,
         )
 
-        self.assertIs(outcome.status, BlockMemberRecognitionStatus.FAILED)
-        self.assertEqual(
-            outcome.diagnostic_code,
-            "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
-        )
+        self.assertIs(outcome.status, BlockMemberRecognitionStatus.NOT_APPLICABLE)
 
 
 class OrdinaryBraceAssetRegressionTests(unittest.TestCase):
@@ -3804,10 +4451,24 @@ class OrdinaryBraceAssetRegressionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(len(result.braces), 16)
-        self.assertEqual(
-            {member.recognition_method for member in result.braces},
-            {"existing_centerline"},
+        centerline_members = tuple(
+            member
+            for member in result.braces
+            if member.recognition_method == "existing_centerline"
+        )
+        self.assertEqual(len(centerline_members), 16)
+        self.assertTrue(
+            all(
+                abs(member.source_width - 350.0)
+                <= GeometryTolerances().material_width_tolerance_mm
+                for member in centerline_members
+            )
+        )
+        self.assertTrue(
+            all(
+                {"LINE", "LWPOLYLINE"}.issubset(member.source_entity_types)
+                for member in centerline_members
+            )
         )
         self.assertFalse(
             any(
@@ -3832,6 +4493,41 @@ class OrdinaryBraceAssetRegressionTests(unittest.TestCase):
         self.assertEqual(methods.count("closed_outline_axis"), 31)
         self.assertEqual(methods.count("existing_centerline"), 1)
         self.assertNotIn("bim_block_whole_axis", methods)
+        self.assertTrue(
+            all(
+                member.source_width > GeometryTolerances().minimum_brace_body_width_mm
+                for member in result.braces
+                if member.recognition_method == "closed_outline_axis"
+            )
+        )
+        skew_sources = {
+            source_handle
+            for member in result.braces
+            if member.recognition_method == "closed_outline_axis"
+            for source_handle in member.source_handles
+            if source_handle in {"71A", "515", "1F4", "282", "4F", "44E", "45C"}
+        }
+        self.assertEqual(
+            skew_sources,
+            {"71A", "515", "1F4", "282", "4F", "44E", "45C"},
+        )
+        member_71a = next(
+            member for member in result.braces if "71A" in member.source_handles
+        )
+        self.assertAlmostEqual(member_71a.source_width, 400.0, places=3)
+        self.assertAlmostEqual(member_71a.start[0], 230552.691, places=3)
+        self.assertAlmostEqual(member_71a.start[1], -457043.396, places=3)
+        self.assertAlmostEqual(member_71a.end[0], 234567.188, places=3)
+        self.assertAlmostEqual(member_71a.end[1], -459160.000, places=3)
+        self.assertFalse(member_71a.has_formal_connection)
+        self.assertIn(
+            "AMBIGUOUS_WALER_CONNECTION",
+            {
+                message.code
+                for message in result.messages
+                if "71A" in message.source_handles
+            },
+        )
 
 class BlockMemberAmbiguityPolicyTests(unittest.TestCase):
     tolerances = GeometryTolerances()
@@ -4875,6 +5571,15 @@ class WalerConstrainedStrutRecognitionTests(unittest.TestCase):
             if item.code == "BIM_BLOCK_WALER_SPAN_INCOMPLETE"
         )
         self.assertIn(waler.dxf.handle, problem.description)
+        formal_waler = next(
+            member
+            for member in result.walers
+            if waler.dxf.handle in member.source_handles
+        )
+        self.assertNotIn(
+            f"{formal_waler.id}（{waler.dxf.handle}）",
+            problem.description,
+        )
 
     def test_excluded_waler_is_not_visible_to_strut_context(self):
         document = _new_document()

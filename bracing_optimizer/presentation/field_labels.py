@@ -80,6 +80,10 @@ DXF_ENGINEERING_FIELD_LABELS: Mapping[str, str] = {
     "PrimaryAssociatedStrutID": "主要關聯支撐",
     "AssociatedStrutID": "關聯支撐",
     "AssociatedStrutIDs": "所有關聯支撐",
+    "ConnectedStrutIDs": "直接連接支撐",
+    "ConnectedBraceIDs": "直接連接斜撐",
+    "ConnectedCornerBraceIDs": "直接連接角撐",
+    "ContactFaceState": "圍令接觸面狀態",
     "AssociationStation": "關聯位置（mm）",
     "AssociationDistance": "關聯距離（mm）",
     "ReferenceX": "參考點 X",
@@ -105,6 +109,8 @@ RECOGNITION_METHOD_LABELS: Mapping[str, str] = {
     "connection_plate_midpoints": "連接板中點",
     "connection_face_midpoints": "接觸面中點",
     "brace_centerline_intersections": "角撐中心線交點",
+    "corner_brace_complete_tracks": "完整角撐雙軌中心線",
+    "occluded_parallel_rails": "遮蔽平行 rail 中線",
     "segment_intersection": "線段交點",
     "waler_outer_to_continuous_wall_inner": "圍令外側至連續壁內側量測",
 }
@@ -119,6 +125,26 @@ DXF_ENTITY_TYPE_LABELS: Mapping[str, str] = {
     "ARC": "ARC（圓弧）",
     "CIRCLE": "CIRCLE（圓）",
     "SPLINE": "SPLINE（雲形線）",
+}
+
+
+MEMBER_ROLE_LABELS: Mapping[str, str] = {
+    "waler": "圍令",
+    "strut": "支撐",
+    "brace": "斜撐",
+    "column": "中間柱",
+    "beam": "托梁",
+    "corner_brace": "角撐",
+    "auxiliary": "輔助線",
+    "continuous_wall": "連續壁",
+    "unknown": "未分類來源",
+}
+
+
+CORNER_BRACE_TRANSFER_MODE_LABELS: Mapping[str, str] = {
+    "same_side": "同側移植",
+    "mirrored": "鏡射移植",
+    "body_relationship_selection": "本體關係選擇",
 }
 
 
@@ -179,13 +205,35 @@ def dxf_entity_type_label(entity_type: str) -> str:
     return DXF_ENTITY_TYPE_LABELS.get(normalized, normalized)
 
 
+def member_role_label(role: str) -> str:
+    """Return a shared member-role label while retaining unknown role IDs."""
+
+    normalized = str(role or "").strip()
+    if not normalized:
+        return "未分類來源"
+    return MEMBER_ROLE_LABELS.get(normalized, normalized)
+
+
+def corner_brace_transfer_mode_label(mode: str) -> str:
+    """Return a repair transfer-mode label without changing the stored value."""
+
+    normalized = str(mode or "").strip()
+    if not normalized:
+        return "—"
+    return CORNER_BRACE_TRANSFER_MODE_LABELS.get(normalized, normalized)
+
+
 __all__ = [
+    "CORNER_BRACE_TRANSFER_MODE_LABELS",
     "DXF_ENGINEERING_FIELD_LABELS",
     "DXF_ENTITY_TYPE_LABELS",
+    "MEMBER_ROLE_LABELS",
     "RECOGNITION_METHOD_LABELS",
     "TABLE_COLUMN_LABELS",
     "build_table_column_labels",
+    "corner_brace_transfer_mode_label",
     "dxf_entity_type_label",
     "engineering_field_label",
+    "member_role_label",
     "recognition_method_label",
 ]

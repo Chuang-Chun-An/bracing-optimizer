@@ -1,7 +1,7 @@
 ---
 name: openspec-archive-change
 description: Archive a completed OpenSpec change in the experimental workflow. Use when the user wants to finalize and archive a change after implementation is complete. Also use when the user says "openspec archive" or "opsx archive".
-allowed-tools: Bash(openspec:*)
+allowed-tools: Bash(openspec:*), Bash(python:*), Bash(py:*), Bash(uv:*)
 license: MIT
 compatibility: Requires openspec CLI.
 metadata:
@@ -165,13 +165,50 @@ In both branches, never create the root as a side effect: do not run `openspec i
    mv "<changeRoot>" "<planningHome.changesDir>/archive/<target-name>"
    ```
 
-6. **Display summary**
+6. **Update the project development history**
+
+   This post-archive step applies only when the planning root contains both
+   `<planningHome.root>/tools/development_history.py` and
+   `<planningHome.root>/docs/DEVELOPMENT_HISTORY.md`. It never changes whether
+   step 5 succeeded.
+
+   After the move succeeds, run the updater from `planningHome.root` with the
+   actual archive path. Use the project's Python interpreter when available and
+   pass only facts established by this archive workflow:
+
+   ```bash
+   python -m tools.development_history "<archive-path>" \
+     --repo-root "<planningHome.root>" \
+     --history "<planningHome.root>/docs/DEVELOPMENT_HISTORY.md" \
+     --verification-status "<actual artifact/task completion summary>" \
+     --spec-status "<actual sync result>"
+   ```
+
+   On Windows, prefer the project's `.venv\\Scripts\\python.exe` when it exists.
+   Parse the command's JSON output:
+
+   - `updated` — report that a new development-history entry was added.
+   - `already-recorded` — report that the existing entry was confirmed; do not
+     add a duplicate.
+   - `pending` or any updater execution failure — keep the archive successful,
+     report `開發歷程待補寫`, the archive path, and the error or retry command.
+
+   Never move the archived change back to active changes because this update
+   failed. The updater records a pending marker in the archived change when it
+   can; rerun the same command later to repair the history safely.
+
+   If the updater or history document is absent, report `開發歷程待補寫` with
+   the missing path. Do not guess an alternate history location and do not treat
+   this as an archive failure.
+
+7. **Display summary**
 
    Show archive completion summary including:
    - Change name
    - Schema that was used
    - Archive location
    - Whether specs were synced (if applicable)
+   - Development history status (`updated`, `already-recorded`, or `待補寫`)
    - Note about any warnings (incomplete artifacts/tasks)
 
 **Output On Success**
@@ -183,6 +220,7 @@ In both branches, never create the root as a side effect: do not run `openspec i
 **Schema:** <schema-name>
 **Archived to:** the archive path derived from `planningHome.changesDir`/<target-name>/
 **Specs:** <"✓ Synced to main specs" only if the step 4 verification passed; otherwise "No delta specs" or "Sync skipped">
+**Development history:** <"✓ Updated", "Already recorded", or "待補寫: <reason>">
 
 <"All artifacts complete. All tasks complete." — or, if archived with warnings, list them instead (e.g. "Archived with 2 incomplete tasks")>
 ```
@@ -192,6 +230,8 @@ In both branches, never create the root as a side effect: do not run `openspec i
 - Use artifact graph (openspec status --json) for completion checking
 - Don't block archive on warnings - just inform and confirm
 - Preserve .openspec.yaml when moving to archive (it moves with the directory)
+- A development-history update failure never rolls back or invalidates a successful archive
+- Never claim tests, validation, or spec sync results that this archive workflow did not actually observe
 - Show clear summary of what happened
 - If sync is requested, run the `openspec-sync-specs` workflow inline (agent-driven)
 - Never archive while a spec sync is still in flight — run the sync inline and verify the main specs before moving `changeRoot`

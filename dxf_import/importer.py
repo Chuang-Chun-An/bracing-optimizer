@@ -41,6 +41,7 @@ from .geometry import (
 from .models import (
     AuxiliaryComponent,
     Beam,
+    BeamBraceContact,
     BeamCrossing,
     BlockInstanceInfo,
     Brace,
@@ -74,9 +75,7 @@ from .recognition import (
     _corner_brace_candidates_from_group,
     _deduplicate_candidates,
     _engineering_line_candidates,
-    _finalize_contextual_strut_waler_spans,
     _mline_center_path,
-    _refine_corner_brace_axis_intersections,
     _route_bim_joist_block,
     _route_component_like_member_block,
     _route_component_like_strut_block,
@@ -611,16 +610,31 @@ class DXFImporter:
                 )
                 for group in groups:
                     if role == "corner_brace":
+                        brace_occluding_lines = tuple(
+                            line
+                            for brace in candidates_by_role.get("brace", ())
+                            for line in (
+                                *brace.boundary_lines,
+                                brace.recognized_axis
+                                or (brace.start, brace.end),
+                            )
+                        )
                         corner_candidates, corner_messages = (
                             _corner_brace_candidates_from_group(
                                 group,
                                 tolerances,
+                                external_occluding_lines=(
+                                    brace_occluding_lines
+                                ),
                             )
                         )
                         messages.extend(corner_messages)
-                        if corner_candidates:
-                            role_candidates.extend(corner_candidates)
-                            continue
+                        role_candidates.extend(corner_candidates)
+                        # CornerBrace has a dedicated material/topology path.
+                        # A rejected exact source must remain unresolved; the
+                        # generic member recognizer would otherwise create a
+                        # guessed formal CornerBrace from the same geometry.
+                        continue
                     candidate, candidate_messages = _candidate_from_group(
                         group,
                         role,
@@ -804,7 +818,50 @@ class DXFImporter:
                 1,
             )
         )
-        struts, braces, connection_messages = connect_components_to_walers(struts, braces, walers, tolerances)
+        corner_evidence_candidates = tuple(
+            candidates_by_role.get("corner_brace_evidence", ())
+        )
+        corner_brace_body_evidence = tuple(
+            {
+                candidate.corner_brace_body_evidence.signature:
+                    candidate.corner_brace_body_evidence
+                for candidate in corner_evidence_candidates
+                if candidate.corner_brace_body_evidence is not None
+            }.values()
+        )
+        corner_brace_relationship_assessments = tuple(
+            assessment
+            for candidate in corner_evidence_candidates
+            for assessment in candidate.corner_brace_relationship_assessments
+        )
+        waler_id_by_source = {
+            tuple(sorted(waler.source_handles)): waler.id
+            for waler in walers
+        }
+        committed_connections: dict[str, tuple[str, str]] = {}
+        blocked_connection_members: set[str] = set()
+        for role, members in (("strut", struts), ("brace", braces)):
+            for member, candidate in zip(members, candidates_by_role[role]):
+                terminal_identities = {
+                    terminal_name: identity
+                    for terminal_name, identity, _relation_kind
+                    in candidate.waler_terminal_source_handles
+                }
+                connection = (
+                    waler_id_by_source.get(terminal_identities.get("start", ()), ""),
+                    waler_id_by_source.get(terminal_identities.get("end", ()), ""),
+                )
+                committed_connections[member.id] = connection
+                if candidate.waler_terminal_blocked:
+                    blocked_connection_members.add(member.id)
+        struts, braces, connection_messages = connect_components_to_walers(
+            struts,
+            braces,
+            walers,
+            tolerances,
+            committed_connections=committed_connections,
+            blocked_connection_members=frozenset(blocked_connection_members),
+        )
         double_support_candidates = detect_double_support_candidates(
             struts,
             tolerances,
@@ -820,6 +877,7 @@ class DXFImporter:
             columns,
             beams,
             tolerances,
+            braces=braces,
             double_support_candidates=double_support_candidates,
         )
         struts = attach_corner_braces_to_struts(
@@ -856,6 +914,10 @@ class DXFImporter:
                 crossing for beam in beams for crossing in beam.crossings
             ),
             double_support_candidates=double_support_candidates,
+            corner_brace_body_evidence=corner_brace_body_evidence,
+            corner_brace_relationship_assessments=(
+                corner_brace_relationship_assessments
+            ),
             source_fingerprint=self.source_fingerprint,
             excluded_sources=normalized_exclusions,
         )
@@ -1392,6 +1454,8 @@ class DXFImporter:
         messages: list[ValidationMessage],
     ) -> None:
         for role, candidates in candidates_by_role.items():
+            if role == "corner_brace_evidence":
+                continue
             owners: dict[str, list[_Candidate]] = defaultdict(list)
             for candidate in candidates:
                 for handle in candidate.handles:
@@ -1406,6 +1470,8 @@ class DXFImporter:
                         "connection_plate_midpoints",
                         "connection_face_midpoints",
                         "brace_centerline_intersections",
+                        "corner_brace_complete_tracks",
+                        "occluded_parallel_rails",
                     }
                     for candidate in source_candidates
                 ):
@@ -1464,6 +1530,8 @@ class DXFImporter:
                 candidates_by_role.get("brace", ()),
                 1,
             )
+            if candidate.brace_terminal_verdict is not None
+            and candidate.brace_terminal_verdict.is_resolved
         )
         columns = tuple(
             cls._make_auxiliary(Column, "C", "column", index, candidate)
@@ -1526,6 +1594,7 @@ class DXFImporter:
             selected_candidate_id=line_candidates[0].id,
             material_spec=candidate.material_spec,
             material_spec_source=candidate.material_spec_source,
+            contact_face_state=candidate.waler_contact_face_state,
         )
 
     @staticmethod
@@ -1539,6 +1608,15 @@ class DXFImporter:
             tuple(dict.fromkeys(candidate.warnings)), tuple(candidate.block_instances),
             line_candidates=line_candidates,
             selected_candidate_id=line_candidates[0].id,
+            source_axis_supported=bool(
+                candidate.handles
+                and _length(
+                    *(candidate.recognized_axis or (candidate.start, candidate.end))
+                )
+                > 0
+            ),
+            terminal_topology_authoritative=True,
+            terminal_topology=candidate.waler_terminal_topology,
         )
 
     @staticmethod
@@ -1596,6 +1674,34 @@ class DXFImporter:
                     for contact in candidate.joist_contacts
                     if contact.member_role == "strut"
                 ),
+                "brace_contacts": tuple(
+                    BeamBraceContact(
+                        beam_id,
+                        contact.member_id,
+                        contact.point,
+                        contact.point,
+                        0,
+                        contact.recognition_method,
+                    )
+                    for contact in candidate.joist_contacts
+                    if contact.member_role == "brace"
+                ),
+            }
+        corner_brace_changes: dict[str, Any] = {}
+        if issubclass(component_type, CornerBrace):
+            selected_assessment = next(
+                (
+                    assessment
+                    for assessment in candidate.corner_brace_relationship_assessments
+                    if assessment.hard_valid
+                    and assessment.classification
+                    == candidate.corner_brace_candidate_kind
+                ),
+                None,
+            )
+            corner_brace_changes = {
+                "body_geometry_evidence": candidate.corner_brace_body_evidence,
+                "relationship_assessment": selected_assessment,
             }
         return component_type(
             f"{prefix}{index}",
@@ -1615,6 +1721,7 @@ class DXFImporter:
             reference_point=reference_point,
             world_reference_point=reference_point,
             local_reference_point=reference_point,
+            **corner_brace_changes,
             **beam_path_changes,
         )
 

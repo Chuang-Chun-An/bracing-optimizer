@@ -293,6 +293,8 @@ class ReviewRecoveryPlanner:
         identity_map = critical_member_identity_map(matches)
         candidate_counts: dict[Any, int] = defaultdict(int)
         for candidate in getattr(candidate_result, "double_support_candidates", ()):
+            if getattr(candidate, "qualification_status", "eligible") != "eligible":
+                continue
             identity = double_support_candidate_identity(candidate_result, candidate)
             if identity is not None:
                 candidate_counts[identity] += 1
@@ -587,6 +589,53 @@ class ReviewRecoveryPlanner:
                 )
 
             entries.extend(exclusion_entries)
+            raw_column_decisions = saved_state.get("column_association_decisions", ())
+            if isinstance(raw_column_decisions, (list, tuple)):
+                def member_sources(members: Sequence[Any]) -> dict[tuple[str, ...], int]:
+                    counts: dict[tuple[str, ...], int] = defaultdict(int)
+                    for member in members:
+                        handles = (
+                            member.get("source_handles", ())
+                            if isinstance(member, Mapping)
+                            else getattr(member, "source_handles", ())
+                        )
+                        source = normalize_source_handles(handles)
+                        if source:
+                            counts[source] += 1
+                    return counts
+
+                column_sources = member_sources(getattr(staged_result, "columns", ()))
+                strut_sources = member_sources(getattr(staged_result, "struts", ()))
+                for decision in raw_column_decisions:
+                    if not isinstance(decision, Mapping):
+                        continue
+                    label = str(decision.get("column_display_id", "") or "中間柱")
+                    column_source = normalize_source_handles(decision.get("column_source_handles", ()))
+                    raw_candidates = decision.get("candidate_strut_sources", ())
+                    if not isinstance(raw_candidates, (list, tuple)):
+                        raw_candidates = ()
+                    candidate_sources = tuple(
+                        normalize_source_handles(handles)
+                        for handles in raw_candidates
+                    )
+                    identifiable = (
+                        column_sources.get(column_source) == 1
+                        and len(candidate_sources) == 2
+                        and all(strut_sources.get(source) == 1 for source in candidate_sources)
+                    )
+                    entries.append(
+                        RecoverySummaryEntry(
+                            RecoveryCategory.REQUIRES_REVIEW if identifiable else RecoveryCategory.DISABLED,
+                            "column_association",
+                            label,
+                            "COLUMN_ASSOCIATION_REVIEW_REQUIRED" if identifiable else "COLUMN_ASSOCIATION_DISABLED",
+                            (
+                                f"{label} 的人工支撐關聯未轉移；請在新 DXF Review 重新判定。"
+                                if identifiable else
+                                f"{label} 的柱或候選支撐來源無法唯一識別；原人工關聯已停用。"
+                            ),
+                        )
+                    )
             entries.extend(
                 self._repair_recovery_entries(
                     repair_overrides,

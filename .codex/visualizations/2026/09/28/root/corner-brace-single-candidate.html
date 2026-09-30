@@ -1,0 +1,80 @@
+<section id="corner-brace-single-candidate" aria-label="角撐修補預覽示意">
+  <div class="viz-row">
+    <div>
+      <h2>建議修補方案</h2>
+      <p class="text-muted">已通過目標證據、模板移植與有限構件檢查；套用前請確認圖面預覽。</p>
+    </div>
+    <span class="viz-badge">1 個可套用方案</span>
+  </div>
+
+  <div class="viz-grid">
+    <div class="card viz-stat">
+      <div class="text-muted">目標關係</div>
+      <div class="viz-stat-value">W2 / S2</div>
+      <div class="text-small text-muted">圍令／支撐</div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">移植方式</div>
+      <div class="viz-stat-value">鏡射移植</div>
+      <div class="text-small text-muted">模板 CB58</div>
+    </div>
+    <div class="card viz-stat">
+      <div class="text-muted">結果長度</div>
+      <div class="viz-stat-value">2266.320 mm</div>
+      <div class="text-small text-muted">由目標端點重新計算</div>
+    </div>
+  </div>
+
+  <div class="viz-grid">
+    <div>
+      <h3>圖面預覽</h3>
+      <svg viewBox="0 0 420 230" role="img" aria-labelledby="drawing-title drawing-desc">
+        <title id="drawing-title">修補後角撐與目標構件關係</title>
+        <desc id="drawing-desc">藍色斜線為建議修補的角撐軸線，深色水平線為圍令 W2，深色垂直線為支撐 S2；橘色點為定位錨點。</desc>
+        <line x1="48" y1="166" x2="370" y2="166" stroke="currentColor" stroke-width="4" />
+        <line x1="235" y1="38" x2="235" y2="200" stroke="currentColor" stroke-width="4" />
+        <line x1="235" y1="166" x2="93" y2="63" stroke="var(--viz-series-1)" stroke-width="6" />
+        <line x1="235" y1="166" x2="93" y2="63" stroke="currentColor" stroke-width="1" stroke-dasharray="5 5" opacity=".55" />
+        <circle cx="93" cy="63" r="7" fill="var(--viz-series-2)" />
+        <circle cx="235" cy="166" r="6" fill="var(--viz-series-1)" />
+        <text x="370" y="156" text-anchor="end" fill="currentColor">W2 圍令</text>
+        <text x="246" y="52" fill="currentColor">S2 支撐</text>
+        <text x="102" y="54" fill="currentColor">定位錨點</text>
+        <text x="124" y="125" fill="currentColor">建議角撐軸線</text>
+      </svg>
+      <div class="viz-row text-small" aria-label="圖面圖例">
+        <span>● 定位錨點</span>
+        <span>━ 建議修補軸線</span>
+      </div>
+    </div>
+
+    <div>
+      <h3>採用前確認</h3>
+      <table class="table table-sm" aria-label="修補方案主要資料">
+        <tbody>
+          <tr><th scope="row">選用模板</th><td class="text-end">CB58</td></tr>
+          <tr><th scope="row">圍令偏移</th><td class="text-end">1602.530 mm</td></tr>
+          <tr><th scope="row">支撐位置</th><td class="text-end">1602.530 mm</td></tr>
+          <tr><th scope="row">目標方向</th><td class="text-end">有效</td></tr>
+          <tr><th scope="row">定位錨點</th><td class="text-end">有效</td></tr>
+        </tbody>
+      </table>
+      <details>
+        <summary>查看稽核與診斷資料</summary>
+        <table class="table table-sm" aria-label="修補方案稽核資料">
+          <tbody>
+            <tr><th scope="row">參考固定長度</th><td class="text-end">2266.320 mm</td></tr>
+            <tr><th scope="row">自動辨識依據</th><td class="text-end">CB58</td></tr>
+            <tr><th scope="row">人工修補輔助</th><td class="text-end">—</td></tr>
+            <tr><th scope="row">移植後軸線</th><td class="text-end">(-51866.970, 9450.000) → (-53469.500, 7847.470)</td></tr>
+          </tbody>
+        </table>
+      </details>
+    </div>
+  </div>
+
+  <div class="viz-controls">
+    <button class="btn" type="button">取消</button>
+    <button class="btn btn-primary" type="button">套用此修補</button>
+  </div>
+</section>

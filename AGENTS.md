@@ -1,4 +1,3 @@
-1. AGENTS.md
 # SupportOptimizer Agent Instructions
 
 本檔案定義 AI Agent 在本專案中的工作方式與開發規則。
@@ -43,8 +42,22 @@
 ### 開發流程
 - `docs/WORKFLOW.md`
 
-### 特定功能
-- `docs/specs/<feature>.md`
+### 已成立的功能規格
+- `openspec/specs/<capability>/spec.md`
+
+### 開發歷程（需要追溯時）
+- `docs/DEVELOPMENT_HISTORY.md`
+
+### OpenSpec change
+- 先閱讀 `proposal.md`，確認問題、目標、現況與目標流程、In Scope、Out of Scope。
+- 準備理解實作方案或流程可能改變時，再閱讀同一 change 的 `design.md`。
+- 準備實作或修改測試時，閱讀與本次 scope 直接相關的 `spec.md`；不要求無差別閱讀所有 spec。
+- 驗證完成度時，對照相關 `spec.md` 與 `tasks.md`，並回頭確認沒有超出 `proposal.md` 的 scope。
+- `proposal.md` 應是白話的決策入口；`design.md` 說明技術方案與取捨；`spec.md` 定義精確行為與邊界；`tasks.md` 定義實作順序與驗證方式。
+- 若文件使用必要的專有名詞，應在 proposal 開頭或閱讀指引中提供簡短定義，並指出需要閱讀的 spec 區段。
+- OpenSpec 的閱讀架構必須寫入產出的 artifact 本身，不得只在對話回覆中口頭說明。
+- 每個非空的 OpenSpec artifact 都應在開頭提供閱讀導航，區分「現在必讀」、「實作前閱讀」與「需要時再讀」，並指出對應文件與段落。
+- 閱讀導航應限制 P0／現在必讀項目數量，優先告訴使用者哪些內容可以先跳過，以降低閱讀負擔。
 
 不要無差別讀取整個 repository。
 

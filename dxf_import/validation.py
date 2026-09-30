@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from typing import Sequence
 
@@ -19,6 +20,7 @@ from .models import (
     Brace,
     CandidatePoint,
     Column,
+    CornerBrace,
     DXFImportResult,
     GeometryTolerances,
     ProblemRecord,
@@ -55,6 +57,7 @@ _RECOGNITION_CODES = {
     "BEAM_CENTERLINE_FAILED",
     "BEAM_RECOGNITION_FAILED",
     "CORNER_BRACE_CENTERLINE_FAILED",
+    "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
     "CORNER_BRACE_RECOGNITION_FAILED",
     "AMBIGUOUS_CENTERLINE",
     "AMBIGUOUS_INNER_LINE",
@@ -117,6 +120,176 @@ _WALER_CONTACT_CODES = {
     "WALER_CONTACT_ADJUSTED",
     "WALER_CONTACT_BASELINE_CHANGED",
 }
+_WALER_OVERLAP_CODES = {
+    "WALER_SOURCE_OVERLAP",
+    "WALER_OVERLAP_COMPETITION",
+}
+
+_DESCRIPTION_COMPETING_IDENTITY_FIELDS = (
+    "competing_source_identities",
+    "structured_competing_identities",
+    "competing_waler_source_handles",
+)
+_SOURCE_LIST_SEPARATOR_PATTERN = re.compile(
+    r"\s*(?:/|／|、|,|，|與|和)\s*"
+)
+_COORDINATE_PATTERN = re.compile(
+    r"[\(\[]\s*"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*,\s*"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:\s*,\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+))*"
+    r"\s*[\)\]]"
+)
+
+
+def _member_id_sort_key(identifier: str) -> tuple[tuple[object, ...], ...]:
+    """Match the Review list's numeric-aware member-ID ordering."""
+
+    return tuple(
+        (0, int(token), token)
+        if token.isdigit()
+        else (1, token.casefold(), token)
+        for token in re.split(r"(\d+)", identifier)
+        if token
+    )
+
+
+def _flatten_structured_handles(value: object) -> tuple[str, ...]:
+    """Flatten only explicitly named structured source-identity fields."""
+
+    if isinstance(value, str):
+        handle = value.strip()
+        return (handle,) if handle else ()
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return ()
+    return tuple(
+        handle
+        for item in value
+        for handle in _flatten_structured_handles(item)
+    )
+
+
+def _description_handle_allowlist(message: object) -> tuple[str, ...]:
+    """Return source handles explicitly carried by this diagnostic only."""
+
+    values = list(
+        _flatten_structured_handles(getattr(message, "source_handles", ()))
+    )
+    for field_name in _DESCRIPTION_COMPETING_IDENTITY_FIELDS:
+        values.extend(
+            _flatten_structured_handles(getattr(message, field_name, ()))
+        )
+    return tuple(
+        dict.fromkeys(value for value in values if value)
+    )
+
+
+def _is_engineering_number_occurrence(
+    text: str,
+    start: int,
+    end: int,
+    coordinate_spans: Sequence[tuple[int, int]],
+) -> bool:
+    """Protect units, decimals and coordinate values from handle rendering."""
+
+    if any(
+        span_start <= start and end <= span_end
+        for span_start, span_end in coordinate_spans
+    ):
+        return True
+    if (start > 0 and text[start - 1] in ".+-") or (
+        end < len(text) and text[end] == "."
+    ):
+        return True
+    suffix = text[end:]
+    return bool(re.match(r"\s*(?:mm\b|°|%)", suffix, flags=re.IGNORECASE))
+
+
+def _format_problem_description(
+    description: str,
+    message: object,
+    owners_by_handle: dict[str, set[str]],
+) -> str:
+    """Project structured source handles to Review-list labels in UI text."""
+
+    allowlist = _description_handle_allowlist(message)
+    if not description or not allowlist:
+        return description
+
+    canonical_handles = {
+        handle.casefold(): handle
+        for handle in allowlist
+    }
+    alternatives = "|".join(
+        re.escape(handle)
+        for handle in sorted(
+            canonical_handles.values(),
+            key=lambda item: (-len(item), item.casefold(), item),
+        )
+    )
+    if not alternatives:
+        return description
+    handle_pattern = re.compile(
+        rf"(?<![0-9A-Za-z])(?:{alternatives})(?![0-9A-Za-z])",
+        flags=re.IGNORECASE,
+    )
+    coordinate_spans = tuple(
+        (match.start(), match.end())
+        for match in _COORDINATE_PATTERN.finditer(description)
+    )
+    canonical_owners = {
+        str(handle).casefold(): tuple(
+            sorted(
+                {str(owner) for owner in owners if str(owner)},
+                key=_member_id_sort_key,
+            )
+        )
+        for handle, owners in owners_by_handle.items()
+    }
+    occurrences: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for match in handle_pattern.finditer(description):
+        handle = canonical_handles.get(match.group(0).casefold(), match.group(0))
+        owners = canonical_owners.get(handle.casefold(), ())
+        if not owners or _is_engineering_number_occurrence(
+            description,
+            match.start(),
+            match.end(),
+            coordinate_spans,
+        ):
+            continue
+        occurrences.append((match.start(), match.end(), handle, owners))
+    if not occurrences:
+        return description
+
+    replacements: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(occurrences):
+        start, end, handle, owners = occurrences[index]
+        handles = [handle]
+        next_index = index + 1
+        while next_index < len(occurrences):
+            next_start, next_end, next_handle, next_owners = occurrences[next_index]
+            separator = description[end:next_start]
+            if next_owners != owners or not _SOURCE_LIST_SEPARATOR_PATTERN.fullmatch(
+                separator
+            ):
+                break
+            if next_handle not in handles:
+                handles.append(next_handle)
+            end = next_end
+            next_index += 1
+        handle_text = "／".join(handles)
+        label = "／".join(
+            f"{owner}（{handle_text}）"
+            for owner in owners
+        )
+        replacements.append((start, end, label))
+        index = next_index
+
+    rendered = description
+    for start, end, label in reversed(replacements):
+        rendered = f"{rendered[:start]}{label}{rendered[end:]}"
+    return rendered
 
 
 def problem_severity_rank(severity: str) -> int:
@@ -137,6 +310,22 @@ def build_problem_records(result: DXFImportResult) -> tuple[ProblemRecord, ...]:
         *result.corner_braces,
     )
     member_by_id = {member.id: member for member in members}
+    member_role_by_id = {
+        member.id: (
+            "waler"
+            if isinstance(member, Waler)
+            else "strut"
+            if isinstance(member, Strut)
+            else "brace"
+            if isinstance(member, Brace)
+            else "beam"
+            if isinstance(member, Beam)
+            else "corner_brace"
+            if isinstance(member, CornerBrace)
+            else "column"
+        )
+        for member in members
+    }
     owners_by_handle: dict[str, set[str]] = defaultdict(set)
     for member in members:
         for handle in member.source_handles:
@@ -155,7 +344,30 @@ def build_problem_records(result: DXFImportResult) -> tuple[ProblemRecord, ...]:
         )
         if not member_ids and handles:
             owner_sets = [owners_by_handle.get(handle, set()) for handle in handles]
-            if owner_sets and all(len(owners) == 1 for owners in owner_sets):
+            if message.code in _WALER_OVERLAP_CODES:
+                member_ids = tuple(
+                    sorted(
+                        {
+                            member_id
+                            for owners in owner_sets
+                            for member_id in owners
+                        }
+                    )
+                )
+            elif message.role:
+                role_owners = tuple(
+                    sorted(
+                        {
+                            member_id
+                            for owners in owner_sets
+                            for member_id in owners
+                            if member_role_by_id.get(member_id) == message.role
+                        }
+                    )
+                )
+                if len(role_owners) == 1:
+                    member_ids = role_owners
+            elif owner_sets and all(len(owners) == 1 for owners in owner_sets):
                 common_owners = set.intersection(*owner_sets)
                 if len(common_owners) == 1:
                     owner_id = next(iter(common_owners))
@@ -168,7 +380,11 @@ def build_problem_records(result: DXFImportResult) -> tuple[ProblemRecord, ...]:
                 message.severity,
                 message.code,
                 component or "—",
-                message.message,
+                _format_problem_description(
+                    message.message,
+                    message,
+                    owners_by_handle,
+                ),
                 message.role,
                 handles,
                 member_ids,
@@ -347,6 +563,11 @@ def _guidance_for_problem(record: ProblemRecord, item: ReviewItem) -> str:
         )
     if code in _WALER_CONTACT_CODES:
         return "請在工程資料的圍令接觸位置調整中檢查圖面值與採用值。"
+    if code in _WALER_OVERLAP_CODES:
+        return (
+            "請定位問題列出的圍令來源與受影響端點，並依外部工程判斷檢查 DXF。"
+            "若 active sources 有變更，系統會重新辨識；本提示不推薦刪除、排除或保留任一來源。"
+        )
     if "COORDINATE" in code:
         return "請開啟「座標 ✓」檢查座標系統。"
     if code in _RECOGNITION_CODES:
@@ -457,7 +678,10 @@ def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOvervi
             )
 
     unassociated_columns = sum(not member.associated_strut_id for member in result.columns)
-    unassociated_beams = sum(not member.associated_strut_id for member in result.beams)
+    unassociated_beams = sum(
+        not member.crossings and not member.brace_contacts
+        for member in result.beams
+    )
     if result.columns:
         items.append(
             ValidationOverviewItem(
@@ -474,9 +698,9 @@ def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOvervi
             ValidationOverviewItem(
                 "error" if unassociated_beams else "success",
                 (
-                    f"{unassociated_beams} 根托梁尚未關聯支撐"
+                    f"{unassociated_beams} 根托梁尚未連接支撐或斜撐"
                     if unassociated_beams
-                    else "托梁皆已關聯支撐"
+                    else "托梁皆已連接支撐或斜撐"
                 ),
             )
         )

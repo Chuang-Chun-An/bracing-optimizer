@@ -187,8 +187,28 @@ bracing_optimizer/application/project_service.py + infrastructure/project_persis
 
 # 3. 檔案結構
 
+文件分成「專案規則」、「目前系統的長期真相」與「單次功能變更」三層：
+
+| 位置 | 責任 |
+|---|---|
+| `AGENTS.md` | AI Agent 的專案工作方式、閱讀順序、架構與驗證規則 |
+| `docs/ARCHITECTURE.md` | 模組責任、依賴方向、state ownership 與已接受的架構例外 |
+| `docs/DOMAIN.md` | 工程名詞、正式工程規則與材料政策 |
+| `docs/SOLVER.md` | Support／Waler 搜尋、評分、候選保留、診斷與已知限制 |
+| `docs/WORKFLOW.md` | Runtime state、commit／rollback、結果生命週期與存取流程 |
+| `docs/DEVELOPMENT_HISTORY.md` | 已完成變更的長期歷程摘要；不是現行行為規格 |
+| `openspec/specs/` | 已成立 capability 的精確行為規格 |
+| `openspec/changes/` | 進行中與已封存 change 的 proposal、design、spec、tasks |
+
+`docs/` 不存放單次實作計畫或重複的功能 spec。新功能先在
+`openspec/changes/<change>/` 規劃；完成並驗證後，只有確實改變長期真相時，
+才同步更新對應的 `ARCHITECTURE.md`、`DOMAIN.md`、`SOLVER.md` 或
+`WORKFLOW.md`。
+
 ```text
 support_distribution_uv\
+├─ AGENTS.md
+├─ README.md
 ├─ bracing_optimizer\
 │  ├─ domain\
 │  │  ├─ material_rules.py
@@ -248,8 +268,14 @@ support_distribution_uv\
 ├─ tests\
 │  └─ test_cad_builder_integration.py
 ├─ docs\
-│  └─ wales\
-│     └─ README.md
+│  ├─ ARCHITECTURE.md
+│  ├─ DOMAIN.md
+│  ├─ SOLVER.md
+│  ├─ WORKFLOW.md
+│  └─ DEVELOPMENT_HISTORY.md
+├─ openspec\
+│  ├─ specs\
+│  └─ changes\
 ├─ SupportSolver.spec
 ├─ pyproject.toml
 └─ uv.lock
@@ -772,7 +798,7 @@ Matplotlib 自訂工具列，只保留：
 
 ## 6.5 `bracing_optimizer/algorithms/wales.py`
 
-完整逐函式教學另見 `docs/wales/README.md`。
+正式搜尋、評分與限制以 `docs/SOLVER.md` 為準；以下索引只協助定位程式。
 
 ### 設定與工具
 
@@ -781,7 +807,7 @@ Matplotlib 自訂工具列，只保留：
 | `debug_print()` | 訊息 | `None` | `DEBUG=True` 才輸出細節 |
 | `set_logger()` | callback | `None` | 設定 GUI logger |
 | `generate_candidate_joint_points()` | total、min、step | points | 產生染色體候選點 |
-| `Config.__post_init__()` | self | `None` | 補候選點與購買長度預設 |
+| `Config.__post_init__()` | self | `None` | 解析 tail，補候選點與購買長度預設 |
 | `classify_length()` | segment、config | short/mid/long/out | 保留舊 API，轉呼叫 `material_rules.classify_length()` |
 | `is_joint_allowed()` | point、config | bool | forbidden/support 安全距離 |
 | `expand_stock_items()` | qty stock | 單支庫存 | 展開庫存 |
@@ -836,7 +862,7 @@ Matplotlib 自訂工具列，只保留：
 | `_reset_performance_counters()` | 無 | `None` | 重設評估與配料統計 |
 | `_run_generations()` | population、config、stock | population、eval | elite→selection→交配→突變→repair→評估 |
 | `_log_performance_statistics()` | counters | `None` | 平均 evaluate/allocate 耗時 |
-| `_top_results()` | final eval、config | Top N | 有效優先、segments 去重、排序 |
+| `_top_results()` | final eval、config | Top N | 有效優先、以完整方案 signature 去重與排序 |
 | `evolve()` | config、stock、seed | result dict list | Waler 正式入口 |
 | `build_neighbors()` | config | nodes、neighbors | 不含 forbidden filter 的診斷圖 |
 | `diagnose_search_space()` | config、stock、sample count | `None` | 命令列搜尋空間報告 |
@@ -2231,19 +2257,19 @@ uv sync --group dev
 ## 16.2 建議閱讀順序
 
 ```text
+AGENTS.md
+↓
 README.md
 ↓
-project_data.py
+docs/ARCHITECTURE.md
 ↓
-cad_builder.py
+依任務選讀 docs/DOMAIN.md、docs/SOLVER.md、docs/WORKFLOW.md
 ↓
-wales.py / docs/wales/README.md
+相關 openspec/specs/<capability>/spec.md
 ↓
-support.py
+若有進行中 change，再讀 proposal → design → 相關 spec → tasks
 ↓
-main.py 的 Solver input/output methods
-↓
-main.py GUI 與 preview
+受影響的程式與測試
 ```
 
 ## 16.3 要修改 GUI

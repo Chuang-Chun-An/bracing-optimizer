@@ -17,6 +17,7 @@ from typing import Any, Mapping, Sequence
 from .candidate_points import (
     CandidatePointStore,
     add_cad_candidate_points,
+    ambiguous_column_repair_options,
     apply_candidate_point_selection,
     rebuild_component_associations,
 )
@@ -32,6 +33,7 @@ from .material_recognition import set_member_material_spec
 from .models import (
     AuxiliaryComponent,
     Brace,
+    ColumnAssociationDecision,
     CoordinateSystem,
     DXFImportError,
     DXFImportResult,
@@ -95,6 +97,7 @@ class DXFReviewSnapshot:
     review_items: tuple[ReviewItem, ...]
     excluded_sources: tuple[ExcludedSource, ...]
     double_support_decisions: Mapping[DoubleSupportSourceIdentity, bool]
+    column_association_decisions: Mapping[tuple[str, ...], ColumnAssociationDecision]
     review_confirmations: Mapping[str, str]
     selected_origin_world: Point | None
     coordinate_valid: bool
@@ -123,6 +126,21 @@ class SourceExclusionPlan:
     problem_records: tuple[ProblemRecord, ...]
     review_items: tuple[ReviewItem, ...]
     manual_replay: ManualReplayReport
+
+
+@dataclass(frozen=True)
+class ColumnAssociationRepairPlan:
+    """Revision-bound, side-effect-free view of one two-Strut ambiguity."""
+
+    base_revision: int
+    column_source_handles: tuple[str, ...]
+    column_id: str
+    candidate_strut_ids: tuple[str, str]
+    candidate_strut_sources: tuple[tuple[str, ...], tuple[str, ...]]
+    options: tuple[tuple[float, str, float, Point], ...]
+    source_fingerprint: str
+    status: str
+    selected_strut_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -179,6 +197,20 @@ class DXFReviewWorkflow:
             if self.initial_state_matches_source
             else {}
         )
+        self.column_association_decisions: dict[
+            tuple[str, ...], ColumnAssociationDecision
+        ] = {}
+        if self.initial_state_matches_source:
+            raw_decisions = self.initial_state.get("column_association_decisions", ())
+            if isinstance(raw_decisions, (list, tuple)):
+                for raw in raw_decisions:
+                    if not isinstance(raw, Mapping):
+                        continue
+                    try:
+                        decision = ColumnAssociationDecision(**raw)
+                    except (TypeError, ValueError):
+                        continue
+                    self.column_association_decisions[decision.column_source_handles] = decision
         self.review_confirmations = (
             review_confirmations_from_state(self.initial_state)
             if self.initial_state_matches_source
@@ -259,6 +291,7 @@ class DXFReviewWorkflow:
             review_items=self.review_items,
             excluded_sources=self.excluded_sources,
             double_support_decisions=dict(self.double_support_decisions),
+            column_association_decisions=dict(self.column_association_decisions),
             review_confirmations=dict(self.review_confirmations),
             selected_origin_world=self.selected_origin_world,
             coordinate_valid=self.coordinate_valid,
@@ -308,7 +341,12 @@ class DXFReviewWorkflow:
             "selected_candidate_point",
         )
 
-    def _rebuild_derived_state(self, *, coordinate_mode: str | None = None) -> None:
+    def _rebuild_derived_state(
+        self,
+        *,
+        coordinate_mode: str | None = None,
+        rebuild_associations: bool = True,
+    ) -> None:
         if self.world_result is None:
             self.result = None
             self.problem_records = ()
@@ -316,6 +354,14 @@ class DXFReviewWorkflow:
             self.coordinate_valid = False
             self.candidate_point_store.rebuild(())
             return
+        if rebuild_associations and self.column_association_decisions:
+            self.world_result = rebuild_component_associations(
+                self.world_result,
+                self.importer.tolerances,
+                column_decisions=tuple(
+                    self.column_association_decisions.values()
+                ),
+            )
         requested_mode = coordinate_mode or (
             "local" if self.selected_origin_world is not None else "world"
         )
@@ -416,11 +462,11 @@ class DXFReviewWorkflow:
                 replace(staged, double_support_candidates=candidates),
                 self.double_support_decisions,
             )
-        if candidates != staged.double_support_candidates:
-            staged = rebuild_component_associations(
-                replace(staged, double_support_candidates=candidates),
-                self.importer.tolerances,
-            )
+        staged = rebuild_component_associations(
+            replace(staged, double_support_candidates=candidates),
+            self.importer.tolerances,
+            column_decisions=tuple(self.column_association_decisions.values()),
+        )
         return staged, replay_report
 
     def recognize_staged(
@@ -541,7 +587,17 @@ class DXFReviewWorkflow:
     ) -> ReviewMutation:
         if self.world_result is None or self.result is None:
             return ReviewMutation(changed=False)
-        updated = tuple(updated)
+        requested = {
+            item.id: item
+            for item in updated
+            if item.qualification_status == "eligible"
+        }
+        updated = tuple(
+            replace(item, accepted=requested[item.id].accepted)
+            if item.qualification_status == "eligible" and item.id in requested
+            else item
+            for item in self.world_result.double_support_candidates
+        )
         previous_by_id = {
             item.id: item for item in self.result.double_support_candidates
         }
@@ -549,6 +605,7 @@ class DXFReviewWorkflow:
             item
             for item in updated
             if item.id in previous_by_id
+            and item.qualification_status == "eligible"
             and previous_by_id[item.id].accepted != item.accepted
         )
         if not changed:
@@ -561,8 +618,12 @@ class DXFReviewWorkflow:
         self.world_result = rebuild_component_associations(
             replace(self.world_result, double_support_candidates=updated),
             self.importer.tolerances,
+            **(
+                {"column_decisions": tuple(self.column_association_decisions.values())}
+                if self.column_association_decisions else {}
+            ),
         )
-        self._rebuild_derived_state()
+        self._rebuild_derived_state(rebuild_associations=False)
         self.revision += 1
         return self._mutation_result(before_confirmed)
 
@@ -662,6 +723,144 @@ class DXFReviewWorkflow:
             initiating_member_ids=(member_id,),
         )
 
+    def plan_column_association_repair(
+        self,
+        column_id: str,
+    ) -> ColumnAssociationRepairPlan:
+        if self.world_result is None:
+            raise DXFImportError("請先完成 DXF 辨識。")
+        matches = [column for column in self.world_result.columns if column.id == column_id]
+        if len(matches) != 1:
+            raise DXFImportError("所選中間柱已不存在，請重新預覽。")
+        column = matches[0]
+        source = normalize_source_handles(column.source_handles)
+        if not source or sum(normalize_source_handles(item.source_handles) == source for item in self.world_result.columns) != 1:
+            raise DXFImportError("中間柱來源身分不唯一，無法安全修補。")
+        saved = self.column_association_decisions.get(source)
+        repair = ambiguous_column_repair_options(
+            column, self.world_result.struts, self.importer.tolerances,
+            double_support_candidates=self.world_result.double_support_candidates,
+        )
+        if repair.reason:
+            if saved is None:
+                raise DXFImportError(f"此中間柱目前不可修補：{repair.reason}。")
+            ids_by_source = {
+                normalize_source_handles(strut.source_handles): strut.id for strut in self.world_result.struts
+                if strut.source_handles
+            }
+            candidate_sources = saved.candidate_strut_sources
+            return ColumnAssociationRepairPlan(
+                self.revision, source, column.id,
+                tuple(ids_by_source.get(item, "") for item in candidate_sources),
+                candidate_sources, (), self.world_result.source_fingerprint,
+                "requires_review", (),
+            )
+        struts_by_id = {strut.id: strut for strut in self.world_result.struts}
+        candidate_ids = tuple(option[1] for option in repair.options)
+        candidate_sources = tuple(normalize_source_handles(struts_by_id[item].source_handles) for item in candidate_ids)
+        if any(
+            not handles
+            or sum(normalize_source_handles(strut.source_handles) == handles for strut in self.world_result.struts) != 1
+            for handles in candidate_sources
+        ):
+            raise DXFImportError("候選支撐來源身分不唯一，無法安全修補。")
+        selected_ids = tuple(
+            strut.id for strut in self.world_result.struts
+            if saved is not None and normalize_source_handles(strut.source_handles) in saved.selected_strut_sources
+        )
+        status = "unresolved"
+        if saved is not None:
+            status = "requires_review" if any(
+                item.code == "COLUMN_ASSOCIATION_REQUIRES_REVIEW"
+                and normalize_source_handles(item.source_handles) == source
+                for item in self.world_result.messages
+            ) else "repaired"
+        return ColumnAssociationRepairPlan(
+            self.revision, source, column.id, candidate_ids,
+            candidate_sources, repair.options,
+            self.world_result.source_fingerprint, status, selected_ids,
+        )
+
+    def _stage_column_repair(
+        self,
+        decisions: Mapping[tuple[str, ...], ColumnAssociationDecision],
+    ) -> tuple[DXFImportResult, DXFImportResult, tuple[ProblemRecord, ...], tuple[ReviewItem, ...], dict[str, str], CandidatePointStore]:
+        assert self.world_result is not None and self.result is not None
+        staged_world = rebuild_component_associations(
+            self.world_result, self.importer.tolerances,
+            column_decisions=tuple(decisions.values()),
+        )
+        staged_result = apply_coordinate_system(staged_world, self.result.coordinate_system)
+        records = build_problem_records(staged_result)
+        items = build_review_items(staged_result, records)
+        confirmations = valid_review_confirmations(staged_result, items, self.review_confirmations)
+        store = CandidatePointStore(self.candidate_point_store.tolerance)
+        store.rebuild(self._result_members_for_store(staged_result))
+        return staged_world, staged_result, records, items, confirmations, store
+
+    def _install_column_repair_stage(
+        self,
+        decisions: dict[tuple[str, ...], ColumnAssociationDecision],
+        stage: tuple[DXFImportResult, DXFImportResult, tuple[ProblemRecord, ...], tuple[ReviewItem, ...], dict[str, str], CandidatePointStore],
+    ) -> None:
+        self.column_association_decisions = decisions
+        (
+            self.world_result, self.result, self.problem_records,
+            self.review_items, self.review_confirmations,
+            self.candidate_point_store,
+        ) = stage
+        self.revision += 1
+
+    def commit_column_association_repair(
+        self,
+        plan: ColumnAssociationRepairPlan,
+        selected_strut_ids: Sequence[str],
+    ) -> ReviewMutation:
+        if self.world_result is None or self.result is None:
+            raise DXFImportError("請先完成 DXF 辨識。")
+        if plan.base_revision != self.revision:
+            raise DXFImportError("DXF Review 已變更，請重新預覽中間柱關聯。")
+        current = self.plan_column_association_repair(plan.column_id)
+        if current != plan or current.source_fingerprint != self.importer.source_fingerprint:
+            raise DXFImportError("中間柱候選或來源已變更，請重新預覽。")
+        selected = tuple(dict.fromkeys(selected_strut_ids))
+        if not selected or len(selected) != len(selected_strut_ids) or not set(selected).issubset(current.candidate_strut_ids):
+            raise DXFImportError("必須明確選擇列出的第一支、第二支或兩支支撐。")
+        source_by_id = dict(zip(current.candidate_strut_ids, current.candidate_strut_sources))
+        decision = ColumnAssociationDecision(
+            current.column_source_handles, current.candidate_strut_sources,
+            tuple(source_by_id[item] for item in selected),
+            current.source_fingerprint, current.column_id,
+        )
+        decisions = dict(self.column_association_decisions)
+        decisions[current.column_source_handles] = decision
+        before_confirmed = self._confirmed_snapshot()
+        stage = self._stage_column_repair(decisions)
+        if not any(
+            item.code == "COLUMN_ASSOCIATION_MANUALLY_RESOLVED"
+            and normalize_source_handles(item.source_handles) == current.column_source_handles
+            for item in stage[0].messages
+        ):
+            raise DXFImportError("人工關聯重新驗證失敗，未採用決策。")
+        self._install_column_repair_stage(decisions, stage)
+        return self._mutation_result(before_confirmed)
+
+    def withdraw_column_association_repair(
+        self,
+        plan: ColumnAssociationRepairPlan,
+    ) -> ReviewMutation:
+        if self.world_result is None or self.result is None or plan.base_revision != self.revision:
+            raise DXFImportError("DXF Review 已變更，請重新預覽中間柱關聯。")
+        current = self.plan_column_association_repair(plan.column_id)
+        if current != plan or current.column_source_handles not in self.column_association_decisions:
+            raise DXFImportError("人工關聯已變更或不存在，請重新預覽。")
+        decisions = dict(self.column_association_decisions)
+        del decisions[current.column_source_handles]
+        before_confirmed = self._confirmed_snapshot()
+        stage = self._stage_column_repair(decisions)
+        self._install_column_repair_stage(decisions, stage)
+        return self._mutation_result(before_confirmed)
+
     def preview_waler_contact_adjustment(
         self,
         waler_id: str,
@@ -704,14 +903,14 @@ class DXFReviewWorkflow:
         """Build a side-effect-free STEP4 CornerBrace repair preview."""
 
         if self.world_result is None or self.result is None:
-            raise DXFImportError("Please recognize the DXF before repairing a CornerBrace.")
+            raise DXFImportError("請先完成 DXF 辨識，再修補角撐。")
         item = (
             item_or_key
             if isinstance(item_or_key, ReviewItem)
             else self.review_item_by_key(str(item_or_key))
         )
         if item is None:
-            raise DXFImportError("The selected CornerBrace review subject no longer exists.")
+            raise DXFImportError("所選角撐檢視項目已不存在。")
         return build_corner_brace_repair_plan(
             self.world_result,
             item,
@@ -768,18 +967,18 @@ class DXFReviewWorkflow:
         """Atomically adopt one currently eligible CornerBrace repair."""
 
         if self.world_result is None or self.result is None:
-            raise DXFImportError("Please recognize the DXF before repairing a CornerBrace.")
+            raise DXFImportError("請先完成 DXF 辨識，再修補角撐。")
         if plan.base_revision != self.revision:
-            raise DXFImportError("DXF Review changed; preview the CornerBrace repair again.")
+            raise DXFImportError("DXF 檢視狀態已變更，請重新預覽角撐修補。")
         item = self._corner_brace_repair_item(plan)
         if item is None:
-            raise DXFImportError("The CornerBrace repair subject changed; preview it again.")
+            raise DXFImportError("角撐修補目標已變更，請重新預覽。")
         if repair_subject_signature(
             self.world_result,
             item,
             self.importer.tolerances,
         ) != plan.subject_signature:
-            raise DXFImportError("The CornerBrace repair evidence changed; preview it again.")
+            raise DXFImportError("角撐修補證據已變更，請重新預覽。")
 
         # Re-plan from current truth so a saved candidate cannot bypass a
         # changed reference, connection, confirmation or unresolved-create gate.
@@ -806,7 +1005,7 @@ class DXFReviewWorkflow:
         )
         if planned_candidate is None or current_candidate != planned_candidate:
             raise DXFImportError(
-                "The CornerBrace repair candidate is stale or no longer eligible; preview it again."
+                "角撐修補候選已過期或不再符合資格，請重新預覽。"
             )
 
         before_confirmed = self._confirmed_snapshot()
@@ -1096,6 +1295,10 @@ class DXFReviewWorkflow:
                 "double_support_decisions": serialize_double_support_decisions(
                     self.double_support_decisions
                 ),
+                "column_association_decisions": [
+                    asdict(decision)
+                    for decision in self.column_association_decisions.values()
+                ],
                 "review_confirmations": serialize_review_confirmations(
                     self.review_confirmations
                 ),

@@ -112,6 +112,22 @@ class InterfacePresentationTests(unittest.TestCase):
         self.assertIn("manual_modified", editor_source)
         self.assertIn("_apply_waler_plan_segments", editor_source)
 
+    def test_excel_export_action_belongs_to_result_export_tab(self):
+        results_source = inspect.getsource(SupportInputApp._create_results_tab)
+
+        self.assertIn(
+            'excel_export_frame = ttk.LabelFrame(\n'
+            '            export_tab,\n'
+            '            text="Excel 配置材料明細",',
+            results_source,
+        )
+        self.assertIn(
+            'self.export_results_excel_button = ttk.Button(\n'
+            '            excel_export_frame,',
+            results_source,
+        )
+        self.assertNotIn("result_action_frame", results_source)
+
     def test_double_clicking_a_waler_result_opens_the_plan_editor(self):
         class Tree:
             selected = None

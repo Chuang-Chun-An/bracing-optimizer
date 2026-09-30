@@ -66,6 +66,22 @@ Strut 的起點是 station 零點；`ColumnPositions`、`BeamPositions` 與 Supp
 
 Brace 是連接 Waler 的斜向構件。它的連接位置會成為 Waler 分段時必須避讓的工程位置。
 
+DXF 辨識中的正式 Brace connection 是 Engineering Hard Constraint：起點與終點必須各自
+唯一對應一支 Waler、兩端 Waler identity 必須不同，且兩支 Waler 的 contact face 都已正式
+完成；Brace 來源軸必須分別與兩個 selected contact faces 形成合法有限交點，提交後長度也
+必須合法。上述條件必須全數成立才形成正式 Brace。任一端零解、多解、接觸面仍為
+provisional、交點無效、兩端同一 Waler 或結果長度不合法時，整支 Brace 維持 unresolved，
+不得保留單端正式 connection、forbidden point、Project row 或 Solver-facing 資料。
+
+端點 relation 與 member verdict 是單向依賴。每個合法 terminal-to-Waler 候選都保留同一份
+canonical relation，並標示為 `unique` 或 `competing`：只有 `unique` relation 能建立正式
+Brace endpoint、`FromWaler`／`ToWaler` 與 forbidden point；`competing` relation 不具連接權限，
+但可提供 Waler 判斷接觸側所需的方向證據。Waler 若有任何可靠 `unique` 方向證據，只採用
+`unique` evidence；方向相反的 `competing` evidence 僅產生可追溯 warning，不得推翻正式
+接觸面或使其 ambiguous。只有在沒有可靠 `unique` evidence 時，才以 `competing` evidence
+判側；同側可完成正式接觸面，兩側衝突則維持 contact-face ambiguous。member verdict 只決定
+Brace 能否成為正式構件，不反向撤銷 Waler 已消費的側向 evidence。
+
 Brace 與 Corner Brace 不應混為同一概念：Brace 是 Project 中的正式構件；DXF 中的 Corner Brace 幾何主要用來推導與 Strut 端部相關的工程限制。
 
 ### 3.5 SupportGroup（支撐群組）
@@ -98,6 +114,17 @@ midpoint 與 Column station 的差採 `±2 mm`（含邊界）。這組數值只�
 唯一有限 Strut 且 `abs(投影距離 - source_width / 2) <= 25 mm` 時建立工程接觸：來源軸與
 外緣接觸點保持不變，只有 relationship crossing point 投影到 Strut 中心線以計算 station。
 一般無限延長、nearest snap、Brace 外緣或多個同樣合格的 Strut 均不可套用此規則。
+
+在 DXF runtime validation 中，Beam 的連接狀態只由兩種既有事實組成：
+`beam.crossings` 中的 `BeamCrossing`，或 `beam.brace_contacts` 中的
+`BeamBraceContact`。任一集合非空即視為已連接；兩者皆空才是未連接。
+Strut contact 仍只投影為 `BeamCrossing`，不建立第二份 Strut contact collection。
+
+`BeamBraceContact` 只表示 Beam 與正式 Brace 有近乎垂直的有限線段真實交點；真實共用
+端點可成立，但 endpoint face projection、nearest point、有限 gap 與無限延長線交點均
+不成立。其工程 identity 為 Beam、Brace 與 tolerance-equivalent WCS contact point；
+Beam path segment index 僅為 provenance。Brace contact 不產生 Strut station，亦不增加
+`BeamPositions`、`AssociatedBeamIDs`、`ComponentAssociation` 或 Solver input constraint。
 
 Support material joint 必須避開：
 
@@ -171,13 +198,90 @@ Shim 的配置依 Strut 兩端接觸的 Waler 類型決定：
 
 DXF Review 完成並匯入 Main 時，系統會依最終 reviewed Waler／Strut world geometry、連續 Waler chain topology 與橫向空間連續性建立 deterministic initial Zoning suggestion。這只設定新匯入 rows 的初始值；進入 Main 後，Project Zoning 由使用者控制。Append 不重新分組或覆寫既有 Project rows。
 
+### 4.9 CornerBrace 本體 rail 寬度
+
+CornerBrace 的正式本體寬度是 recognition 已選定兩條 body rails 各自所在 supporting line
+之間的正交間距。正式 CornerBrace 的 rail separation 必須位於 `(250.0, 600.0] mm`；
+恰好 `250.0 mm` 或更小、以及大於 `600.0 mm` 均不合格。
+
+此寬度不得由端板長度、兩端板平均值或有限 rail 端點到另一有限線段的平均距離取代。
+斜切或梯形 CornerBrace 的兩條有限 rail 可能長度不同；有限端部 overhang 不屬於本體
+正交寬度。例如 supporting lines 相距 `300 mm` 時，即使有限線段端點平均距離較大，正式
+`source_width` 仍是 `300 mm`。
+
+`> 250.0 mm` 是已確認的正式材料／工程規則，目前由 DXF automatic CornerBrace
+recognition 執行；它不是 Solver scoring、Solver preference 或 DXF candidate ranking
+參數。此規則只適用於 CornerBrace 本體；一般 Brace 另依下一節的獨立規則判斷，兩者
+目前雖同為 `250.0 mm`，仍不得共用同一設定。Strut、Waler、Column 與 Beam 不受影響。
+
+CornerBrace 辨識分成兩層不可混用的 evidence：
+
+- `BodyGeometryEvidence` 只保存 exact source、canonical direction／normal、RailTrack、
+  selected track pair、midline、separation、source intervals 與端板證據。
+- `BodyRelationshipAssessment` 才保存特定有限 Waler／Strut identities 的 expected span、
+  slenderness、coverage、gaps、occluders、extension、classification 與 hard-valid 結果。
+
+RailTrack 由方向差 `<= 2°`、整組 normal spread `<= 25 mm` 的 fragments 建立；長度
+`>= 100 mm` 的 fragment 可建立方向，其他同方向短 fragments 可在方向成立後加入。
+同軌 intervals 的 overlap 與 `<= 50 mm` seam 合併。Track pair 不使用固定 80% 投影
+重疊、first-fit 或 DXF entity order 決定。
+
+每一組 relationship 必須同時符合：expected span／separation `>= 3.0`、兩條 selected
+rails 各自對 expected span 的 union coverage `>= 50%`，且 Waler 端與 Strut 端 outward
+extension 各自 `<= 600 mm`。Extension 不得補償 coverage。沒有 `> 50 mm` gap 時分類為
+`complete`；存在大 gap 時分類為 `occluded`，且每個 gap 都必須有自己的 finite occluder
+evidence。Near-parallel occluder 另須覆蓋該 gap 至少 `50%`。端板可作 terminal evidence，
+但零、一或兩端板本身都不是資格條件。
+
+唯一 body 加唯一 hard-valid relationship 才自動建立；唯一 body 加多組 hard-valid
+relationships 保持 unresolved，交由 Review 明確選擇 exact Waler／Strut identities。Body
+零解或多解不可用 relationship selection 繞過。
+
+### 4.10 Brace 本體寬度與中心 authority
+
+任何由 MLINE、closed outline、parallel edges、rail pair 或 whole-root envelope 實測本體
+而建立的自動 Brace，其實體寬度必須嚴格大於 `250.0 mm`。恰好 `250.0 mm` 或更小均
+不合格；此邊界不套用 `width_tolerance_mm`、epsilon 或顯示值四捨五入。只有來源確實是
+單一工程中心線、沒有可量測 body envelope 時，`source_width == 0.0` 才表示 unknown，
+並維持既有 single-line 流程。
+
+Closed outline 的正式寬度必須由主要工程方向兩側、共同支持 longitudinal corridor 的
+outer supporting sides 之正交間距取得。Axis-aligned／rotated bounding box、端板長度、
+最遠點、短突出 detail、內部 web／flange 或孔洞邊均不得替代 supporting-side width；
+兩側不唯一或 coverage 不足時，該 topology width 不可靠。
+
+完整、無分支且可唯一解讀的斜切 closed outline，可由「兩條 outer longitudinal rails
+加兩個有限 terminal cuts」的封閉拓撲證明 body 完整性，不要求兩條 rails 各自覆蓋
+整個 outline longitudinal extent 的 `80%`。其 source-supported axis 位於兩條 rail
+supporting lines 的正中位置，兩端分別由該 midline 與兩個有限 terminal cuts 的交點
+界定；不得再以所有 outline vertices 的最小／最大投影把軸線外伸到實體端面之外。
+
+此 closed-topology 例外仍要求兩條 rails 各自長度 `>= 100 mm`、沿主要方向具有正的
+longitudinal overlap，且 terminal cut 不得在既有 `2°` 平行角度 tolerance 內與 rails
+平行。寬度仍須位於 `(250.0, 600.0] mm`，axis 仍須通過既有 minimum length 與
+slenderness。開放 rail pair、fragmented evidence、whole-root envelope 與 local rail-pair
+fallback 的 `minimum_projection_overlap_ratio == 0.8` 不變；不得為退化外框另加匿名
+角度、比例或長度門檻。
+
+Component-like Brace 必須由同一 root source 的完整／connected body topology、whole-root
+longitudinal bands，或能同時支持主要方向、可靠 terminal extent 與 body envelope 的整體
+證據成立；單一局部 pair、短 detail、branch 或零散 fragments 不足以成立。成立後，候選
+依 `TOPOLOGY → WHOLE_ROOT_ENVELOPE → LOCAL_RAIL_PAIR` 分層，但每個候選必須先完成
+完整性、extent、寬度量測及 `> 250.0 mm` hard gate，authority 才屬於最高仍有合法候選
+的 tier。該 tier 多解時阻擋；所有 tiers 無合法候選時失敗，不得回一般 route 繞過限制。
+
+此規則屬 DXF recognition 的 Engineering Hard Constraint，不是 Solver scoring 或 candidate
+偏好。`connection_tolerance_mm == 250.0` 是端點連接容許距離，
+`maximum_brace_axis_extension_mm == 600.0` 是辨識後連到 Waler 的延伸上限；兩者都不得
+作為 Brace 本體寬度門檻。
+
 ---
 
 ## 5. Waler Geometry and Constraints
 
 ### 5.1 Waler axis 與 connection
 
-Waler axis 定義 Waler 的起終點、方向與總長度。Strut／Brace 與 Waler 的連接位置會投影為沿 Waler 軸線量測的 forbidden point。
+Waler axis 定義 Waler 的起終點、方向與總長度。Strut 與具有完整正式 connection 的 Brace 才會把連接位置投影為沿 Waler 軸線量測的 forbidden point；unresolved Brace 不產生 forbidden point。
 
 ### 5.2 Forbidden point 與 Waler joint
 
@@ -291,6 +395,8 @@ Solver input 會再把 Project 資訊整理成特定求解問題，例如 Strut 
 | Beam station | 托梁樁號 | Beam 與 Strut 交會的軸向位置 | Project/Application Model |
 | Zoning | 支撐最佳化分區 | 同一排且需共同協調 Jack 的 Strut 群組 | Project/Application Model |
 | SharedLayoutGroup | 雙路支撐群組 | 兩支並列且共用材料排列的 Strut | Project/Application Model |
+| CornerBrace rail separation | 角撐本體寬度 | selected body rail supporting lines 的正交間距，正式值須嚴格大於 `250.0 mm` | Engineering Policy / DXF Recognition |
+| Brace body width | 斜撐本體寬度 | body-derived Brace 兩側 outer supporting sides 的正交間距，正式值須嚴格大於 `250.0 mm`；centerline-only 為 unknown | Engineering Policy / DXF Recognition |
 | TargetJackRegion | 目標千斤頂區域 | 使用者指定的搜尋／配置偏好 | Solver Preference |
 | Piece sequence | 構件排列 | 沿 Strut 依序配置的 Steel、Jack、Shim | Solver Concept |
 | Joint | 接頭 | 相鄰材料 piece 的交界位置 | Core Domain |
@@ -322,6 +428,8 @@ Solver input 會再把 Project 資訊整理成特定求解問題，例如 Strut 
 | Zoning unit 投影差 `> 1 mm` | Engineering Hard Constraint | `<= 1 mm` 無法建立唯一幾何順序，求解前拒絕 |
 | TargetJackRegion | User / Solver Preference | 引導自動搜尋，不單獨決定人工方案合法性 |
 | SharedLayoutGroup 共用排列 | Engineering Hard Constraint | 雙路支撐兩支 Strut 必須使用相同 ordered layout |
+| CornerBrace rail separation `> 250.0 mm` | Engineering Hard Constraint | 以 selected rail supporting lines 的正交間距判斷；`= 250.0 mm` 不合格，端板長度與有限端點平均不得替代 |
+| Body-derived Brace width `> 250.0 mm` | Engineering Hard Constraint | 先由 outer supporting sides 可靠量寬再做嚴格比較；`= 250.0 mm` 不合格，centerline-only unknown 不套用 |
 | Waler joint clearance `≥ 300 mm` | Engineering Hard Constraint | `< 300 mm` 不合法，`= 300 mm` 可接受 |
 | Waler segment `1000～10000 mm` 且屬可購買集合 | Engineering Hard Constraint | 數值範圍與對應 Purchasable Length 都必須符合 |
 | Waler adjustment block 尺寸及最多一塊 | Engineering Hard Constraint | 僅可用 `0、100、150、200、300 mm`，且最多一塊 |

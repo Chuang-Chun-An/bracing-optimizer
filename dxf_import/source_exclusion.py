@@ -175,15 +175,73 @@ def _repair_provenance_from_mapping(
         for raw in secondary_raw
         if (reference := _repair_reference_from_mapping(raw)) is not None
     )
+    selection_mode = str(
+        value.get("selection_mode", "reference_template")
+        or "reference_template"
+    ).strip()
+    body_signature = str(value.get("body_signature", "") or "").strip()
     if (
-        not primary
-        or len(primary) != len(primary_raw)
+        len(primary) != len(primary_raw)
         or len(secondary) != len(secondary_raw)
     ):
         return None
     waler_identity = str(value.get("target_waler_identity", "") or "").strip()
     strut_identity = str(value.get("target_strut_identity", "") or "").strip()
     if not waler_identity or not strut_identity:
+        return None
+    template_keys = (
+        "selected_template_reference",
+        "transfer_mode",
+        "reference_waler_offset_mm",
+        "reference_strut_station_mm",
+    )
+    present_template_keys = tuple(key for key in template_keys if key in value)
+    if len(present_template_keys) == len(template_keys) and all(
+        value.get(key) is None or value.get(key) == ""
+        for key in template_keys
+    ):
+        # ``asdict`` materializes optional dataclass fields.  Treat an
+        # all-empty group as the original legacy-v2 absence, while any
+        # partial/non-empty group remains fail-safe invalid below.
+        present_template_keys = ()
+    selected_template = None
+    transfer_mode = ""
+    waler_offset = None
+    strut_station = None
+    if selection_mode == "body_relationship_selection":
+        selected_template = None
+        transfer_mode = "body_relationship_selection"
+        waler_offset = _optional_float(value.get("reference_waler_offset_mm"))
+        strut_station = _optional_float(value.get("reference_strut_station_mm"))
+        if (
+            not body_signature
+            or primary
+            or secondary
+            or waler_offset is None
+            or strut_station is None
+        ):
+            return None
+    elif present_template_keys:
+        if len(present_template_keys) != len(template_keys):
+            return None
+        selected_template = _repair_reference_from_mapping(
+            value.get("selected_template_reference")
+        )
+        transfer_mode = str(value.get("transfer_mode", "") or "").strip()
+        waler_offset = _optional_float(value.get("reference_waler_offset_mm"))
+        strut_station = _optional_float(value.get("reference_strut_station_mm"))
+        if (
+            selected_template is None
+            or selected_template.reference_class != "automatic_primary"
+            or selected_template not in primary
+            or transfer_mode not in {"same_side", "mirrored"}
+            or waler_offset is None
+            or strut_station is None
+            or waler_offset < 0.0
+            or strut_station < 0.0
+        ):
+            return None
+    elif not primary:
         return None
     return CornerBraceRepairProvenance(
         subject_key=key,
@@ -193,12 +251,18 @@ def _repair_provenance_from_mapping(
         target_strut_identity=strut_identity,
         automatic_primary_references=primary,
         manual_secondary_references=secondary,
+        selected_template_reference=selected_template,
+        transfer_mode=transfer_mode,
+        reference_waler_offset_mm=waler_offset,
+        reference_strut_station_mm=strut_station,
         preferred_display_id=str(value.get("preferred_display_id", "") or "").strip(),
         selection_source=str(
             value.get("selection_source", "corner_brace_repair")
             or "corner_brace_repair"
         ).strip(),
         evidence_signature=str(value.get("evidence_signature", "") or "").strip(),
+        selection_mode=selection_mode,
+        body_signature=body_signature,
     )
 
 
@@ -854,6 +918,8 @@ def replay_manual_overrides(
         from .corner_brace_repair import (
             apply_corner_brace_repair,
             plan_corner_brace_repair,
+            reconstruct_legacy_adopted_candidate,
+            reconstruct_saved_template_candidate,
             repair_subject_key,
         )
         from .validation import build_problem_records, build_review_items
@@ -908,51 +974,75 @@ def replay_manual_overrides(
                     confirmation_result=projected,
                     tolerances=tolerances,
                 )
-                saved_primary = {
-                    reference.subject_key
-                    for reference in provenance.automatic_primary_references
-                }
-                saved_secondary = {
-                    reference.subject_key
-                    for reference in provenance.manual_secondary_references
-                }
-                matches = []
-                for candidate in plan.candidates:
-                    waler = next(
-                        (member for member in current.walers if member.id == candidate.target_waler_id),
-                        None,
+                if provenance.selection_mode == "body_relationship_selection":
+                    matches = [
+                        candidate
+                        for candidate in plan.candidates
+                        if candidate.selection_mode
+                        == "body_relationship_selection"
+                        and candidate.body_signature == provenance.body_signature
+                        and canonical_source_identity(
+                            "waler",
+                            next(
+                                waler.source_handles
+                                for waler in current.walers
+                                if waler.id == candidate.target_waler_id
+                            ),
+                        )
+                        == provenance.target_waler_identity
+                        and canonical_source_identity(
+                            "strut",
+                            next(
+                                strut.source_handles
+                                for strut in current.struts
+                                if strut.id == candidate.target_strut_id
+                            ),
+                        )
+                        == provenance.target_strut_identity
+                        and _distance(
+                            candidate.world_start,
+                            provenance.adopted_world_start,
+                        )
+                        <= tolerances.endpoint_tolerance_mm
+                        and _distance(
+                            candidate.world_end,
+                            provenance.adopted_world_end,
+                        )
+                        <= tolerances.endpoint_tolerance_mm
+                    ]
+                elif provenance.selected_template_reference is not None:
+                    rebuilt = reconstruct_saved_template_candidate(
+                        current,
+                        target,
+                        provenance,
+                        review_items=items,
+                        confirmations=review_confirmations,
+                        confirmation_result=projected,
+                        tolerances=tolerances,
                     )
-                    strut = next(
-                        (member for member in current.struts if member.id == candidate.target_strut_id),
-                        None,
+                    matches = (
+                        [rebuilt]
+                        if rebuilt is not None
+                        and _distance(rebuilt.world_start, provenance.adopted_world_start)
+                        <= tolerances.endpoint_tolerance_mm
+                        and _distance(rebuilt.world_end, provenance.adopted_world_end)
+                        <= tolerances.endpoint_tolerance_mm
+                        else []
                     )
-                    if waler is None or strut is None:
-                        continue
-                    if (
-                        canonical_source_identity("waler", waler.source_handles)
-                        != provenance.target_waler_identity
-                        or canonical_source_identity("strut", strut.source_handles)
-                        != provenance.target_strut_identity
-                    ):
-                        continue
-                    if (
-                        _distance(candidate.world_start, provenance.adopted_world_start)
-                        > tolerances.endpoint_tolerance_mm
-                        or _distance(candidate.world_end, provenance.adopted_world_end)
-                        > tolerances.endpoint_tolerance_mm
-                    ):
-                        continue
-                    candidate_primary = {
-                        reference.subject_key for reference in candidate.primary_references
-                    }
-                    candidate_secondary = {
-                        reference.subject_key for reference in candidate.secondary_references
-                    }
-                    if not saved_primary or not saved_primary.issubset(candidate_primary):
-                        continue
-                    if not saved_secondary.issubset(candidate_secondary):
-                        continue
-                    matches.append(candidate)
+                else:
+                    # Legacy version-2 payloads keep their adopted world line
+                    # contract.  They are validated against saved identities
+                    # and references without opting into template ranking.
+                    rebuilt = reconstruct_legacy_adopted_candidate(
+                        current,
+                        target,
+                        provenance,
+                        review_items=items,
+                        confirmations=review_confirmations,
+                        confirmation_result=projected,
+                        tolerances=tolerances,
+                    )
+                    matches = [rebuilt] if rebuilt is not None else []
                 if len(matches) != 1:
                     # A secondary repair may not have been replayed yet.  Give
                     # the dependency one deterministic later pass, but never
@@ -965,6 +1055,7 @@ def replay_manual_overrides(
                 replay_plan = replace(
                     plan,
                     preferred_display_id=provenance.preferred_display_id,
+                    candidates=tuple(matches),
                 )
                 try:
                     replayed_current, repaired_id = apply_corner_brace_repair(
@@ -978,6 +1069,20 @@ def replay_manual_overrides(
                 except (DXFImportError, ValueError):
                     needs_review.append(label)
                     continue
+                if (
+                    provenance.selected_template_reference is None
+                    and provenance.selection_mode
+                    != "body_relationship_selection"
+                ):
+                    replayed_current = replace(
+                        replayed_current,
+                        corner_braces=tuple(
+                            replace(corner, repair_provenance=provenance)
+                            if corner.id == repaired_id
+                            else corner
+                            for corner in replayed_current.corner_braces
+                        ),
+                    )
                 if (
                     provenance.preferred_display_id
                     and repaired_id != provenance.preferred_display_id

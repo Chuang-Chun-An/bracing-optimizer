@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import math
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
+from .beam_contacts import finite_perpendicular_contact
 from .geometry import (
     Point,
     _closest_points_between_segments,
@@ -26,10 +27,12 @@ from .geometry import (
 from .models import (
     AuxiliaryComponent,
     Beam,
+    BeamBraceContact,
     BeamCrossing,
     Brace,
     CandidatePoint,
     Column,
+    ColumnAssociationDecision,
     ComponentAssociation,
     CoordinateSystem,
     CornerBrace,
@@ -61,6 +64,7 @@ from .validation import (
 )
 from .support_pairing import (
     detect_double_support_candidates,
+    is_formally_accepted_double_support,
     preserve_double_support_decisions,
 )
 
@@ -258,6 +262,7 @@ class CandidatePointBuilder:
         world_start = member.world_start or member.start
         world_end = member.world_end or member.end
         role = self._role(member)
+        formal_brace = not isinstance(member, Brace) or member.has_formal_connection
         if isinstance(member, Waler):
             start_meta = end_meta = (
                 "waler_inner_line_endpoint",
@@ -314,7 +319,7 @@ class CandidatePointBuilder:
             label=f"{start_label}（起點）",
             source_handles=start_handles,
             source_entity_types=start_entity_types,
-            recommended_for=("start",),
+            recommended_for=(("start",) if formal_brace else ()),
             score=1.0,
             valid_for=("start",),
         )
@@ -324,7 +329,7 @@ class CandidatePointBuilder:
             label=f"{end_label}（終點）",
             source_handles=end_handles,
             source_entity_types=end_entity_types,
-            recommended_for=("end",),
+            recommended_for=(("end",) if formal_brace else ()),
             score=1.0,
             valid_for=("end",),
         )
@@ -468,7 +473,7 @@ class CandidatePointBuilder:
                     ),
                 )
 
-        if isinstance(member, Brace) and axis is not None:
+        if isinstance(member, Brace) and axis is not None and formal_brace:
             for waler in self.walers:
                 direct = _segment_intersection_point(
                     (world_start, world_end),
@@ -581,11 +586,11 @@ class CandidatePointBuilder:
                 replace(point, component_id=member.id)
                 for point in store.points()
             ),
-            recommended_start_point_id=start_id,
-            recommended_end_point_id=end_id,
-            selected_start_point_id=start_id,
-            selected_end_point_id=end_id,
-            selection_source="auto",
+            recommended_start_point_id=start_id if formal_brace else "",
+            recommended_end_point_id=end_id if formal_brace else "",
+            selected_start_point_id=start_id if formal_brace else "",
+            selected_end_point_id=end_id if formal_brace else "",
+            selection_source="auto" if formal_brace else "unresolved",
         )
 
 
@@ -665,8 +670,17 @@ def connect_components_to_walers(
     braces: Sequence[Brace],
     walers: Sequence[Waler],
     tolerances: GeometryTolerances | None = None,
+    *,
+    committed_connections: Mapping[str, tuple[str, str]] | None = None,
+    blocked_connection_members: frozenset[str] = frozenset(),
+    atomic_brace_connections: bool = False,
 ) -> tuple[tuple[Strut, ...], tuple[Brace, ...], tuple[ValidationMessage, ...]]:
-    """Connect endpoints to the nearest finite Waler segment and snap them."""
+    """Connect endpoints, preferring a committed recognition resolution.
+
+    Import recognition supplies complete start/end Waler identities after its
+    staged contact-face transaction.  Other callers retain the established
+    nearest-finite-segment behavior by omitting ``committed_connections``.
+    """
 
     tolerances = tolerances or GeometryTolerances()
     messages: list[ValidationMessage] = []
@@ -701,8 +715,13 @@ def connect_components_to_walers(
 
     connected_struts = []
     for member in struts:
-        from_waler, start = connect(member.start, "strut", member.source_handles)
-        to_waler, end = connect(member.end, "strut", member.source_handles)
+        committed = (committed_connections or {}).get(member.id)
+        if committed is None:
+            from_waler, start = connect(member.start, "strut", member.source_handles)
+            to_waler, end = connect(member.end, "strut", member.source_handles)
+        else:
+            from_waler, to_waler = committed
+            start, end = member.start, member.end
         connected = replace(
             member,
             start=start,
@@ -716,13 +735,40 @@ def connect_components_to_walers(
         )
         connected_struts.append(connected)
         count = bool(from_waler) + bool(to_waler)
-        if count == 0:
+        if count == 0 and member.id not in blocked_connection_members:
             messages.append(ValidationMessage("error", "STRUT_NOT_CONNECTED", f"{member.id} 兩端皆未連接圍令。", "strut", member.source_handles))
-        elif count == 1:
+        elif count == 1 and member.id not in blocked_connection_members:
             messages.append(ValidationMessage("error", "STRUT_ONE_END_NOT_CONNECTED", f"{member.id} 僅一端連接圍令。", "strut", member.source_handles))
 
     connected_braces = []
     for member in braces:
+        committed = (committed_connections or {}).get(member.id)
+        if committed is not None:
+            from_waler, to_waler = committed
+            connected = replace(
+                member,
+                from_waler=from_waler,
+                to_waler=to_waler,
+            )
+            connected_braces.append(connected)
+            if from_waler and from_waler == to_waler:
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        "BRACE_SAME_WALER_CONNECTION",
+                        f"{member.id} 兩端皆連接同一圍令 {from_waler}，斜撐連接無效。",
+                        "brace",
+                        member.source_handles,
+                        (member.id, from_waler),
+                    )
+                )
+            elif member.id not in blocked_connection_members:
+                count = bool(from_waler) + bool(to_waler)
+                if count == 0:
+                    messages.append(ValidationMessage("error", "BRACE_NOT_CONNECTED", f"{member.id} 兩端皆未連接圍令。", "brace", member.source_handles))
+                elif count == 1:
+                    messages.append(ValidationMessage("error", "BRACE_ONE_END_NOT_CONNECTED", f"{member.id} 僅一端連接圍令。", "brace", member.source_handles))
+            continue
         resolution = resolve_brace_waler_connection(member, walers, tolerances)
 
         def report_endpoint(endpoint: BraceEndpointResolution) -> None:
@@ -730,15 +776,33 @@ def connect_components_to_walers(
             if endpoint.status == "direct" and endpoint.competing_waler_ids:
                 messages.append(
                     ValidationMessage(
-                        "warning",
+                        "error" if atomic_brace_connections else "warning",
                         "AMBIGUOUS_WALER_CONNECTION",
                         (
                             f"{member.id} {endpoint_label}同時接近 {endpoint.waler_id} 與 "
-                            f"{endpoint.competing_waler_ids[0]}，採用距離較近的 "
-                            f"{endpoint.waler_id}。"
+                            f"{'、'.join(endpoint.competing_waler_ids)}，"
+                            + (
+                                "無法唯一決定連接。"
+                                if atomic_brace_connections
+                                else f"採用距離較近的 {endpoint.waler_id}。"
+                            )
                         ),
                         "brace",
-                        member.source_handles,
+                        tuple(
+                            dict.fromkeys(
+                                (
+                                    *member.source_handles,
+                                    *endpoint.waler_source_handles,
+                                    *(
+                                        handle
+                                        for waler in walers
+                                        if waler.id in endpoint.competing_waler_ids
+                                        for handle in waler.source_handles
+                                    ),
+                                )
+                            )
+                        ),
+                        (member.id, endpoint.waler_id, *endpoint.competing_waler_ids),
                     )
                 )
             elif endpoint.status == "axis_extension":
@@ -777,6 +841,65 @@ def connect_components_to_walers(
 
         report_endpoint(resolution.start)
         report_endpoint(resolution.end)
+        direct_ambiguity = any(
+            endpoint.status == "direct" and endpoint.competing_waler_ids
+            for endpoint in (resolution.start, resolution.end)
+        )
+        incomplete = any(
+            endpoint.status in {"missing", "ambiguous"}
+            for endpoint in (resolution.start, resolution.end)
+        )
+        if atomic_brace_connections and (
+            direct_ambiguity or incomplete or resolution.same_waler
+        ):
+            connected_braces.append(
+                replace(
+                    member,
+                    from_waler="",
+                    to_waler="",
+                    candidate_points=tuple(
+                        replace(point, recommended_for=())
+                        for point in member.candidate_points
+                    ),
+                    recommended_start_point_id="",
+                    recommended_end_point_id="",
+                    selected_start_point_id="",
+                    selected_end_point_id="",
+                    selection_source="unresolved",
+                )
+            )
+            if resolution.same_waler:
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        "BRACE_SAME_WALER_CONNECTION",
+                        f"{member.id} 兩端皆連接同一圍令，斜撐連接無效。",
+                        "brace",
+                        member.source_handles,
+                    )
+                )
+            elif incomplete and not direct_ambiguity:
+                count = bool(resolution.start.waler_id) + bool(
+                    resolution.end.waler_id
+                )
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        (
+                            "BRACE_NOT_CONNECTED"
+                            if count == 0
+                            else "BRACE_ONE_END_NOT_CONNECTED"
+                        ),
+                        (
+                            f"{member.id} 兩端皆未唯一連接圍令。"
+                            if count == 0
+                            else f"{member.id} 僅一端唯一連接圍令。"
+                        ),
+                        "brace",
+                        member.source_handles,
+                    )
+                )
+            continue
         from_waler = resolution.start.waler_id
         to_waler = resolution.end.waler_id
         start = resolution.start.adopted_point
@@ -830,6 +953,78 @@ def _column_association_tolerance(
     )
     maximum = max(base, tolerances.maximum_column_association_tolerance_mm)
     return min(maximum, max(base, inferred))
+
+
+def column_association_options(
+    column: Column,
+    struts: Sequence[Strut],
+    tolerances: GeometryTolerances | None = None,
+) -> tuple[tuple[float, str, float, Point], ...]:
+    """Return eligible finite-axis Column projections in WCS distance order."""
+
+    tolerances = tolerances or GeometryTolerances()
+    center = column.world_reference_point or _midpoint(
+        column.world_start or column.start,
+        column.world_end or column.end,
+    )
+    options: list[tuple[float, str, float, Point]] = []
+    for strut in struts:
+        start = strut.world_start or strut.start
+        end = strut.world_end or strut.end
+        axis = _unit(start, end)
+        length = _length(start, end)
+        if axis is None or length <= 1e-9:
+            continue
+        station = _dot(_vector(start, center), axis)
+        if not (0.0 <= station <= length):
+            continue
+        projection = (
+            start[0] + axis[0] * station,
+            start[1] + axis[1] * station,
+        )
+        distance = _distance(center, projection)
+        if distance <= _column_association_tolerance(column, strut, tolerances):
+            options.append((distance, strut.id, station, projection))
+    return tuple(sorted(options, key=lambda item: (item[0], item[1])))
+
+
+@dataclass(frozen=True)
+class AmbiguousColumnRepairOptions:
+    column_id: str
+    options: tuple[tuple[float, str, float, Point], ...] = ()
+    reason: str = ""
+
+
+def ambiguous_column_repair_options(
+    column: Column,
+    struts: Sequence[Strut],
+    tolerances: GeometryTolerances | None = None,
+    *,
+    double_support_candidates: Sequence[DoubleSupportCandidate] = (),
+) -> AmbiguousColumnRepairOptions:
+    """Find one unshared two-Strut distance ambiguity without guessing a pair."""
+
+    tolerances = tolerances or GeometryTolerances()
+    options = column_association_options(column, struts, tolerances)
+    if len(options) < 2 or options[1][0] - options[0][0] > tolerances.ambiguous_connection_delta_mm:
+        return AmbiguousColumnRepairOptions(column.id, reason="no_two_candidate_ambiguity")
+    if len(options) > 2 and options[2][0] - options[0][0] <= tolerances.ambiguous_connection_delta_mm:
+        return AmbiguousColumnRepairOptions(column.id, reason="multiple_nearby_struts")
+    pair = frozenset((options[0][1], options[1][1]))
+    memberships = [
+        candidate
+        for candidate in double_support_candidates
+        if is_formally_accepted_double_support(candidate)
+        and options[0][1] in (candidate.first_strut_id, candidate.second_strut_id)
+    ]
+    if len(memberships) > 1:
+        return AmbiguousColumnRepairOptions(column.id, reason="conflicting_accepted_groups")
+    if any(
+        pair == frozenset((candidate.first_strut_id, candidate.second_strut_id))
+        for candidate in memberships
+    ):
+        return AmbiguousColumnRepairOptions(column.id, reason="accepted_double_support")
+    return AmbiguousColumnRepairOptions(column.id, options[:2])
 
 
 def _associate_components_to_struts_legacy(
@@ -980,13 +1175,89 @@ def _associate_components_to_struts_legacy(
     )
 
 
+def _canonical_segment_key(segment: tuple[Point, Point]) -> tuple[Point, Point]:
+    """Return an orientation-independent geometry key for provenance choice."""
+
+    first = (float(segment[0][0]), float(segment[0][1]))
+    second = (float(segment[1][0]), float(segment[1][1]))
+    return (first, second) if first <= second else (second, first)
+
+
+def _beam_brace_contacts(
+    beam: Beam,
+    path: Sequence[Point],
+    braces: Sequence[Brace],
+    tolerances: GeometryTolerances,
+) -> tuple[BeamBraceContact, ...]:
+    """Build order-independent direct contacts against formal Brace geometry."""
+
+    raw: list[tuple[str, Point, int, tuple[Point, Point]]] = []
+    for segment_index, segment in enumerate(zip(path, path[1:])):
+        if _length(*segment) <= 1e-9:
+            continue
+        segment_key = _canonical_segment_key(segment)
+        for brace in braces:
+            if not brace.has_formal_connection:
+                continue
+            brace_segment = (
+                brace.world_start or brace.start,
+                brace.world_end or brace.end,
+            )
+            contact = finite_perpendicular_contact(segment, brace_segment)
+            if contact is not None:
+                raw.append((brace.id, contact[0], segment_index, segment_key))
+
+    duplicate_tolerance = tolerances.beam_crossing_duplicate_tolerance_mm
+    groups: list[list[tuple[str, Point, int, tuple[Point, Point]]]] = []
+    for item in sorted(raw, key=lambda value: (value[0], value[1], value[3])):
+        group = next(
+            (
+                existing
+                for existing in groups
+                if existing[0][0] == item[0]
+                and _distance(existing[0][1], item[1]) <= duplicate_tolerance
+            ),
+            None,
+        )
+        if group is None:
+            groups.append([item])
+        else:
+            group.append(item)
+
+    contacts: list[BeamBraceContact] = []
+    for items in groups:
+        provenance = min(items, key=lambda item: (item[3], item[2]))
+        contacts.append(
+            BeamBraceContact(
+                beam.id,
+                provenance[0],
+                provenance[1],
+                provenance[1],
+                provenance[2],
+            )
+        )
+    return tuple(
+        sorted(
+            contacts,
+            key=lambda item: (
+                item.brace_id,
+                item.world_point,
+                item.beam_segment_index,
+            ),
+        )
+    )
+
+
 def associate_components_to_struts(
     struts: Sequence[Strut],
     columns: Sequence[Column],
     beams: Sequence[Beam],
     tolerances: GeometryTolerances | None = None,
     *,
+    braces: Sequence[Brace] = (),
     double_support_candidates: Sequence[DoubleSupportCandidate] = (),
+    column_decisions: Sequence[ColumnAssociationDecision] = (),
+    source_fingerprint: str = "",
 ) -> tuple[
     tuple[Strut, ...],
     tuple[Column, ...],
@@ -1016,7 +1287,7 @@ def associate_components_to_struts(
         first_id = str(candidate.first_strut_id)
         second_id = str(candidate.second_strut_id)
         if (
-            not candidate.accepted
+            not is_formally_accepted_double_support(candidate)
             or first_id == second_id
             or first_id not in strut_ids
             or second_id not in strut_ids
@@ -1025,34 +1296,61 @@ def associate_components_to_struts(
         accepted_memberships[first_id].append((candidate, second_id))
         accepted_memberships[second_id].append((candidate, first_id))
 
-    def associate_column(component: Column) -> Column:
-        center = component.world_reference_point or _midpoint(
-            component.world_start or component.start,
-            component.world_end or component.end,
+    def source_key(handles: Sequence[str]) -> tuple[str, ...]:
+        return tuple(sorted({str(handle).strip().upper() for handle in handles if str(handle).strip()}))
+
+    struts_by_source: dict[tuple[str, ...], list[Strut]] = defaultdict(list)
+    columns_by_source: dict[tuple[str, ...], list[Column]] = defaultdict(list)
+    for strut in struts:
+        struts_by_source[source_key(strut.source_handles)].append(strut)
+    for column in columns:
+        columns_by_source[source_key(column.source_handles)].append(column)
+    decisions_by_column = {decision.column_source_handles: decision for decision in column_decisions}
+
+    def manual_options(component: Column) -> tuple[tuple[float, str, float, Point], ...] | None:
+        key = source_key(component.source_handles)
+        decision = decisions_by_column.get(key)
+        if decision is None:
+            return None
+        repair = ambiguous_column_repair_options(
+            component, struts, tolerances,
+            double_support_candidates=double_support_candidates,
         )
-        options: list[tuple[float, str, float, Point]] = []
-        for strut in struts:
-            start = strut.world_start or strut.start
-            end = strut.world_end or strut.end
-            axis = _unit(start, end)
-            length = _length(start, end)
-            if axis is None or length <= 1e-9:
-                continue
-            station = _dot(_vector(start, center), axis)
-            if not (0.0 <= station <= length):
-                continue
-            projection = (
-                start[0] + axis[0] * station,
-                start[1] + axis[1] * station,
-            )
-            distance = _distance(center, projection)
-            if distance <= _column_association_tolerance(
-                component,
-                strut,
-                tolerances,
-            ):
-                options.append((distance, strut.id, station, projection))
-        options.sort(key=lambda item: (item[0], item[1]))
+        candidate_sources = tuple(sorted(
+            source_key(next(strut.source_handles for strut in struts if strut.id == option[1]))
+            for option in repair.options
+        ))
+        valid = (
+            bool(key)
+            and len(columns_by_source[key]) == 1
+            and decision.source_fingerprint == str(source_fingerprint).strip().upper()
+            and not repair.reason
+            and candidate_sources == decision.candidate_strut_sources
+            and all(len(struts_by_source[source]) == 1 for source in candidate_sources)
+        )
+        if not valid:
+            messages.append(ValidationMessage(
+                "warning", "COLUMN_ASSOCIATION_REQUIRES_REVIEW",
+                f"{component.id} 的人工中間柱關聯已失效，需重新檢查。",
+                "column", component.source_handles,
+            ))
+            return None
+        selected_ids = {
+            struts_by_source[source][0].id for source in decision.selected_strut_sources
+        }
+        chosen = tuple(option for option in repair.options if option[1] in selected_ids)
+        if len(chosen) != len(decision.selected_strut_sources):
+            return None
+        messages.append(ValidationMessage(
+            "info", "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+            f"{component.id} 的中間柱關聯已由人工判定。",
+            "column", component.source_handles,
+        ))
+        return chosen
+
+    def associate_column(component: Column) -> Column:
+        options = column_association_options(component, struts, tolerances)
+        chosen_manual = manual_options(component)
         if not options:
             messages.append(
                 ValidationMessage(
@@ -1098,6 +1396,8 @@ def associate_components_to_struts(
                 )
             )
         elif (
+            chosen_manual is None
+            and
             len(options) > 1
             and options[1][0] - distance
             <= tolerances.ambiguous_connection_delta_mm
@@ -1111,6 +1411,9 @@ def associate_components_to_struts(
                     component.source_handles,
                 )
             )
+        if chosen_manual is not None:
+            assignment_options = chosen_manual
+            distance, strut_id, station, projection = chosen_manual[0]
         for (
             assignment_distance,
             assignment_strut_id,
@@ -1145,6 +1448,12 @@ def associate_components_to_struts(
             component.world_start or component.start,
             component.world_end or component.end,
         )
+        brace_contacts = _beam_brace_contacts(
+            component,
+            path,
+            braces,
+            tolerances,
+        )
         if component.joist_assembly_key:
             # BIM Joist crossings have already passed the pure finite-contact
             # and pair eligibility rules.  Re-project their stored engineering
@@ -1175,6 +1484,16 @@ def associate_components_to_struts(
                     )
                 )
             if not crossings:
+                if not brace_contacts:
+                    messages.append(
+                        ValidationMessage(
+                            "warning",
+                            "BEAM_NOT_ASSOCIATED",
+                            f"{component.id} 未與任何支撐或斜撐連接。",
+                            "beam",
+                            component.source_handles,
+                        )
+                    )
                 return replace(
                     component,
                     associated_strut_id="",
@@ -1184,6 +1503,7 @@ def associate_components_to_struts(
                     world_association_point=None,
                     local_association_point=None,
                     crossings=(),
+                    brace_contacts=brace_contacts,
                 )
             crossings.sort(
                 key=lambda item: (
@@ -1219,6 +1539,7 @@ def associate_components_to_struts(
                 world_association_point=first.world_point,
                 local_association_point=first.local_point,
                 crossings=tuple(crossings),
+                brace_contacts=brace_contacts,
             )
         raw_crossings: list[BeamCrossing] = []
         overlap_struts: set[str] = set()
@@ -1308,15 +1629,16 @@ def associate_components_to_struts(
                 crossings.append(crossing)
 
         if not crossings:
-            messages.append(
-                ValidationMessage(
-                    "warning",
-                    "BEAM_NOT_ASSOCIATED",
-                    f"{component.id} 的托梁路徑未與任何支撐相交，未建立禁止點。",
-                    "beam",
-                    component.source_handles,
+            if not brace_contacts:
+                messages.append(
+                    ValidationMessage(
+                        "warning",
+                        "BEAM_NOT_ASSOCIATED",
+                        f"{component.id} 未與任何支撐或斜撐連接。",
+                        "beam",
+                        component.source_handles,
+                    )
                 )
-            )
             return replace(
                 component,
                 associated_strut_id="",
@@ -1326,6 +1648,7 @@ def associate_components_to_struts(
                 world_association_point=None,
                 local_association_point=None,
                 crossings=(),
+                brace_contacts=brace_contacts,
             )
 
         for strut_id, segment_index in sorted(snapped_pairs):
@@ -1366,10 +1689,18 @@ def associate_components_to_struts(
             world_association_point=first.world_point,
             local_association_point=first.local_point,
             crossings=tuple(crossings),
+            brace_contacts=brace_contacts,
         )
 
     associated_columns = tuple(associate_column(item) for item in columns)
     associated_beams = tuple(associate_beam(item) for item in beams)
+    for source, decision in decisions_by_column.items():
+        if source not in columns_by_source:
+            messages.append(ValidationMessage(
+                "warning", "COLUMN_ASSOCIATION_REQUIRES_REVIEW",
+                f"{decision.column_display_id or '中間柱'} 的來源已不在目前辨識結果，人工關聯需重新檢查。",
+                "column", source,
+            ))
 
     def unique_stations(values: Sequence[tuple[float, str]]) -> tuple[float, ...]:
         stations: list[float] = []
@@ -1420,6 +1751,8 @@ def associate_components_to_struts(
 def rebuild_component_associations(
     result: DXFImportResult,
     tolerances: GeometryTolerances | None = None,
+    *,
+    column_decisions: Sequence[ColumnAssociationDecision] = (),
 ) -> DXFImportResult:
     """Rebuild every Column/Beam-derived association from current review state.
 
@@ -1442,7 +1775,10 @@ def rebuild_component_associations(
         world_result.columns,
         world_result.beams,
         tolerances,
+        braces=world_result.braces,
         double_support_candidates=world_result.double_support_candidates,
+        column_decisions=column_decisions,
+        source_fingerprint=world_result.source_fingerprint,
     )
     retained_messages = tuple(
         message
@@ -1671,6 +2007,7 @@ def apply_candidate_point_selection(
                 path=tuple(world_path),
                 associated_strut_ids=(),
                 crossings=(),
+                brace_contacts=(),
             )
         if isinstance(member, (Strut, Brace)):
             changes.update(from_waler="", to_waler="")
@@ -1702,7 +2039,13 @@ def apply_candidate_point_selection(
     beams = tuple(restore_world(member) for member in result.beams)
     corner_braces = tuple(restore_world(member) for member in result.corner_braces)
     connected_struts, connected_braces, connection_messages = (
-        connect_components_to_walers(struts, braces, walers, tolerances)
+        connect_components_to_walers(
+            struts,
+            braces,
+            walers,
+            tolerances,
+            atomic_brace_connections=True,
+        )
     )
     double_support_candidates = preserve_double_support_decisions(
         result.double_support_candidates,
@@ -1719,6 +2062,7 @@ def apply_candidate_point_selection(
         columns,
         beams,
         tolerances,
+        braces=connected_braces,
         double_support_candidates=double_support_candidates,
     )
     connected_struts = attach_corner_braces_to_struts(
@@ -1780,7 +2124,7 @@ def apply_candidate_point_selection(
             member.source_handles,
         )
         for member in all_updated_members
-        if member.selection_source != "auto"
+        if member.selection_source not in {"auto", "unresolved"}
     )
     world_result = replace(
         result,

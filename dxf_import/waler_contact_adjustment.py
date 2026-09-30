@@ -167,6 +167,8 @@ def _member_evidence(
     member: Strut | Brace,
     waler_id: str,
 ) -> tuple[tuple[Point, Point], ...]:
+    if isinstance(member, Brace) and not member.has_formal_connection:
+        return ()
     start, end = _world_line(member)
     evidence: list[tuple[Point, Point]] = []
     if member.from_waler == waler_id:
@@ -1105,6 +1107,7 @@ def plan_waler_contact_adjustment(
         world_result.columns,
         world_result.beams,
         tolerances,
+        braces=proposed_braces,
         double_support_candidates=double_support,
     )
     messages.extend(association_messages)

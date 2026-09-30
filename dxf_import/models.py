@@ -25,6 +25,8 @@ COMPONENT_ASSOCIATION_CODES = {
     "COLUMN_NOT_ASSOCIATED",
     "BEAM_NOT_ASSOCIATED",
     "AMBIGUOUS_COMPONENT_ASSOCIATION",
+    "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+    "COLUMN_ASSOCIATION_REQUIRES_REVIEW",
     "BEAM_CROSSING_SNAPPED",
     "BEAM_OVERLAPS_STRUT",
 }
@@ -45,9 +47,10 @@ class GeometryTolerances:
     duplicate_tolerance_mm: float = 50.0
     minimum_component_length_mm: float = 100.0
     connection_tolerance_mm: float = 250.0
-    # Maximum automatic outward-axis extension used only by Brace-to-Waler
-    # recognition/finalization.  This is recognition tuning, not the shared
-    # endpoint connection tolerance or an engineering member-design rule.
+    # Maximum automatic outward-axis extension used by Brace-to-Waler and
+    # CornerBrace selected-rail-axis terminal recognition/finalization.  This
+    # is recognition tuning, not the shared endpoint connection tolerance or
+    # an engineering member-design rule.
     maximum_brace_axis_extension_mm: float = 600.0
     component_association_tolerance_mm: float = 250.0
     # Columns are commonly drawn beside a Strut centreline because both are
@@ -63,6 +66,23 @@ class GeometryTolerances:
     maximum_component_width_mm: float = 600.0
     minimum_slenderness_ratio: float = 1.5
     minimum_projection_overlap_ratio: float = 0.8
+    # Engineering hard constraint for any Brace axis derived from a measured
+    # physical body.  Equality is intentionally illegal; this value is not a
+    # geometric matching tolerance and must not be softened by epsilon.
+    minimum_brace_body_width_mm: float = 250.0
+    # Formal CornerBrace material rule.  This is not Solver tuning: an
+    # automatic CornerBrace must preserve two selected body rails whose
+    # perpendicular separation is strictly greater than this value.
+    minimum_corner_brace_rail_separation_mm: float = 250.0
+    maximum_corner_brace_rail_separation_mm: float = 600.0
+    minimum_corner_brace_expected_slenderness_ratio: float = 3.0
+    corner_brace_track_seam_mm: float = 50.0
+    minimum_corner_brace_rail_coverage_ratio: float = 0.5
+    minimum_corner_brace_parallel_occluder_overlap_ratio: float = 0.5
+    maximum_corner_brace_axis_extension_mm: float = 600.0
+    # Deprecated compatibility input for pre-redesign callers.  The active
+    # CornerBrace route uses per-rail expected-span coverage above instead.
+    minimum_corner_brace_occluded_rail_length_ratio: float = 0.75
     ambiguous_candidate_score_delta: float = 0.03
     # Synthetic BIM characterization uses two equally supported conflicting
     # whole-axis clusters as the ambiguity boundary.  Requiring at least half
@@ -95,6 +115,94 @@ class ValidationMessage:
     role: str = ""
     source_handles: tuple[str, ...] = ()
     member_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CornerBraceRailFragmentEvidence:
+    """One exact finite source fragment used by a CornerBrace rail track."""
+
+    id: str
+    source_handle: str
+    line: tuple[Point, Point]
+    normal_offset_mm: float
+    interval: tuple[float, float]
+
+
+@dataclass(frozen=True)
+class CornerBraceRailTrackEvidence:
+    """Order-independent collinear fragment hypothesis for one body rail."""
+
+    id: str
+    fragments: tuple[CornerBraceRailFragmentEvidence, ...]
+    supporting_line: tuple[Point, Point]
+    canonical_direction: Point
+    canonical_normal: Point
+    normal_offsets_mm: tuple[float, ...]
+    merged_intervals: tuple[tuple[float, float], ...]
+
+
+@dataclass(frozen=True)
+class CornerBraceBodyGeometryEvidence:
+    """Immutable geometry-only evidence; relationship facts are forbidden."""
+
+    signature: str
+    group_key: str
+    source_handles: tuple[str, ...]
+    fragments: tuple[CornerBraceRailFragmentEvidence, ...]
+    rail_tracks: tuple[CornerBraceRailTrackEvidence, CornerBraceRailTrackEvidence]
+    selected_track_ids: tuple[str, str]
+    supporting_line_ids: tuple[str, str]
+    canonical_direction: Point
+    canonical_normal: Point
+    midline: tuple[Point, Point]
+    rail_separation_mm: float
+    merged_source_intervals: tuple[
+        tuple[tuple[float, float], ...],
+        tuple[tuple[float, float], ...],
+    ]
+    terminal_plate_evidence: tuple[tuple[Point, Point], ...] = ()
+
+
+@dataclass(frozen=True)
+class CornerBraceGapEvidence:
+    """One material absence longer than the accepted RailTrack seam."""
+
+    rail_track_id: str
+    kind: str
+    interval: tuple[float, float]
+    world_line: tuple[Point, Point]
+
+    @property
+    def length_mm(self) -> float:
+        return max(0.0, self.interval[1] - self.interval[0])
+
+
+@dataclass(frozen=True)
+class CornerBraceGapOccluderAssignment:
+    """Finite source lines that explain one and only one measured gap."""
+
+    gap: CornerBraceGapEvidence
+    occluder_lines: tuple[tuple[Point, Point], ...]
+
+
+@dataclass(frozen=True)
+class CornerBraceBodyRelationshipAssessment:
+    """Relationship-dependent validation of one immutable body hypothesis."""
+
+    body_signature: str
+    waler_source_handles: tuple[str, ...]
+    strut_source_handles: tuple[str, ...]
+    finite_intersections: tuple[Point, Point]
+    expected_span_mm: float
+    expected_slenderness_ratio: float
+    per_rail_union_coverage: tuple[float, float]
+    internal_gaps: tuple[CornerBraceGapEvidence, ...]
+    terminal_gaps: tuple[CornerBraceGapEvidence, ...]
+    gap_occluder_assignments: tuple[CornerBraceGapOccluderAssignment, ...]
+    per_end_extensions_mm: tuple[float, float]
+    classification: str
+    hard_valid: bool
+    rejection_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -206,16 +314,26 @@ class Waler:
     selection_source: str = "auto"
     material_spec: str = ""
     material_spec_source: str = ""
+    contact_face_state: str = "formal"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
         object.__setattr__(self, "world_end", self.end if self.world_end is None else self.world_end)
         object.__setattr__(self, "local_start", self.start if self.local_start is None else self.local_start)
         object.__setattr__(self, "local_end", self.end if self.local_end is None else self.local_end)
+        if self.contact_face_state not in {"formal", "provisional"}:
+            raise ValueError(
+                "Unsupported Waler contact-face state: "
+                f"{self.contact_face_state}"
+            )
 
     @property
     def source_type(self) -> str:
         return "+".join(self.source_entity_types)
+
+    @property
+    def has_formal_contact_face(self) -> bool:
+        return self.contact_face_state == "formal"
 
     def to_project_row(self) -> dict[str, Any]:
         recognition = f"DXF {self.recognition_method} ({self.confidence:.0%})"
@@ -228,6 +346,17 @@ class Waler:
             "material_spec": self.material_spec,
             "Remark": recognition,
         }
+
+
+@dataclass(frozen=True)
+class StrutTerminalTopology:
+    """Structured Waler qualification for one recognized Strut terminal."""
+
+    terminal_name: str
+    waler_source_handles: tuple[str, ...] = ()
+    reason_code: str = ""
+    competing_waler_source_handles: tuple[tuple[str, ...], ...] = ()
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -269,6 +398,9 @@ class Strut:
     material_spec: str = ""
     material_spec_source: str = ""
     initial_zoning: str = ""
+    source_axis_supported: bool = True
+    terminal_topology_authoritative: bool = False
+    terminal_topology: tuple[StrutTerminalTopology, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
@@ -374,6 +506,16 @@ class Brace:
     def source_type(self) -> str:
         return "+".join(self.source_entity_types)
 
+    @property
+    def has_formal_connection(self) -> bool:
+        """Whether this Brace owns one complete, distinct Waler pair."""
+
+        return bool(
+            self.from_waler
+            and self.to_waler
+            and self.from_waler != self.to_waler
+        )
+
     def to_project_row(self) -> dict[str, Any]:
         return {
             "BraceID": self.id,
@@ -469,9 +611,10 @@ class AuxiliaryComponent:
 class Column(AuxiliaryComponent):
     """DXF-classified intermediate-column engineering line.
 
-    ``associated_strut_id`` remains the nearest primary association used for
-    review/UI provenance.  An accepted double-support pair may still contain
-    this Column in both Struts' derived association fields.
+    ``associated_strut_id`` remains the primary association used for
+    review/UI provenance (nearest automatically, first selected when manually
+    resolved). An accepted double-support pair or an explicit manual choice
+    may contain this Column in both Struts' derived association fields.
     """
 
 
@@ -492,6 +635,18 @@ class BeamCrossing:
 
 
 @dataclass(frozen=True)
+class BeamBraceContact:
+    """One direct finite contact between a Beam path and a formal Brace."""
+
+    beam_id: str
+    brace_id: str
+    world_point: Point
+    local_point: Point
+    beam_segment_index: int
+    recognition_method: str = "finite_segment_intersection"
+
+
+@dataclass(frozen=True)
 class Beam(AuxiliaryComponent):
     """Bearer beam retained as an ordered path instead of one chord."""
 
@@ -500,6 +655,7 @@ class Beam(AuxiliaryComponent):
     path: tuple[Point, ...] = ()
     associated_strut_ids: tuple[str, ...] = ()
     crossings: tuple[BeamCrossing, ...] = ()
+    brace_contacts: tuple[BeamBraceContact, ...] = ()
     joist_assembly_key: str = ""
     joist_axis_slot: int | None = None
 
@@ -569,9 +725,15 @@ class CornerBraceRepairProvenance:
     target_strut_identity: str
     automatic_primary_references: tuple[CornerBraceRepairReference, ...]
     manual_secondary_references: tuple[CornerBraceRepairReference, ...] = ()
+    selected_template_reference: CornerBraceRepairReference | None = None
+    transfer_mode: str = ""
+    reference_waler_offset_mm: float | None = None
+    reference_strut_station_mm: float | None = None
     preferred_display_id: str = ""
     selection_source: str = "corner_brace_repair"
     evidence_signature: str = ""
+    selection_mode: str = "reference_template"
+    body_signature: str = ""
 
 
 @dataclass(frozen=True)
@@ -579,6 +741,8 @@ class CornerBrace(AuxiliaryComponent):
     """DXF-classified corner-brace engineering line."""
 
     repair_provenance: CornerBraceRepairProvenance | None = None
+    body_geometry_evidence: CornerBraceBodyGeometryEvidence | None = None
+    relationship_assessment: CornerBraceBodyRelationshipAssessment | None = None
 
 
 @dataclass(frozen=True)
@@ -692,6 +856,52 @@ class SourceManualOverride:
 
 
 @dataclass(frozen=True)
+class ColumnAssociationDecision:
+    """A source-bound human choice of one or two Struts for a Column."""
+
+    column_source_handles: tuple[str, ...]
+    candidate_strut_sources: tuple[tuple[str, ...], tuple[str, ...]]
+    selected_strut_sources: tuple[tuple[str, ...], ...]
+    source_fingerprint: str
+    column_display_id: str = ""
+
+    def __post_init__(self) -> None:
+        column_source = _normalized_source_handles(self.column_source_handles)
+        candidate_sources = tuple(
+            _normalized_source_handles(source) for source in self.candidate_strut_sources
+        )
+        selected_sources = tuple(
+            _normalized_source_handles(source) for source in self.selected_strut_sources
+        )
+        if (
+            not column_source
+            or len(candidate_sources) != 2
+            or not all(candidate_sources)
+            or candidate_sources[0] == candidate_sources[1]
+            or not selected_sources
+            or len(set(selected_sources)) != len(selected_sources)
+            or not set(selected_sources).issubset(candidate_sources)
+        ):
+            raise ValueError("Invalid source-bound Column association decision")
+        object.__setattr__(self, "column_source_handles", column_source)
+        object.__setattr__(
+            self,
+            "candidate_strut_sources",
+            tuple(sorted(candidate_sources)),
+        )
+        object.__setattr__(
+            self,
+            "selected_strut_sources",
+            tuple(sorted(selected_sources)),
+        )
+        object.__setattr__(
+            self,
+            "source_fingerprint",
+            str(self.source_fingerprint).strip().upper(),
+        )
+
+
+@dataclass(frozen=True)
 class ExcludedSource:
     """Persistent user decision to omit one exact DXF source group."""
 
@@ -792,6 +1002,18 @@ class ValidationOverviewItem:
 
 
 @dataclass(frozen=True)
+class DoubleSupportQualificationIssue:
+    """Why a geometry-qualified pair is not yet formally eligible."""
+
+    code: str
+    member_id: str
+    member_source_handles: tuple[str, ...]
+    terminal_name: str
+    competing_waler_source_handles: tuple[tuple[str, ...], ...] = ()
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class DoubleSupportCandidate:
     """Reviewable DXF inference that two physical struts share one layout."""
 
@@ -806,6 +1028,27 @@ class DoubleSupportCandidate:
     accepted: bool = True
     ambiguous: bool = False
     warnings: tuple[str, ...] = ()
+    qualification_status: str = "eligible"
+    issues: tuple[DoubleSupportQualificationIssue, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.qualification_status not in {
+            "eligible",
+            "pending_waler",
+            "incompatible_waler",
+        }:
+            raise ValueError(
+                "Unsupported double-support qualification status: "
+                f"{self.qualification_status}"
+            )
+        if self.qualification_status != "eligible" and self.accepted:
+            object.__setattr__(self, "accepted", False)
+
+    @property
+    def is_formally_accepted(self) -> bool:
+        """Return whether this pair may produce formal engineering effects."""
+
+        return self.qualification_status == "eligible" and self.accepted
 
 
 @dataclass(frozen=True)
@@ -888,6 +1131,10 @@ class DXFImportResult:
     double_support_candidates: tuple[DoubleSupportCandidate, ...] = ()
     waler_contact_reviews: tuple[WalerContactReviewState, ...] = ()
     corner_brace_connections: tuple[CornerBraceConnection, ...] = ()
+    corner_brace_body_evidence: tuple[CornerBraceBodyGeometryEvidence, ...] = ()
+    corner_brace_relationship_assessments: tuple[
+        CornerBraceBodyRelationshipAssessment, ...
+    ] = ()
     source_fingerprint: str = ""
     excluded_sources: tuple[ExcludedSource, ...] = ()
 
@@ -962,6 +1209,8 @@ class DXFImportResult:
             "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
             "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
             "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+            "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+            "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
             "BIM_JOIST_WHOLE_SOURCE_AXIS_FAILED",
         }
         return {
@@ -1015,7 +1264,7 @@ class DXFImportResult:
             },
             "can_import": self.can_import,
             "double_support_groups": sum(
-                candidate.accepted
+                candidate.is_formally_accepted
                 for candidate in self.double_support_candidates
             ),
         }
@@ -1063,7 +1312,10 @@ class DXFImportResult:
 
         waler_ids = allocate("walers", "W", len(self.walers))
         strut_ids = allocate("struts", "S", len(self.struts))
-        brace_ids = allocate("braces", "B", len(self.braces))
+        formal_braces = tuple(
+            member for member in self.braces if member.has_formal_connection
+        )
+        brace_ids = allocate("braces", "B", len(formal_braces))
         id_map = {old.id: new for old, new in zip(self.walers, waler_ids)}
         strut_id_map = {old.id: new for old, new in zip(self.struts, strut_ids)}
         used_group_ids = {
@@ -1084,7 +1336,7 @@ class DXFImportResult:
 
         shared_group_by_strut_id: dict[str, str] = {}
         for candidate in self.double_support_candidates:
-            if not candidate.accepted:
+            if not candidate.is_formally_accepted:
                 continue
             if (
                 candidate.first_strut_id in shared_group_by_strut_id
@@ -1124,7 +1376,7 @@ class DXFImportResult:
             )
             struts.append(row)
         braces = []
-        for member, identifier in zip(self.braces, brace_ids):
+        for member, identifier in zip(formal_braces, brace_ids):
             row = normalize_row_coordinates(member.to_project_row())
             row.update(
                 BraceID=identifier,
@@ -1209,6 +1461,13 @@ class DXFImportResult:
             "corner_brace_connections": [
                 asdict(item) for item in self.corner_brace_connections
             ],
+            "corner_brace_body_evidence": [
+                asdict(item) for item in self.corner_brace_body_evidence
+            ],
+            "corner_brace_relationship_assessments": [
+                asdict(item)
+                for item in self.corner_brace_relationship_assessments
+            ],
             "entities": [asdict(item) for item in self.entity_debug],
             "source_geometry": [asdict(item) for item in self.source_geometry],
             "excluded_sources": [asdict(item) for item in self.excluded_sources],
@@ -1289,6 +1548,15 @@ def apply_coordinate_system(
                         ),
                     )
                     for crossing in member.crossings
+                ),
+                brace_contacts=tuple(
+                    replace(
+                        contact,
+                        local_point=coordinate_system.transform(
+                            contact.world_point
+                        ),
+                    )
+                    for contact in member.brace_contacts
                 ),
             )
         return replace(

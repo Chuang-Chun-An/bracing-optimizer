@@ -21,6 +21,25 @@ class PreviewController(CADViewInteractionController):
     nearest_member = CADViewInteractionController.nearest_segment
     candidate_hits = CADViewInteractionController.point_hits
 
+    @classmethod
+    def segment_hits(
+        cls,
+        point: tuple[float, float],
+        hit_lines: Sequence[
+            tuple[str, tuple[float, float], tuple[float, float]]
+        ],
+        tolerance_pixels: float = 12.0,
+    ) -> tuple[str, ...]:
+        """Return every segment identity within a screen-pixel tolerance."""
+
+        hits = []
+        for identifier, start, end in hit_lines:
+            distance = cls._segment_distance(point, start, end)
+            if distance <= tolerance_pixels:
+                hits.append((distance, identifier))
+        hits.sort(key=lambda item: (item[0], item[1]))
+        return tuple(identifier for _distance, identifier in hits)
+
 
 class RenderDirty(IntFlag):
     """Independent UI regions that can be refreshed in one idle flush."""

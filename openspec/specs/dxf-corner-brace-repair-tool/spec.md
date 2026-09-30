@@ -3,6 +3,12 @@
 ## Purpose
 提供 DXF Review 中受 BIM 遮蔽或中心軸誤判之角撐的保守人工修補流程，在不放寬自動辨識的前提下，以目標殘線、既有工程構件與可追溯參考角撐提出可預覽候選，並只在使用者明確採用後更新正式 Review state。
 
+## 閱讀導航
+
+- **必讀**：本規格的「修補必須先預覽再明確採用」與「角撐修補介面須使用繁體中文」。
+- **條件式閱讀**：變更候選幾何或 reference selection 時，閱讀目標來源證據、參考角撐分級與局部模板相關 Requirements。
+- **可先跳過**：未涉及暫停／續作時的 replay、未啟動修補時的自動辨識保護，以及既有 Project schema 邊界。
+
 ## Requirements
 
 ### Requirement: 修補工具只處理明確選取的角撐 subject
@@ -26,163 +32,290 @@
 
 ### Requirement: 目標來源幾何是修補必要證據
 
-系統 MUST 從目標 subject 自己的 DXF source geometry 取得可用殘線，作為修補位置與方向的必要證據。附近已成功角撐、Waler 或 Strut 不得在完全沒有目標來源幾何支持時單獨創造 CornerBrace。修補 eligibility 與幾何比較 SHALL 使用既有具名 `GeometryTolerances`；不得加入固定材料寬度或未命名距離門檻。
+系統 MUST 從目標 subject 自己的 exact DXF source geometry 取得修補證據。對 reference-template repair，目標證據 MUST 同時支持：一個可在既有具名容差內判定的角撐方向，以及至少一個可定位目標區域的 positional anchor；positional anchor 可為圍令連接板中點、與該方向共線的局部殘線 corridor，或其他由 exact target source geometry 唯一推得的點位。殘線不必覆蓋完整角撐、到達 Strut attachment，或自行提供完整長度。
+
+附近已成功角撐、Waler 或 Strut 不得在完全沒有上述 target evidence 時單獨創造 CornerBrace。修補 eligibility 與幾何比較 SHALL 使用既有具名 `GeometryTolerances`；不得加入固定材料寬度、未命名距離門檻，或把連接板／外框的任意邊當作完整角撐軸。
 
 #### Scenario: 殘線可支持候選方向
-- **WHEN** 目標來源保留可與某一候選工程軸一致的局部線段證據
-- **THEN** 系統可將該證據納入修補候選的方向、位置與符合度判定
+- **WHEN** BIM 遮擋使目標角撐只留下圍令端連接板中點與局部軸向殘線，且兩者可唯一支持一個 transferred candidate 的位置與方向
+- **THEN** 系統 SHALL 允許該不完整殘線驗證 candidate
+- **AND** MUST NOT 要求殘線自行延伸至兩個正式端點
 
 #### Scenario: 參考角撐存在但目標沒有可用殘線
-- **WHEN** 附近存在已成功角撐，但目標來源沒有可用幾何可支持其位置或方向
+- **WHEN** 附近存在合格 reference CornerBrace，但 exact target source geometry 無法同時提供可靠方向與 positional anchor
 - **THEN** 系統 MUST 拒絕產生可採用的正式修補候選
-- **AND** MUST NOT 只複製參考角撐或依對稱位置創造構件
+- **AND** MUST NOT 只依鄰近、對稱或圖層 identity 創造構件
 
 #### Scenario: 多條殘線支持非等價軸
-- **WHEN** 目標來源中的殘線在既有容差下支持多條非等價工程軸
-- **THEN** 系統 MUST 保留多解狀態
-- **AND** MUST NOT 依 entity order、handle 大小或 first match 任意選定工程軸
+- **WHEN** exact target source geometry 在既有容差下支持多個非等價方向，且無法由 positional anchor 與 compatible template 唯一消除歧義
+- **THEN** 系統 MUST 保留多解或證據不足狀態
+- **AND** MUST NOT 依 entity order、handle 大小或 first match 任意選定方向
 
 ### Requirement: 參考角撐必須分級並阻止推測鏈
 
 系統 MUST 將 reference CornerBrace 分為 `automatic primary` 與 `manual repaired secondary`。`automatic primary` MUST 來自 automatic recognition、來源目前有效，且具有唯一有效的 CornerBrace-to-Waler／Strut 關聯。`manual repaired secondary` MUST 已由使用者明確採用、具有完整 repair provenance、目前 Review confirmation 仍有效、來源目前有效、不是 `requires_review`，且仍具有唯一有效的 CornerBrace-to-Waler／Strut 關聯。
 
-每一個可採用 repair candidate MUST 至少由一支 `automatic primary` 支持。`manual repaired secondary` 只能補充一致性 evidence，不得單獨使候選成立；系統不得遞迴展開 secondary reference 自己曾使用的 repaired references，也不得讓 repaired CB1 → repaired CB2 → repaired CB3 形成無 automatic primary 的推測鏈。Reference 可來自同一 Strut、另一側或鄰近 Strut，不得限制為同一支 Strut 的另一側。
+每一個可採用 repair candidate MUST 由恰好一支被選為 template 的 `automatic primary` 產生局部配置，並可由其他 eligible references 補充一致性 evidence。`manual repaired secondary` 不得成為 template、不得單獨使候選成立；系統不得遞迴展開 secondary reference 自己曾使用的 repaired references，也不得讓 repaired CB1 → repaired CB2 → repaired CB3 形成無 automatic primary 的推測鏈。
+
+Reference 必須先通過 target endpoint topology、Waler／Strut 局部夾角、有限構件落點及 target residual validation 等 compatibility gates，才可進入 locality ranking。排序 MUST 依序優先：同一 target Waler／Strut 關係的對側 automatic primary、相同 endpoint topology 的相容鄰近 Strut，最後才是其他相容 automatic primary；同一優先層內才可使用目標 positional anchor 至 reference engineering line 的空間距離排序。距離不得使不相容 reference 合法。
 
 #### Scenario: Automatic recognized CornerBrace 成為 primary reference
-- **WHEN** 一支 automatic recognized CornerBrace 的來源有效，且其 CornerBraceConnection 唯一有效
-- **THEN** 系統可將它列為 `automatic primary` reference
+- **WHEN** 一支 automatic recognized CornerBrace 的來源有效、CornerBraceConnection 唯一有效，且其局部 topology 與 target 相容
+- **THEN** 系統可將它列為 `automatic primary` template 候選
 
-#### Scenario: 已確認 repaired CornerBrace 成為 secondary reference
-- **WHEN** 一支 manual repaired CornerBrace 已明確採用、repair provenance 完整、目前 confirmation 有效、來源有效、不是 `requires_review`，且 connection 仍唯一有效
-- **THEN** 系統可將它列為 `manual repaired secondary` reference
-- **AND** 它只能補充同一候選已有的 automatic primary evidence
-
-#### Scenario: 只有 repaired references
-- **WHEN** 某個 repair hypothesis 只有一支或多支 manual repaired CornerBrace 支持，沒有任何 automatic primary
-- **THEN** 該 hypothesis MUST NOT 成為可 Apply candidate
-- **AND** 系統 MUST NOT 以 repaired reference chain 補足缺少的 primary evidence
-
-#### Scenario: Repaired reference 不再可信
-- **WHEN** manual repaired CornerBrace 尚未確認、repair provenance 不完整、connection 無效、來源失效或狀態為 `requires_review`
-- **THEN** 系統 MUST NOT 將它納入 reference evidence
+#### Scenario: 同一 Waler 與 Strut 的對側角撐優先
+- **WHEN** target 與一支 automatic primary 共用同一有限 Waler／Strut 關係、位於可由 target evidence 支持的對側，且 transfer 後通過全部 hard validation
+- **THEN** 系統 SHALL 優先使用該 reference 的鏡射 template
+- **AND** SHALL NOT 因較遠的同側 reference 也通過寬鬆長度檢核而將其排在前面
 
 #### Scenario: 鄰近支撐提供有效參考
-- **WHEN** 目標同支撐的另一側角撐也被遮蔽，但鄰近支撐存在合格的 automatic primary CornerBrace
-- **THEN** 系統可使用該鄰近角撐支持修補候選
-- **AND** 正式端點仍須由目標構件幾何求得
+- **WHEN** 同一 Waler／Strut 關係沒有相容 automatic primary，但鄰近 Strut 存在 endpoint topology 與局部夾角相容的 automatic primary
+- **THEN** 系統可依 locality ranking 使用該鄰近 reference 建立 transferred candidate
+
+#### Scenario: 已確認 repaired CornerBrace 成為 secondary reference
+- **WHEN** 一支 manual repaired CornerBrace 已明確採用、provenance 完整、目前 confirmation 有效、來源有效、不是 `requires_review`，且 connection 唯一有效
+- **THEN** 系統可將它列為 `manual repaired secondary` consistency evidence
+- **AND** MUST NOT 將其選為 geometry template
+
+#### Scenario: 只有 repaired references
+- **WHEN** target 附近只有一支或多支 manual repaired CornerBrace，沒有任何 compatible automatic primary
+- **THEN** 系統 MUST NOT 產生可 Apply candidate
+- **AND** MUST NOT 以 repaired reference chain 補足 template evidence
+
+#### Scenario: Repaired reference 不再可信
+- **WHEN** 一支 manual repaired CornerBrace 的 confirmation、來源、connection 或 provenance 已失效，或已標示為 `requires_review`
+- **THEN** 系統 MUST 排除該 secondary reference
+- **AND** MUST NOT 讓它影響 template eligibility 或 candidate validation
 
 #### Scenario: 參考角撐本身關聯無效
-- **WHEN** 某一附近 CornerBrace 沒有唯一有效的 Waler／Strut 關聯，或具有阻斷其工程幾何可信度的問題
-- **THEN** 系統 MUST NOT 將該 CornerBrace 當作修補參考
+- **WHEN** 一支 automatic recognized CornerBrace 無法唯一建立有效 CornerBrace-to-Waler／Strut 關聯
+- **THEN** 系統 MUST NOT 將它列為 automatic primary template
 
-#### Scenario: 沒有合格參考角撐
-- **WHEN** 目標附近沒有任何合格的 automatic primary CornerBrace 可供參考
-- **THEN** 系統 MUST 拒絕產生可採用的修補候選
-- **AND** SHALL 保留原正式幾何或 unresolved 狀態
+#### Scenario: 最近 reference 不相容
+- **WHEN** 空間上最近的 CornerBrace 具有不同 endpoint topology、無效 connection、不同局部 Waler／Strut 幾何，或 transferred result 不符合 target evidence
+- **THEN** 系統 MUST 排除該 reference
+- **AND** SHALL 繼續評估下一支 compatible automatic primary，而不是降低 hard validation
 
 #### Scenario: 多筆參考不一致
-- **WHEN** 多支合格參考角撐對目標候選提供互相衝突且無法唯一判定的先驗
-- **THEN** 系統 SHALL 將結果保持為多解或證據不足
-- **AND** SHALL NOT 只因其中一支距離最近就自動採用
+- **WHEN** 同一 compatibility tier 內有多支距離在既有 ambiguity tolerance 內的 automatic primaries，且它們產生非等價 candidates
+- **THEN** 系統 SHALL 將非等價且各自完整的 candidates 保留供 Preview 選擇
+- **AND** MUST NOT 依 ID、entity order 或 first match 自動選定 template
 
-### Requirement: Reference 幾何只能作為一致性檢核
-
-Reference CornerBrace 的 fixed length、side、angle relation 與 topology MUST 只作為 repair hypothesis 的 consistency validation evidence。Repaired CornerBrace 的正式端點 MUST 完全由 candidate axis 與 target finite Waler inner line、target finite Strut centreline 的交點決定。系統 MUST NOT 複製 reference coordinates、以 reference fixed length 改寫或移動目標交點、沿 candidate axis 截短／延長正式端點，或強迫 target 採用 reference length。
-
-#### Scenario: Reference length 與目標交點長度一致
-- **WHEN** candidate axis 的兩個 target finite intersections 形成的長度通過 reference fixed-length consistency validation
-- **THEN** 系統 SHALL 保留這兩個 target intersections 作為 candidate endpoints
-- **AND** SHALL 由兩交點距離計算 target fixed length
-
-#### Scenario: Reference length 與目標交點長度不一致
-- **WHEN** candidate axis 的 target finite intersections 所得長度未通過 reference fixed-length consistency validation
-- **THEN** 該 hypothesis MUST 被拒絕
-- **AND** 系統 MUST NOT 移動任一 target intersection 以配合 reference length
-
-#### Scenario: Reference side 或 topology 不一致
-- **WHEN** target hypothesis 與合格 reference 的 side 或 topology evidence 不相容
-- **THEN** 系統 SHALL 將該 hypothesis 判為不合格
-- **AND** SHALL NOT 以複製 reference absolute geometry 的方式產生另一個 candidate
+#### Scenario: 沒有合格參考角撐
+- **WHEN** 所有附近 CornerBrace 都未通過 primary eligibility、target compatibility 或有限幾何檢核
+- **THEN** 系統 MUST NOT 產生可 Apply candidate
+- **AND** SHALL 顯示沒有合格 automatic primary reference 的拒絕原因
 
 ### Requirement: 每個修補候選必須具有有效的目標工程接點
 
-每一個可預覽的修補候選 MUST 明確綁定一支目標 Waler 與一支目標 Strut，並由候選軸與該 Waler 有限內線、該 Strut 有限中心線的有效交點產生兩個正式端點。候選 MUST 通過既有最小長度、有限線段與幾何有效性檢核，以及 automatic primary reference 的一致性檢核；不得使用 Waler 或 Strut 的無限延長線接點，也不得修改目標 Waler／Strut 幾何或正式端點以配合 reference。
+每一個可預覽的修補候選 MUST 明確標示為既有 `reference_template` 或新的 `body_relationship_selection`，並唯一綁定一支 target Waler 與一支 target Strut。兩種 mode 的 evidence 與 endpoint authority不得混用。
+
+`reference_template` candidate MUST 維持既有 automatic primary、local-frame transfer、finite endpoint 與 validation contract。
+
+`body_relationship_selection` candidate 只有在 automatic recognition 已建立唯一 `BodyGeometryEvidence`，且失敗原因僅為該 body 有多組 hard-valid `BodyRelationshipAssessment` 時才可建立。每個 candidate MUST：
+
+- 引用同一 unique body signature、selected RailTracks 與 midline；
+- 綁定自己的一組 exact active Waler／Strut source identities；
+- 使用該 assessment 的 finite intersections 作為 endpoints；
+- 確認兩條 rail coverage 各自 `>=50%`；
+- 確認 Waler 與 Strut 每端 outward extension 各自 `<=600 mm`；
+- 保留 complete／occluded classification、gaps／occluders與 structured validation；
+- 通過 duplicate、CornerBraceConnection與既有 CornerBrace validation。
+
+該 mode 不需要 template，不得改選 rails、重新推導 body、使用無限延長線、以 proximity 決定 relationship、解析 diagnostic message 或將 body ambiguity 包裝成可選 candidate。
+
+#### Scenario: Reference-template 目標接點有效
+- **WHEN** reference-template candidate 依既有 contract 產生有效 finite transferred endpoints 並通過 validation
+- **THEN** 系統 SHALL 允許該 candidate 進入 Preview
+
+#### Scenario: Body relationship candidate 使用同一 centerline
+- **WHEN** unique body 有多組 hard-valid assessments
+- **THEN** planner SHALL 為每組 assessment 建立綁定 exact identities 的 candidate
+- **AND** 每個 candidate SHALL 使用同一 body midline 與自己的 finite endpoints
+
+#### Scenario: Body relationship candidate 不要求 template
+- **WHEN** candidate mode 是 `body_relationship_selection`
+- **THEN** 系統 SHALL 以 unique `BodyGeometryEvidence` 作為本體 authority
+- **AND** MUST NOT 因缺少 template 而拒絕或執行 template transfer
+
+#### Scenario: Coverage 不足不得建立 candidate
+- **WHEN** 某 assessment 任一 rail coverage 低於 `50%`
+- **THEN** planner MUST NOT 將它建立為可 Apply candidate
+- **AND** 合法 extension MUST NOT 補償 coverage 不足
+
+#### Scenario: Extension 超限不得建立 candidate
+- **WHEN** 某 assessment 任一端 extension 大於 `600 mm`
+- **THEN** planner MUST NOT 將它建立為可 Apply candidate
+- **AND** 合法 coverage MUST NOT 補償 extension 超限
+
+#### Scenario: Body 多解不得建立 relationship candidate
+- **WHEN** automatic result 有零個 body 或多個非等價 body solutions
+- **THEN** 系統 MUST NOT 建立 `body_relationship_selection` candidates
+
+#### Scenario: 不同 identities 必須分開呈現
+- **WHEN** 幾何重合的不同 Waler sources 各自形成 hard-valid assessment
+- **THEN** planner SHALL 建立不同 candidate IDs
+- **AND** MUST NOT 合併為 canonical Waler
 
 #### Scenario: 目標 Waler 與 Strut 接點有效
-- **WHEN** 一條受目標殘線與參考證據支持的候選軸，能與明確目標 Waler 內線及 Strut 中心線形成有效有限交點
-- **THEN** 系統 SHALL 以這兩個交點建立候選正式工程線
-- **AND** SHALL 在候選中標示目標 Waler、Strut 與參考角撐
+- **WHEN** candidate明確綁定target identities且兩個endpoints位於其finite engineering lines並通過對應mode validation
+- **THEN** 系統 SHALL 允許candidate進入Preview
+
+#### Scenario: 同側局部配置移植
+- **WHEN** reference-template candidate依既有local frame完成同側transfer且endpoints有效
+- **THEN** 系統 SHALL 保留既有eligible behavior與result length計算
+
+#### Scenario: 對側局部配置鏡射
+- **WHEN** reference-template candidate依既有contract完成對側mirror且endpoints有效
+- **THEN** 系統 SHALL 保留既有eligible behavior
 
 #### Scenario: 任一接點不在有限構件上
-- **WHEN** 候選軸只能與 Waler 或 Strut 的無限延長線相交，或其中一端沒有有效有限交點
-- **THEN** 該候選 MUST NOT 成為可採用修補
+- **WHEN** 任一candidate endpoint不在綁定的finite Waler或Strut engineering line
+- **THEN** 系統 MUST 拒絕candidate，不得使用infinite extension或nearest snap補足
 
 #### Scenario: 多組 Waler 或 Strut 關係皆可成立
-- **WHEN** 目標證據可形成多個非等價且各自有效的 Waler／Strut 修補候選
-- **THEN** 系統 SHALL 將各候選分開呈現
-- **AND** MUST NOT 在使用者選擇前把其中一組當成正式關聯
+- **WHEN** unique body有多組分別hard-valid的relationships
+- **THEN** planner SHALL 以不同candidate IDs呈現每組relationship
+- **AND** MUST NOT 在使用者選擇前採用任一組
+
+#### Scenario: Unresolved create 不得把 relationship 歸屬交給使用者
+- **WHEN** unresolved source沒有unique body，而reference-template hypotheses指向多組relationships
+- **THEN** 系統 MUST 維持既有blocking behavior
+- **AND** MUST NOT 包裝成 `body_relationship_selection` candidates
 
 ### Requirement: 修補必須先預覽再明確採用
 
-Repair planner MAY 保留未通過 hard eligibility 的 internal hypotheses 以建立拒絕 diagnostics，但只有同時具備 target source identity、target residual geometry、可靠 residual direction、唯一有效 candidate relationship、至少一支 automatic primary reference、有效 finite intersections，並通過 reference consistency 與既有 CornerBrace validation 的 hypotheses，才可成為 Preview 中可選取、可 Apply 的 candidates。
+系統 SHALL 在修改 live Review state 前，以 Preview 顯示 candidate mode、unique body axis、target Waler／Strut source identities、finite endpoints、result length、每軌 coverage、每端 extension、complete／occluded classification與 validation。`reference_template` 另顯示既有 template-transfer evidence；`body_relationship_selection` SHALL 顯示「本體已辨識，請選擇工程關係」或等價說明。
 
-系統 SHALL 在修改 live Review state 前顯示 eligible candidate 的工程線、目標來源殘線、目標 Waler／Strut、primary／secondary references 及足以區分候選的診斷資訊。即使只有一個 eligible candidate，也 MUST 由使用者明確採用；取消或關閉預覽 MUST 保持零副作用。多個非等價但各自通過全部 hard eligibility 的 candidates 存在時，系統 SHALL 要求使用者明確選擇其中一個，不得以分數自動提交。Proximity 只能排序已合法 candidates 的顯示順序，不得使 hypothesis 合法，也不得自動選 winner。
+即使只有一個 eligible candidate，也 MUST 由使用者明確 Apply。多候選時 MUST 以穩定 candidate ID 要求使用者選擇；未選時 Apply disabled。Preview 開啟、候選改選、取消或關閉 MUST 零副作用，不得以格式化字串識別候選或自動提交。
+
+Apply 前 MUST 以 current revision、body signature、active source identities及完整 assessment gates 重驗。任何 state、identity、finite intersection、coverage、gap evidence、extension或 validation 改變，candidate MUST 視為 stale 或 invalid。
 
 #### Scenario: 唯一候選仍需確認
-- **WHEN** 系統只建立一個合法修補候選
-- **THEN** 系統先顯示該候選預覽
-- **AND** 只有使用者明確採用後才可修改正式 Review state
+- **WHEN** repair plan 只有一個 eligible candidate
+- **THEN** Preview SHALL 顯示完整 evidence
+- **AND** 只有使用者明確 Apply 後才可提交
+
+#### Scenario: Relationship ambiguity 顯示多組候選
+- **WHEN** unique body 有多組 hard-valid assessments
+- **THEN** Preview SHALL 分別顯示每組 identities、endpoints、coverage、extensions與 validation
+- **AND** Apply SHALL 在使用者選擇前維持 disabled
+
+#### Scenario: 使用者選擇其中一組
+- **WHEN** 使用者依 candidate ID 選定一組並 Apply
+- **THEN** 系統 SHALL 只提交該 candidate 的 relationship、endpoints與 provenance
+- **AND** MUST NOT 混用其他 candidate evidence
+
+#### Scenario: Preview 後 source state 改變
+- **WHEN** Preview 後 revision、body signature 或 active Waler／Strut identities 改變
+- **THEN** Apply MUST 拒絕 stale candidate
+- **AND** SHALL 要求重新建立 Preview
+
+#### Scenario: 取消或關閉 Preview
+- **WHEN** 使用者取消、關閉或尚未 Apply
+- **THEN** 正式 CornerBrace、unresolved subject、confirmation與 dirty state SHALL 維持提交前狀態
+
+#### Scenario: Planner 不解析 message
+- **WHEN** planner 需要 body、relationship或 rejection evidence
+- **THEN** 系統 SHALL 只使用 structured evidence
+- **AND** MUST NOT 解析 ValidationMessage 文字
+
+#### Scenario: 主要資訊與稽核資訊分層
+- **WHEN** 使用者檢視candidate
+- **THEN** 主要區 SHALL 顯示mode、target relationship、endpoints與result length
+- **AND** 次要區 SHALL 顯示source identities、body／assessment或template evidence與diagnostics
+
+#### Scenario: 稽核與診斷區預設收合
+- **WHEN** Preview開啟
+- **THEN** 次要區 SHALL 預設收合且可展開
+- **AND** 顯示狀態 MUST NOT 改變selection、Apply或live state
 
 #### Scenario: 使用者選擇多個候選之一
-- **WHEN** 系統顯示多個合法但非等價的修補候選，且使用者選取其中一個並確認
-- **THEN** 系統只採用被選取的候選
-- **AND** 不採用其他候選的幾何或關聯
+- **WHEN** 使用者以stable candidate ID選擇一組
+- **THEN** Preview SHALL 更新summary、overlay與Apply state
+- **AND** MUST NOT 混用其他candidate evidence
+
+#### Scenario: 以灰色顯示目標來源線段
+- **WHEN** Preview具有residual source segments
+- **THEN** Presentation SHALL 以低干擾方式顯示來源，並凸顯selected axis
+- **AND** overlay MUST NOT 成為eligibility evidence
+
+#### Scenario: 改選或離開預覽時清除 temporary overlay
+- **WHEN** 使用者改選、取消或關閉Preview
+- **THEN** 系統 SHALL 清除temporary overlay且不修改live state
 
 #### Scenario: 使用者取消預覽
-- **WHEN** 使用者取消或關閉修補預覽
-- **THEN** 正式 CornerBrace、unresolved subject、關聯、validation、confirmation 與 dirty Review state SHALL 維持提交前狀態
+- **WHEN** 使用者取消或關閉Preview
+- **THEN** 所有正式geometry、relationships、confirmation與dirty state SHALL 維持提交前狀態
 
 #### Scenario: 沒有合法候選
-- **WHEN** 目標證據不足、沒有有效工程接點或所有候選均未通過檢核
-- **THEN** 系統 SHALL 顯示不可安全修補的原因
-- **AND** SHALL 保留原正式幾何或 unresolved 狀態
+- **WHEN** 沒有candidate通過其mode所需全部hard gates
+- **THEN** 系統 SHALL 顯示structured rejection diagnostics並保持原狀態
 
 #### Scenario: 多個 hypotheses 都缺少必要 evidence
-- **WHEN** planner 找到多個幾何猜測，但它們缺少 target residual、automatic primary、唯一有限關係或其他 hard eligibility
-- **THEN** 系統 SHALL 將 eligible candidate count 視為零並顯示拒絕原因
-- **AND** MUST NOT 將這些 hypotheses 包裝成可選取或可 Apply candidates
+- **WHEN** 多個hypotheses各自缺少body、relationship、finite endpoint、coverage、extension、gap或template evidence
+- **THEN** 系統 MUST NOT 將任何hypothesis包裝成可Apply candidate
 
 #### Scenario: Proximity 只排序合法候選
-- **WHEN** 多個 candidates 已各自通過全部 hard eligibility
-- **THEN** 系統 MAY 依 proximity 排列顯示順序
-- **AND** MUST NOT 因 proximity 自動採用或隱藏其他非等價合法候選
+- **WHEN** reference-template candidates已先通過全部hard gates
+- **THEN** 系統 MAY 依既有tier／locality排序
+- **AND** proximity MUST NOT 使不合法candidate成立或影響relationship-selection winner
 
 ### Requirement: Unresolved 來源建立正式 CornerBrace 必須通過額外門檻
 
-系統 MUST 區分「replace existing recognized CornerBrace」與「create formal CornerBrace from unresolved source」。Replace path SHALL 更新已存在且 subject identity 唯一的 CornerBrace。Create path 只有在 unresolved subject 具備 exact `corner_brace` role／source identity、target residual geometry、可靠 residual direction 或有限且可逐一檢核的 hypotheses、全體 hard-eligible hypotheses 指向同一組唯一 finite target Waler／Strut relationship、至少一支有效 automatic primary reference、明確使用者 adoption，且建立後通過全部既有 CornerBrace validation 時才可提交。
+系統 MUST 區分 `replace existing recognized CornerBrace`、`reference-template create from unresolved source` 與 `create from recognized body relationship selection`。
 
-只有 layer classification、INSERT identity、附近構件或 references，而沒有 target residual geometry，不足以建立 formal CornerBrace。Create path 若存在多組非等價 target Waler／Strut relationships，MUST 拒絕建立，不得把關係選擇責任移交給 Apply；在唯一 relationship 內若仍有多個各自完整的 axis candidates，則可依 Preview requirement 讓使用者選擇。
+既有 reference-template create 維持其 exact source identity、target evidence、唯一 relationship、compatible primary、finite transfer與 staged validation contract。
+
+`create from recognized body relationship selection` 只適用於唯一 `BodyGeometryEvidence` 加多組 hard-valid `BodyRelationshipAssessment`。Body 零解／多解、任一 rail coverage不足、任一 extension超限、unexplained gap或其他 hard gate失敗都不得進入此例外。成功 Apply MUST 原子建立正式 CornerBrace、唯一 connection、candidate points、problems／ReviewItems、derived values與 selection provenance；任一步失敗 MUST rollback。
+
+#### Scenario: Body-recognized source 有多組 relationships
+- **WHEN** unique body 有多組 assessments，且每組分別通過 coverage、extension、gap與既有 validation
+- **THEN** 系統 SHALL 允許將它們建立為 Preview candidates
+- **AND** MUST NOT 在使用者選擇前建立正式 connection
+
+#### Scenario: Body 零解或多解
+- **WHEN** source 沒有 unique body
+- **THEN** 系統 MUST 拒絕 relationship-selection create path
+- **AND** MUST NOT 讓使用者只選 Waler／Strut 繞過 body eligibility
+
+#### Scenario: Assessment 不完整
+- **WHEN** candidate 缺少任一 rail coverage、gap assignment、finite endpoint、extension或 validation evidence
+- **THEN** 系統 MUST 拒絕該 candidate
+
+#### Scenario: Atomic Apply 成功
+- **WHEN** selected candidate 在 current revision 重驗全部 hard gates成功
+- **THEN** 系統 SHALL 一次提交 CornerBrace、唯一 connection及衍生 Review state
+
+#### Scenario: Atomic Apply 失敗
+- **WHEN** staged build或任一 validation失敗
+- **THEN** 系統 MUST rollback全部修改
+- **AND** SHALL 保留提交前 unresolved state
+
+#### Scenario: 不新增 Project schema
+- **WHEN** relationship-selection provenance需要保存 optional mode或body signature
+- **THEN** 系統 SHALL 使用 backward-compatible Review／override contract
+- **AND** 若無法做到則 MUST 停止實作並回報
 
 #### Scenario: Replace existing recognized CornerBrace
-- **WHEN** target 是具有唯一 repair subject identity 的 existing recognized CornerBrace，且使用者採用一個 eligible repair candidate
-- **THEN** 系統 SHALL 更新該 CornerBrace，而不是新增第二支 formal CornerBrace
+- **WHEN** target是具有唯一repair subject identity的existing CornerBrace且使用者Apply合法candidate
+- **THEN** 系統 SHALL 更新該CornerBrace，不得建立duplicate member
 
 #### Scenario: Unresolved source 通過完整 create eligibility
-- **WHEN** unresolved `corner_brace` subject 具有 exact identity、target residual、可靠方向 evidence、唯一 finite Waler／Strut relationship、automatic primary reference，且使用者採用後全部既有 CornerBrace validation 通過
-- **THEN** 系統可建立一支 source-traceable formal CornerBrace
+- **WHEN** unresolved source通過既有reference-template exact identity、target evidence、唯一relationship、finite transfer與staged validation
+- **THEN** 系統 SHALL 允許使用者明確Apply後建立formal CornerBrace
 
 #### Scenario: 只有 layer 或 nearby evidence
-- **WHEN** unresolved subject 只有正確 layer、INSERT、附近 Waler／Strut 或 reference CornerBrace，但沒有 target residual geometry
-- **THEN** 系統 MUST NOT 建立 formal CornerBrace
+- **WHEN** unresolved source只有layer、INSERT、nearby members或references而缺少既有target evidence與unique body
+- **THEN** 系統 MUST NOT 建立formal CornerBrace
 
 #### Scenario: Unresolved source 有多組 target relationships
-- **WHEN** unresolved source 的 hard-eligible hypotheses 指向多組非等價 target Waler／Strut relationships
-- **THEN** 系統 MUST 拒絕 create path並顯示 relationship ambiguity
-- **AND** MUST NOT 將這些關係包裝成可 Apply candidates
+- **WHEN** unresolved source沒有unique body且reference-template hypotheses指向多組relationships
+- **THEN** 系統 MUST 拒絕create path並顯示ambiguity
 
 #### Scenario: 建立後 validation 未全部通過
-- **WHEN** selected unresolved repair 在 staged formal CornerBrace 建立後有任一既有 CornerBrace validation 未通過
-- **THEN** 系統 MUST 拒絕提交並保留原 unresolved state
+- **WHEN** staged formal CornerBrace有任一既有validation失敗
+- **THEN** 系統 MUST rollback並保留原unresolved state
 
 ### Requirement: 採用修補必須原子重建相關 Review 資料
 
@@ -209,36 +342,162 @@ Repair planner MAY 保留未通過 hard eligibility 的 internal hypotheses 以�
 
 ### Requirement: 修補決策必須可追溯且安全重播
 
-已採用修補 MUST 記錄 exact target source identity、採用的 world engineering line、目標 Waler／Strut、selection source、automatic primary reference identities，以及選用的 manual repaired secondary identities。相同 DXF fingerprint 的 Pause／Resume 重新辨識只有在 exact target source identity 仍唯一存在、至少一支記錄的 automatic primary 仍符合 primary eligibility、所有被採用的 secondary 仍符合 secondary eligibility，且修補結果仍通過現行檢核時才可重播；否則 MUST 保留 candidate-based state 並要求重新修補，不得套用到其他來源或改找新的 references。
+新採用的修補 MUST 記錄 exact target source identity、採用的 world engineering line、目標 Waler／Strut、selection source、被選用的 automatic primary template identity、transfer mode、reference local Waler offset、reference Strut inward station，以及參與驗證的 manual repaired secondary identities。其他符合 eligibility 但未被選為 template 的 automatic primaries MAY 記錄為 validation evidence，但不得與 selected template 混淆。
+
+相同 DXF fingerprint 的 Pause／Resume 重新辨識只有在 exact target subject、保存的 target Waler／Strut、selected automatic primary template、transfer mode、局部尺寸與 adopted world line 仍能唯一重建並通過現行檢核時才可重播；否則 MUST 保留 candidate-based state 並要求重新修補，不得改找新的 nearest reference。既有不含 template-transfer fields 的 version 2 repair payload MUST 保持可讀，並以其保存的 adopted world line、target identities 與 references 走既有安全 replay；不得因本 change 靜默套用新的 reference selection。
 
 #### Scenario: 相同來源安全重播
-- **WHEN** paused Review 以相同 source fingerprint 恢復，exact target source identity 唯一存在，且保存的修補工程線與目標關係仍有效
+- **WHEN** paused Review 以相同 source fingerprint 恢復，exact target、target relationship 與 selected template identities 唯一存在，且保存的 transfer 可重建相同 adopted world line
 - **THEN** 系統 SHALL 恢復修補後的正式 CornerBrace 與重新推導的衍生資料
 
 #### Scenario: exact target source identity 不再唯一
-- **WHEN** 恢復 Review 時找不到 exact target source identity，或同一 identity 無法唯一定位修補 subject
-- **THEN** 系統 MUST NOT 把修補套用到其他 CornerBrace
-- **AND** SHALL 將該修補標示為需要重新處理或已停用
+- **WHEN** 恢復 Review 時 exact target source identity 已不存在、對應到多個 subjects，或不再唯一代表原修補目標
+- **THEN** 系統 MUST NOT replay 該修補
+- **AND** SHALL 保留 candidate-based state 並要求重新處理
 
 #### Scenario: 參考角撐後續改變
-- **WHEN** exact target source identity 仍有效，但保存修補所記錄的參考角撐已改變或不存在
-- **THEN** 系統 SHALL 以保存的人工採用工程線及目前目標工程關係重新驗證，不得重新猜測另一支參考角撐
-- **AND** 驗證失敗時 SHALL 要求重新修補
+- **WHEN** exact target 仍有效，但保存的 selected automatic primary template 已改變、不存在或不再 compatible
+- **THEN** 系統 MUST NOT 以目前最近的另一支 reference 代替
+- **AND** SHALL 將修補標示為需要重新處理
+
+#### Scenario: Local transfer 無法重建相同工程線
+- **WHEN** 保存的 target relationship 仍存在，但依保存 template 與 transfer mode 重建的工程線不再符合 adopted world line 或 target evidence
+- **THEN** 系統 MUST NOT replay 該修補
+- **AND** SHALL 保留重新辨識的 candidate-based state
+
+#### Scenario: Legacy version 2 repair payload
+- **WHEN** same-fingerprint paused Review 含有本 change 前建立、沒有 template-transfer fields 的 repair provenance
+- **THEN** 系統 SHALL 依既有 adopted world line、target identities 及 reference eligibility 驗證 replay
+- **AND** MUST NOT 自動重新選擇 nearest template 或重算其工程線
 
 #### Scenario: Resume 後只剩 repaired references
-- **WHEN** 保存修補的 secondary references 仍有效，但所有記錄的 automatic primary references 已失效或不存在
+- **WHEN** 保存修補的 secondary references 仍有效，但 selected automatic primary template 已失效或不存在
 - **THEN** 系統 MUST NOT replay 該修補
-- **AND** SHALL 要求使用者重新檢查，不得以 secondary reference chain 取代 primary evidence
+- **AND** SHALL 要求使用者重新檢查，不得以 secondary reference chain 取代 primary template
 
 ### Requirement: 自動辨識與非目標系統維持既有行為
 
-此工具 MUST NOT 放寬 CornerBrace automatic recognition、改變既有可靠中心軸辨識結果、改寫一般 Brace／Strut／Waler recognition，或修改 Solver 與 Project schema。未啟動修補及未採用候選時，現行 DXF Import 結果 MUST 保持不變。
+Repair tool MUST NOT 放寬 automatic CornerBrace hard gates、修改一般 member recognition、建立 canonical Waler、改變 Solver或 Project schema。Automatic recognition SHALL 只在 body 唯一且 hard-valid relationship唯一時建立正式 connection。
+
+Body 零解／多解時只能依既有 reference-template eligibility處理；problem文字本身不是 evidence。Body 唯一且 relationship多解時，repair tool MAY 建立 `body_relationship_selection` candidates，但不得自動選擇或 Apply。Source exclusion／restore後 MUST 依 active facts重辨識。
+
+#### Scenario: Automatic 唯一結果不使用 repair
+- **WHEN** unique body只有一組 hard-valid relationship且使用者未啟動 repair
+- **THEN** 系統 SHALL 維持 automatic result
+
+#### Scenario: Body ambiguity 沿用既有 repair eligibility
+- **WHEN** automatic recognition因 body零解或多解 unresolved
+- **THEN** repair tool MAY 評估既有 reference-template route
+- **AND** MUST NOT 建立 relationship-selection candidates
+
+#### Scenario: 重複 Waler 只能由使用者明確解決
+- **WHEN** unique body對應多個 hard-valid active Waler identities
+- **THEN** repair tool MAY 顯示分開的 candidates
+- **AND** MUST NOT 合併、first-match、自動選擇或自動 Apply
+
+#### Scenario: 排除 source 後 automatic 重算
+- **WHEN** 使用者排除其中一個 competing source後只剩一組 hard-valid relationship
+- **THEN** automatic recognition SHALL 建立該唯一 connection
+- **AND** MUST NOT 重播舊 Preview selection
+
+#### Scenario: 未合法解決前維持 completion block
+- **WHEN** unresolved source尚未被排除、重算為唯一結果或明確 Apply合法 candidate
+- **THEN** DXF Review MUST NOT 完成
 
 #### Scenario: 可靠角撐不使用修補工具
-- **WHEN** CornerBrace 已由現行 automatic recognition 正確建立，且使用者未啟動修補
-- **THEN** 系統 SHALL 維持現行辨識、端點延伸與下游關聯結果
+- **WHEN** automatic recognition已建立unique body與唯一hard-valid connection且使用者未啟動repair
+- **THEN** 系統 SHALL 維持automatic結果
+
+#### Scenario: Automatic 無解來源仍需符合 repair eligibility
+- **WHEN** automatic recognition因body零解／多解或relationship零解而unresolved
+- **THEN** repair tool SHALL 依對應既有route eligibility評估
+- **AND** MUST NOT 只因warning存在而建立candidate
+
+#### Scenario: 重複 Waler relationship 不由 repair 自動解決
+- **WHEN** unique body同時對應多個hard-validWaler identities
+- **THEN** repair tool MUST NOT 合併、first-match或自動Apply
+
+#### Scenario: Unresolved source 未合法解決前維持 completion block
+- **WHEN** source尚未被排除、automatic重算為唯一或explicit Apply合法candidate
+- **THEN** DXF Review completion MUST 保持blocked
 
 #### Scenario: 修補不進入 Project schema
-- **WHEN** 修補後的 DXF Review 完成匯入
-- **THEN** Project row boundary SHALL 維持既有正式 Waler、Strut 與 Brace contract
-- **AND** CornerBrace 詳細資料與修補 provenance SHALL 留在 DXF Review state
+- **WHEN** repair後的DXF Review完成匯入
+- **THEN** Project boundary SHALL 維持既有正式member contract
+- **AND** selection evidence SHALL 留在backward-compatible DXF Review state
+
+### Requirement: Automatic primary reference 提供局部配置模板
+
+被選用的 automatic primary SHALL 以自身唯一 CornerBraceConnection 轉換成與 absolute world coordinates 無關的局部配置模板。模板 MUST 至少包含：reference endpoint topology、相對 reference Waler／Strut 有限交點的 Waler-side offset magnitude、沿 Strut inward direction 的 attachment station，以及可稽核的 reference fixed length。Transferred endpoints MUST 完全由 target local frame、reference Waler offset、reference Strut station 與 same-side／mirrored mode 決定；candidate fixed length MUST 由 transferred endpoints 重算。
+
+Reference fixed length MUST 只用於 Preview 顯示、provenance 稽核與 diagnostic comparison。它 MUST NOT 移動 transferred endpoints、強迫 target candidate 與 reference 等長、透過圓交點／縮放／clamp 修改結果，亦 MUST NOT 單獨使 candidate 通過或失敗。
+
+#### Scenario: 從有效 reference 建立 local template
+- **WHEN** automatic primary 具有唯一 Waler／Strut connection，且其兩端分別位於相關有限工程線上
+- **THEN** 系統 SHALL 以該 relationship 的局部交點與方向計算可移植 offset／station
+- **AND** SHALL 保留 reference identity 與原 fixed length 供 Preview、provenance 稽核及 diagnostic comparison，但不將 fixed length 納入 hard eligibility
+
+#### Scenario: Candidate length 由 transferred endpoints 重算
+- **WHEN** target local frame、reference Waler offset、reference Strut station 與 transfer mode 已產生兩個有限 transferred endpoints
+- **THEN** 系統 MUST 由這兩個 endpoints 的距離計算 candidate fixed length
+- **AND** MUST NOT 複製 reference fixed length 作為 candidate fixed length
+
+#### Scenario: Reference fixed length mismatch 只產生 diagnostic
+- **WHEN** candidate fixed length 與 reference fixed length 不同，但 candidate 通過所有 target geometry、target evidence 與既有 CornerBrace validation
+- **THEN** 系統 SHALL 保留該 candidate 的既有 eligibility，並可顯示長度差異 diagnostic
+- **AND** MUST NOT 單獨因 reference fixed length mismatch 接受或拒絕 candidate
+
+#### Scenario: Reference 無法建立有限 local frame
+- **WHEN** reference Waler／Strut 沒有唯一有限交點、方向退化，或 attachment 無法映射為有限 local offset／station
+- **THEN** 該 reference MUST NOT 成為 template
+
+#### Scenario: Template transfer 與 target evidence 不一致
+- **WHEN** local template 可映射到 target 有限構件，但 candidate 軸與 exact target direction 不相容，或未通過 positional-anchor／residual corridor validation
+- **THEN** 該 transferred candidate MUST 被拒絕
+
+### Requirement: 角撐修補介面須使用繁體中文
+
+系統 SHALL 以繁體中文呈現角撐修補流程中的使用者可見文字，包括修補可用性說明、預覽視窗說明、候選選取、方案摘要、候選明細、顯示用狀態名稱、拒絕診斷與提交錯誤。同一角色、移植方式或定位尺寸在角撐修補介面中重複出現時 MUST 使用一致的中文術語，且可共用術語 SHALL 可由其他 Presentation consumer 重用。
+
+使用者可見的 `reference_waler_offset_mm` SHALL 顯示為「圍令端定位距離」，`reference_strut_station_mm` SHALL 顯示為「支撐端定位距離」；介面 SHALL 顯示「量測基準：目標圍令與支撐的交會點；支撐端定位距離沿支撐內側方向量測。」或語意完全相同的繁體中文說明。此顯示名稱變更 MUST NOT 更名內部欄位、DTO、serialized key 或 planner term。
+
+角撐修補預覽中的工程長度、定位距離及座標分量 SHALL 固定顯示至小數第 3 位。工程長度與定位距離 SHALL 顯示 `mm` 單位；座標 SHALL 維持既有無單位表示方式。顯示格式 MUST NOT 改變原始 double precision、candidate eligibility、排序、candidate ID、工程幾何、提交結果或 persistence contract。
+
+#### Scenario: 預覽合法候選
+
+- **WHEN** 使用者開啟具有一個或多個合法候選的角撐修補預覽
+- **THEN** 視窗說明、候選選取、方案摘要與候選明細 SHALL 使用繁體中文描述目標圍令與支撐、參考模板、移植方式、局部尺寸、結果長度及驗證證據
+- **AND** 構件 ID、格式化數值與適用的 `mm` 單位 SHALL 保持可稽核內容
+
+#### Scenario: 顯示移植方式
+
+- **WHEN** 候選的內部移植方式為 `same_side` 或 `mirrored`
+- **THEN** 介面 SHALL 分別顯示「同側移植」或「鏡射移植」
+- **AND** 系統 MUST 保留原內部值供候選選取、提交與持久化使用
+
+#### Scenario: 定位尺寸使用直觀名稱
+- **WHEN** 介面顯示 candidate 的 reference local Waler offset 與 Strut inward station
+- **THEN** SHALL 分別顯示「圍令端定位距離」與「支撐端定位距離」
+- **AND** SHALL 顯示「量測基準：目標圍令與支撐的交會點；支撐端定位距離沿支撐內側方向量測。」或語意完全相同的繁體中文說明
+- **AND** MUST NOT 因顯示名稱變更而改寫內部欄位、DTO、serialized key、planner term 或幾何意義
+
+#### Scenario: 預覽數值統一顯示三位小數
+- **WHEN** 角撐修補預覽顯示結果長度、reference fixed length、圍令端定位距離、支撐端定位距離、positional anchor、candidate world engineering line 或多候選表格中的工程數值
+- **THEN** 每一個工程數值與座標分量 SHALL 固定顯示至小數第 3 位
+- **AND** 工程長度與定位距離 SHALL 顯示 `mm` 單位
+- **AND** positional anchor 與 candidate world engineering line 的座標 SHALL 維持無單位表示方式
+- **AND** 正數、負數與整數 SHALL 使用相同三位小數格式，包括必要的尾端補零與顯示四捨五入
+- **AND** 顯示四捨五入 MUST NOT 回寫或改變原始 double precision、candidate eligibility、排序、candidate ID、工程幾何或提交值
+
+#### Scenario: 重複概念使用一致術語
+
+- **WHEN** 角撐修補的候選選取、主要確認區與次要稽核區顯示相同的角色、移植方式或定位尺寸
+- **THEN** `corner_brace` SHALL 一致顯示為「角撐」，`same_side` SHALL 一致顯示為「同側移植」，`mirrored` SHALL 一致顯示為「鏡射移植」
+- **AND** Waler-side offset 與 Strut inward station SHALL 分別一致顯示為「圍令端定位距離」與「支撐端定位距離」
+- **AND** 其他介面使用相同可共用術語時 SHALL 能取得同一中文名稱，而不必重新定義另一份對照
+
+#### Scenario: 修補不可執行或提交失敗
+
+- **WHEN** 選取項目不符合修補前提、沒有候選通過安全條件，或提交時偵測到 stale／invalid repair state
+- **THEN** 系統 SHALL 以繁體中文顯示具體原因
+- **AND** SHALL 維持既有拒絕、保留原狀或 rollback 語意，不得因翻譯而改用較寬鬆的 fallback

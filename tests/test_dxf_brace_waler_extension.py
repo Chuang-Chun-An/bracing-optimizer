@@ -10,6 +10,7 @@ from dxf_import.candidate_points import (
     connect_components_to_walers,
     set_cad_engineering_line,
 )
+from dxf_import.dialog import build_waler_connected_member_summary
 from dxf_import.models import (
     Brace,
     DXFImportResult,
@@ -18,6 +19,7 @@ from dxf_import.models import (
     Strut,
     Waler,
 )
+from dxf_import.waler_contact_adjustment import support_side_normal
 
 
 def waler(identifier, start, end):
@@ -124,6 +126,102 @@ class ExistingDirectBraceConnectionTests(unittest.TestCase):
         _s, connected, messages = connect_components_to_walers((), (brace(),), walers)
         self.assertEqual(connected[0].from_waler, "W1")
         self.assertIn("AMBIGUOUS_WALER_CONNECTION", {m.code for m in messages})
+
+    def test_atomic_replay_rederives_direct_identities_and_rejects_ambiguity(self):
+        walers = (
+            waler("W1", (-100.0, -500.0), (-100.0, 500.0)),
+            waler("W1_DUP", (-100.0, -500.0), (-100.0, 500.0)),
+            waler("W2", (1100.0, -500.0), (1100.0, 500.0)),
+        )
+        original = brace(from_waler="W1", to_waler="W2")
+        staged = build_candidate_points(
+            import_result(walers=walers, braces=(original,))
+        )
+        target = staged.braces[0]
+
+        replayed = apply_candidate_point_selection(
+            staged,
+            target.id,
+            target.selected_start_point_id,
+            target.selected_end_point_id,
+        )
+        result = replayed.braces[0]
+
+        self.assertEqual((result.from_waler, result.to_waler), ("", ""))
+        self.assertFalse(result.has_formal_connection)
+        self.assertEqual(result.selected_start_point_id, "")
+        self.assertEqual(result.selected_end_point_id, "")
+        ambiguity = next(
+            message
+            for message in replayed.messages
+            if message.code == "AMBIGUOUS_WALER_CONNECTION"
+        )
+        self.assertEqual(ambiguity.severity, "error")
+        self.assertTrue(
+            {"H-W1", "H-W1_DUP", "HB"}.issubset(ambiguity.source_handles)
+        )
+
+
+class BraceCandidatePointAuthorityTests(unittest.TestCase):
+    def test_unresolved_brace_keeps_source_evidence_without_recommendation(self):
+        walers = (
+            waler("W1", (-100.0, -500.0), (-100.0, 500.0)),
+            waler("W2", (1100.0, -500.0), (1100.0, 500.0)),
+        )
+
+        unresolved = build_candidate_points(
+            import_result(walers=walers, braces=(brace(),))
+        ).braces[0]
+        formal = build_candidate_points(
+            import_result(
+                walers=walers,
+                braces=(brace(from_waler="W1", to_waler="W2"),),
+            )
+        ).braces[0]
+
+        self.assertEqual(unresolved.recommended_start_point_id, "")
+        self.assertEqual(unresolved.recommended_end_point_id, "")
+        self.assertEqual(unresolved.selected_start_point_id, "")
+        self.assertEqual(unresolved.selected_end_point_id, "")
+        self.assertTrue(unresolved.candidate_points)
+        self.assertFalse(any(point.recommended_for for point in unresolved.candidate_points))
+        self.assertFalse(
+            any(
+                point.point_type
+                in {"waler_intersection", "extended_axis_waler_intersection"}
+                for point in unresolved.candidate_points
+            )
+        )
+        self.assertTrue(formal.recommended_start_point_id)
+        self.assertTrue(formal.recommended_end_point_id)
+
+    def test_project_rows_use_the_single_formal_brace_predicate(self):
+        walers = (
+            waler("W1", (-100.0, -500.0), (-100.0, 500.0)),
+            waler("W2", (1100.0, -500.0), (1100.0, 500.0)),
+        )
+        formal = brace(from_waler="W1", to_waler="W2")
+        unresolved = replace(brace(), id="B2", source_handles=("HB2",))
+        result = import_result(walers=walers, braces=(formal, unresolved))
+
+        rows = result.to_project_rows()
+
+        self.assertEqual(len(rows["braces"]), 1)
+        self.assertEqual(rows["braces"][0]["FromWaler"], "W1")
+        self.assertEqual(rows["braces"][0]["ToWaler"], "W2")
+
+    def test_partial_defensive_brace_is_excluded_from_review_and_waler_evidence(self):
+        selected_waler = waler("W1", (-100.0, -500.0), (-100.0, 500.0))
+        partial = brace(from_waler="W1", to_waler="")
+        result = import_result(walers=(selected_waler,), braces=(partial,))
+
+        summary = build_waler_connected_member_summary(result, "W1")
+        normal = support_side_normal(selected_waler, (), (partial,))
+        rows = result.to_project_rows()
+
+        self.assertEqual(summary.brace_ids, ())
+        self.assertIsNone(normal)
+        self.assertEqual(rows["braces"], [])
 
 
 class PureBraceWalerResolutionTests(unittest.TestCase):

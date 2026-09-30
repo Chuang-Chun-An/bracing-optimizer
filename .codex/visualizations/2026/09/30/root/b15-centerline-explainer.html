@@ -1,0 +1,86 @@
+<section id="b15-centerline-explainer" aria-label="B15 中心線端點辨識示意">
+  <div class="viz-controls" aria-label="顯示規則">
+    <button type="button" class="btn btn-primary" id="b15-current" aria-pressed="true">現行：投影包絡端點</button>
+    <button type="button" class="btn" id="b15-midpoint" aria-pressed="false">端板中點規則</button>
+  </div>
+  <svg class="b15-chart" viewBox="0 0 740 440" role="img" aria-labelledby="b15-title b15-desc">
+    <title id="b15-title">B15 外框、中心線與 W18 接觸端比較</title>
+    <desc id="b15-desc">斜撐兩條外側線形成外框。現行規則將全體頂點沿構件方向投影，產生 P02；端板中點規則則以 P04 和 P06 的中點 P07 作為終端。</desc>
+    <defs>
+      <marker id="b15-arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="var(--muted-foreground)"></path></marker>
+    </defs>
+    <line x1="78" y1="372" x2="686" y2="372" class="b15-waler"></line>
+    <text x="696" y="376" class="b15-label">W18 內側面</text>
+    <polygon points="106,130 506,372 536,372 100,106" class="b15-body"></polygon>
+    <line x1="106" y1="130" x2="506" y2="372" class="b15-side"></line>
+    <line x1="100" y1="106" x2="536" y2="372" class="b15-side"></line>
+    <line x1="506" y1="372" x2="536" y2="372" class="b15-cap"></line>
+    <line x1="103" y1="118" x2="683" y2="418" class="b15-current-line"></line>
+    <line x1="103" y1="118" x2="521" y2="372" class="b15-mid-line"></line>
+    <line x1="506" y1="390" x2="536" y2="390" class="b15-measure"></line>
+    <line x1="506" y1="385" x2="506" y2="395" class="b15-measure"></line>
+    <line x1="536" y1="385" x2="536" y2="395" class="b15-measure"></line>
+    <text x="478" y="416" class="b15-label">P04</text>
+    <text x="538" y="416" class="b15-label">P06</text>
+    <circle cx="103" cy="118" r="6" class="b15-start"></circle>
+    <text x="42" y="100" class="b15-label">P01：起端</text>
+    <circle cx="521" cy="372" r="7" class="b15-correct"></circle>
+    <text x="458" y="350" class="b15-label">P07：P04/P06 中點</text>
+    <circle cx="550" cy="390" r="7" class="b15-current-point"></circle>
+    <text x="557" y="409" class="b15-label">P02：現行端點</text>
+    <line x1="550" y1="383" x2="550" y2="378" class="b15-offset" marker-end="url(#b15-arrow)"></line>
+    <text x="568" y="365" class="b15-label">P02 與 W18 偏離</text>
+    <text x="568" y="383" class="b15-label">約 176.9 mm（Y）</text>
+    <text x="72" y="42" class="b15-heading">B15 外框與兩種終端規則</text>
+    <g class="b15-legend">
+      <line x1="84" y1="430" x2="112" y2="430" class="b15-current-line"></line><text x="120" y="435" class="b15-label">現行投影包絡中心線</text>
+      <line x1="330" y1="430" x2="358" y2="430" class="b15-mid-line"></line><text x="366" y="435" class="b15-label">端板中點中心線</text>
+    </g>
+  </svg>
+  <div class="card b15-state" id="b15-state" aria-live="polite">
+    <div class="text-muted">現行規則</div>
+    <div>兩外側線的平均橫向位置 ＋ 全部頂點的最大縱向投影 → P02</div>
+  </div>
+</section>
+<style>
+  #b15-centerline-explainer .b15-chart { display:block; width:100%; height:auto; margin-top:var(--space-3); }
+  #b15-centerline-explainer .b15-heading { fill:var(--foreground); font-weight:500; }
+  #b15-centerline-explainer .b15-label { fill:var(--foreground); font-size:13px; }
+  #b15-centerline-explainer .b15-body { fill:color-mix(in srgb, var(--viz-series-1) 16%, transparent); stroke:var(--border); stroke-width:1; }
+  #b15-centerline-explainer .b15-side { stroke:var(--foreground); stroke-width:2; }
+  #b15-centerline-explainer .b15-cap { stroke:var(--viz-series-2); stroke-width:4; }
+  #b15-centerline-explainer .b15-waler { stroke:var(--viz-series-2); stroke-width:4; }
+  #b15-centerline-explainer .b15-current-line { stroke:var(--destructive); stroke-width:3; stroke-dasharray:8 5; fill:none; }
+  #b15-centerline-explainer .b15-mid-line { stroke:var(--viz-series-1); stroke-width:3; fill:none; }
+  #b15-centerline-explainer .b15-start { fill:var(--foreground); }
+  #b15-centerline-explainer .b15-correct { fill:var(--viz-series-1); }
+  #b15-centerline-explainer .b15-current-point { fill:var(--destructive); }
+  #b15-centerline-explainer .b15-offset, #b15-centerline-explainer .b15-measure { stroke:var(--muted-foreground); stroke-width:1.5; stroke-dasharray:4 3; fill:none; }
+  #b15-centerline-explainer .b15-state { margin-top:var(--space-2); }
+  #b15-centerline-explainer.is-midpoint .b15-current-line, #b15-centerline-explainer.is-midpoint .b15-current-point, #b15-centerline-explainer.is-midpoint .b15-offset { opacity:.18; }
+  #b15-centerline-explainer.is-current .b15-mid-line, #b15-centerline-explainer.is-current .b15-correct { opacity:.28; }
+  @media (prefers-reduced-motion:no-preference) { #b15-centerline-explainer .b15-current-line, #b15-centerline-explainer .b15-mid-line, #b15-centerline-explainer .b15-current-point, #b15-centerline-explainer .b15-correct, #b15-centerline-explainer .b15-offset { transition:opacity .2s ease; } }
+</style>
+<script>
+  (() => {
+    const root = document.getElementById('b15-centerline-explainer');
+    const current = document.getElementById('b15-current');
+    const midpoint = document.getElementById('b15-midpoint');
+    const state = document.getElementById('b15-state');
+    const setMode = (mode) => {
+      const isCurrent = mode === 'current';
+      root.classList.toggle('is-current', isCurrent);
+      root.classList.toggle('is-midpoint', !isCurrent);
+      current.classList.toggle('btn-primary', isCurrent);
+      midpoint.classList.toggle('btn-primary', !isCurrent);
+      current.setAttribute('aria-pressed', String(isCurrent));
+      midpoint.setAttribute('aria-pressed', String(!isCurrent));
+      state.innerHTML = isCurrent
+        ? '<div class="text-muted">現行規則</div><div>兩外側線的平均橫向位置 ＋ 全部頂點的最大縱向投影 → P02</div>'
+        : '<div class="text-muted">應採的端板規則</div><div>終端兩側邊端點 P04、P06 的中點 → P07，且 P07 位於 W18 內側面。</div>';
+    };
+    current.addEventListener('click', () => setMode('current'));
+    midpoint.addEventListener('click', () => setMode('midpoint'));
+    setMode('current');
+  })();
+</script>

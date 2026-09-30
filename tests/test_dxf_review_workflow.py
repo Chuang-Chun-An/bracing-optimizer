@@ -27,7 +27,7 @@ from dxf_import.dialog import (
     DXFImportDialog,
     DXFImportDialogOutcome,
 )
-from dxf_import.importer import DXFImporter
+from dxf_import.importer import DXFImporter, Y29_LAYER_MAPPING
 from dxf_import.models import (
     CoordinateSystem,
     DXFImportError,
@@ -219,12 +219,10 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         self.assertFalse(restoring)
         workflow.commit_source_exclusion_plan(exclusion_plan)
         excluded_brace = workflow.world_result.braces[0]
-        self.assertTrue(bool(excluded_brace.from_waler) ^ bool(excluded_brace.to_waler))
-        active_waler_ids = {member.id for member in workflow.world_result.walers}
-        self.assertTrue(
-            {excluded_brace.from_waler, excluded_brace.to_waler} - {""}
-            <= active_waler_ids
-        )
+        self.assertEqual((excluded_brace.from_waler, excluded_brace.to_waler), ("", ""))
+        self.assertFalse(excluded_brace.has_formal_connection)
+        self.assertEqual(excluded_brace.recommended_start_point_id, "")
+        self.assertEqual(excluded_brace.recommended_end_point_id, "")
         self.assertFalse(workflow.is_review_item_confirmed(brace_item))
 
         excluded_waler_item = next(
@@ -262,6 +260,74 @@ class DxfReviewWorkflowTests(unittest.TestCase):
             ("W1", "W2"),
         )
         self.assertNotIn("brace_waler_connections", state)
+
+    @unittest.skipUnless(
+        (Path(__file__).resolve().parents[1] / "Y29_test.dxf").is_file(),
+        "Y29 DXF test asset unavailable",
+    )
+    def test_y29_b15_exclusion_restore_invalidates_formal_pair_and_confirmation(self):
+        source = Path(__file__).resolve().parents[1] / "Y29_test.dxf"
+        importer = DXFImporter(source).read()
+        roles = {
+            layer: DXFImportDialog.USE_TO_ROLE[label]
+            for layer, label in Y29_LAYER_MAPPING.items()
+            if layer in importer.layer_names
+        }
+        workflow = DXFReviewWorkflow(importer, source)
+        workflow.recognize(roles)
+        initial = next(
+            brace
+            for brace in workflow.world_result.braces
+            if "71E" in brace.source_handles
+        )
+        self.assertFalse(initial.has_formal_connection)
+
+        duplicate_waler_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "waler" and "69F" in item.source_handles
+        )
+        exclusion_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            duplicate_waler_item
+        )
+        self.assertFalse(restoring)
+        workflow.commit_source_exclusion_plan(exclusion_plan)
+
+        resolved = next(
+            brace
+            for brace in workflow.world_result.braces
+            if "71E" in brace.source_handles
+        )
+        self.assertTrue(resolved.has_formal_connection)
+        resolved_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "brace" and item.member_id == resolved.id
+        )
+        self.assertTrue(workflow.confirm(resolved_item))
+        self.assertTrue(workflow.is_review_item_confirmed(resolved_item))
+
+        excluded_item = next(
+            item
+            for item in workflow.review_items
+            if item.status == "excluded" and "69F" in item.source_handles
+        )
+        restore_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            excluded_item
+        )
+        self.assertTrue(restoring)
+        workflow.commit_source_exclusion_plan(restore_plan)
+
+        restored = next(
+            brace
+            for brace in workflow.world_result.braces
+            if "71E" in brace.source_handles
+        )
+        self.assertFalse(restored.has_formal_connection)
+        self.assertEqual((restored.from_waler, restored.to_waler), ("", ""))
+        self.assertEqual(restored.recommended_start_point_id, "")
+        self.assertEqual(restored.recommended_end_point_id, "")
+        self.assertFalse(workflow.is_review_item_confirmed(resolved_item))
 
     def test_explicit_workflow_is_one_way(self):
         app = self.app()
@@ -474,6 +540,13 @@ class DxfReviewWorkflowTests(unittest.TestCase):
                 "reason": "user_excluded",
             }],
             review_confirmations={"strut:HS": "ABC123"},
+            column_association_decisions=[{
+                "column_source_handles": ["HC25"],
+                "candidate_strut_sources": [["HS20"], ["HS35"]],
+                "selected_strut_sources": [["HS35"]],
+                "source_fingerprint": source_file_fingerprint(self.source),
+                "column_display_id": "C25",
+            }],
         )
         app.dxf_asset_status_report = DxfAssetManager().runtime_report(self.source)
 
@@ -499,6 +572,10 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(
             loaded.dxf_last_import_debug["review_confirmations"],
             {"strut:HS": "ABC123"},
+        )
+        self.assertEqual(
+            loaded.dxf_last_import_debug["column_association_decisions"],
+            saved["dxf_import_state"]["column_association_decisions"],
         )
         self.assertEqual(resume_source, saved_path.parent / "source" / "source.dxf")
 
@@ -1087,6 +1164,115 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(
             app._current_dxf_workflow_status(),
             DxfWorkflowStatus.COMPLETED,
+        )
+
+    @unittest.skipUnless(
+        (Path(__file__).resolve().parents[1] / "Y29_test.dxf").is_file(),
+        "Y29 DXF test asset unavailable",
+    )
+    def test_y29_overlap_truth_rebuilds_across_exclusion_restore_and_resume(self):
+        source = Path(__file__).resolve().parents[1] / "Y29_test.dxf"
+        importer = DXFImporter(source).read()
+        roles = {
+            layer: DXFImportDialog.USE_TO_ROLE[label]
+            for layer, label in Y29_LAYER_MAPPING.items()
+            if layer in importer.layer_names
+        }
+        workflow = DXFReviewWorkflow(importer, source)
+        workflow.recognize(roles)
+
+        self.assertTrue(
+            any(
+                message.code == "WALER_OVERLAP_COMPETITION"
+                and {"69C", "721"}.issubset(set(message.source_handles))
+                for message in workflow.world_result.messages
+            )
+        )
+        self.assertEqual(
+            {
+                waler.contact_face_state
+                for waler in workflow.world_result.walers
+                if {"69C", "721"} & set(waler.source_handles)
+            },
+            {"formal"},
+        )
+
+        w17_item = next(
+            item
+            for item in workflow.review_items
+            if item.role == "waler" and "69C" in item.source_handles
+        )
+        exclude_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            w17_item
+        )
+        self.assertFalse(restoring)
+        workflow.commit_source_exclusion_plan(exclude_plan)
+
+        remaining = next(
+            waler
+            for waler in workflow.world_result.walers
+            if "721" in waler.source_handles
+        )
+        self.assertEqual(remaining.contact_face_state, "formal")
+        self.assertFalse(
+            any(
+                message.code
+                in {"WALER_SOURCE_OVERLAP", "WALER_OVERLAP_COMPETITION"}
+                and {"69C", "721"} & set(message.source_handles)
+                for message in workflow.world_result.messages
+            )
+        )
+
+        excluded_item = next(
+            item
+            for item in workflow.review_items
+            if item.status == "excluded" and "69C" in item.source_handles
+        )
+        restore_plan, restoring, _identity = workflow.plan_source_exclusion_for_item(
+            excluded_item
+        )
+        self.assertTrue(restoring)
+        workflow.commit_source_exclusion_plan(restore_plan)
+
+        self.assertTrue(
+            any(
+                message.code == "WALER_OVERLAP_COMPETITION"
+                and {"69C", "721"}.issubset(set(message.source_handles))
+                for message in workflow.world_result.messages
+            )
+        )
+        self.assertEqual(
+            {
+                waler.contact_face_state
+                for waler in workflow.world_result.walers
+                if {"69C", "721"} & set(waler.source_handles)
+            },
+            {"formal"},
+        )
+
+        paused_state = workflow.serialize_review_state(layer_roles=roles)
+        resumed = DXFReviewWorkflow(
+            importer,
+            source,
+            initial_state=paused_state,
+            resume_review=True,
+        )
+        resumed.recognize(roles)
+
+        self.assertTrue(
+            any(
+                message.code == "WALER_OVERLAP_COMPETITION"
+                and {"69C", "721"}.issubset(set(message.source_handles))
+                for message in resumed.world_result.messages
+            )
+        )
+        self.assertEqual(
+            {
+                waler.contact_face_state
+                for waler in resumed.world_result.walers
+                if {"69C", "721"} & set(waler.source_handles)
+            },
+            {"formal"},
         )
 
 

@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import math
 import shutil
 import tempfile
 import unittest
@@ -460,10 +461,20 @@ class SourceExclusionTests(unittest.TestCase):
         for layer in ("WALER", "STRUT", "CORNER"):
             document.layers.add(layer)
         model = document.modelspace()
-        model.add_line((0, 0), (1000, 0), dxfattribs={"layer": "WALER"})
-        model.add_line((0, 1000), (1000, 1000), dxfattribs={"layer": "WALER"})
-        model.add_line((500, 0), (500, 1000), dxfattribs={"layer": "STRUT"})
-        model.add_line((0, 0), (500, 500), dxfattribs={"layer": "CORNER"})
+        model.add_line((0, 0), (2000, 0), dxfattribs={"layer": "WALER"})
+        model.add_line((0, 2000), (2000, 2000), dxfattribs={"layer": "WALER"})
+        model.add_line((1000, 0), (1000, 2000), dxfattribs={"layer": "STRUT"})
+        offset = 150 / math.sqrt(2)
+        model.add_lwpolyline(
+            [
+                (offset, -offset),
+                (1000 + offset, 1000 - offset),
+                (1000 - offset, 1000 + offset),
+                (-offset, offset),
+            ],
+            close=True,
+            dxfattribs={"layer": "CORNER"},
+        )
         roles = {
             "WALER": "waler",
             "STRUT": "strut",

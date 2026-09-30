@@ -560,7 +560,7 @@ class HatchWalerImporterAdapterTests(unittest.TestCase):
             all(waler.source_entity_types == ("HATCH",) for waler in result.walers)
         )
         self.assertTrue(
-            all(waler.recognition_method == "inner_boundary_line" for waler in result.walers)
+            all(waler.recognition_method == "hatch_rc_outline_axis" for waler in result.walers)
         )
         self.assertEqual(
             {round((waler.start[1] + waler.end[1]) / 2.0) for waler in result.walers},

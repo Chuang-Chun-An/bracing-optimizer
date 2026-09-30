@@ -611,6 +611,28 @@ class ReviewRecoveryPlannerTests(unittest.TestCase):
             captured["recognized_roles"],
             {"WALER": "waler", "STRUT": "strut", "NEW": "ignore"},
         )
+
+    def test_changed_content_column_decision_is_review_only_not_transferred(self):
+        state, candidate = self.compatible_fixture()
+        state["column_association_decisions"] = [{
+            "column_display_id": "C25",
+            "column_source_handles": ["OLD-C"],
+            "candidate_strut_sources": [["OLD-S1"], ["OLD-S2"]],
+            "selected_strut_sources": [["OLD-S2"]],
+            "source_fingerprint": "OLD",
+        }]
+        captured = {}
+
+        result = self.planner(candidate, captured).plan(
+            "candidate.dxf", "NEW", state, "BASE"
+        )
+
+        self.assertEqual(result.status, ReviewRecoveryStatus.COMPATIBLE_RECOVERY_AVAILABLE)
+        self.assertNotIn("column_association_decisions", captured["initial_state"])
+        self.assertNotIn("column_association_decisions", result.plan.stage.recovered_state)
+        entries = [entry for entry in result.summary.entries if entry.subject_kind == "column_association"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].category, RecoveryCategory.DISABLED)
         initial = captured["initial_state"]
         self.assertEqual(initial["coordinate_system"]["mode"], "local")
         self.assertEqual(initial["coordinate_system"]["origin_x"], 12.5)

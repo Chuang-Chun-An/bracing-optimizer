@@ -11,10 +11,12 @@ from dxf_import.models import (
     CandidatePoint,
     CoordinateSystem,
     DoubleSupportCandidate,
+    DoubleSupportQualificationIssue,
     DXFImportResult,
     GeometryTolerances,
     SelectionState,
     Strut,
+    StrutTerminalTopology,
     Waler,
 )
 from dxf_import.review_workflow import DXFReviewWorkflow, ReviewMutation
@@ -305,6 +307,155 @@ class DxfReviewSettingsTests(unittest.TestCase):
         staged = dialog._double_support_candidates_for_settings()
 
         self.assertFalse(staged[0].accepted)
+
+    def test_double_support_settings_surface_pending_but_hide_incompatible(self):
+        issue = DoubleSupportQualificationIssue(
+            code="AMBIGUOUS_WALER_CONNECTION",
+            member_id="S1",
+            member_source_handles=("HA",),
+            terminal_name="start",
+            competing_waler_source_handles=(("WA",), ("WB",)),
+            message="端點圍令尚未唯一。",
+        )
+        pending = DoubleSupportCandidate(
+            "DS1", "S1", "S2", 1000.0, 0.0, 1.0, 0.0, 1.0,
+            qualification_status="pending_waler",
+            issues=(issue,),
+        )
+        incompatible = replace(
+            pending,
+            id="DS2",
+            qualification_status="incompatible_waler",
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.result = _result(
+            double_support_candidates=(pending, incompatible)
+        )
+
+        staged = dialog._double_support_candidates_for_settings()
+
+        self.assertEqual(staged, (pending,))
+        self.assertEqual(
+            dialog._double_support_status_text(pending),
+            "警告：圍令待確認",
+        )
+        detail = dialog._double_support_detail_text(pending)
+        self.assertIn("S1 start", detail)
+        self.assertIn("WA, WB", detail)
+
+    def test_workflow_ignores_pending_candidate_decision_mutation(self):
+        struts = (_strut("S1", "HA"), _strut("S2", "HB", 1000.0))
+        pending = DoubleSupportCandidate(
+            "DS1", "S1", "S2", 1000.0, 0.0, 1.0, 0.0, 1.0,
+            qualification_status="pending_waler",
+        )
+        result = _result(struts=struts, double_support_candidates=(pending,))
+        workflow = DXFReviewWorkflow(
+            SimpleNamespace(
+                tolerances=GeometryTolerances(),
+                source_fingerprint=result.source_fingerprint,
+                layer_names=result.layer_names,
+            ),
+            "settings.dxf",
+            initial_world_result=result,
+        )
+        malformed = replace(pending)
+        object.__setattr__(malformed, "accepted", True)
+
+        mutation = workflow.commit_double_support_candidates((malformed,))
+
+        self.assertFalse(mutation.changed)
+        self.assertEqual(workflow.double_support_decisions, {})
+        self.assertFalse(
+            workflow.world_result.double_support_candidates[0].accepted
+        )
+
+    def test_workflow_merges_eligible_delta_without_dropping_pending_diagnostic(self):
+        struts = (
+            _strut("S1", "HA"),
+            _strut("S2", "HB", 1000.0),
+            replace(
+                _strut("S3", "HC", -1000.0),
+                terminal_topology_authoritative=True,
+                terminal_topology=(
+                    StrutTerminalTopology(
+                        "start",
+                        reason_code="AMBIGUOUS_WALER_CONNECTION",
+                        competing_waler_source_handles=(("WA",), ("WX",)),
+                    ),
+                    StrutTerminalTopology("end", ("W2",)),
+                ),
+            ),
+        )
+        eligible = DoubleSupportCandidate(
+            "DS1", "S1", "S2", 1000.0, 0.0, 1.0, 0.0, 1.0
+        )
+        pending = DoubleSupportCandidate(
+            "DS2", "S1", "S3", 1000.0, 0.0, 1.0, 0.0, 1.0,
+            qualification_status="pending_waler",
+        )
+        result = _result(
+            struts=struts,
+            double_support_candidates=(eligible, pending),
+        )
+        workflow = DXFReviewWorkflow(
+            SimpleNamespace(
+                tolerances=GeometryTolerances(),
+                source_fingerprint=result.source_fingerprint,
+                layer_names=result.layer_names,
+            ),
+            "settings.dxf",
+            initial_world_result=result,
+        )
+
+        mutation = workflow.commit_double_support_candidates(
+            (replace(eligible, accepted=False),)
+        )
+
+        self.assertTrue(mutation.changed)
+        self.assertEqual(
+            [item.qualification_status for item in workflow.world_result.double_support_candidates],
+            ["eligible", "pending_waler"],
+        )
+
+    def test_pending_row_toggle_is_a_presentation_no_op(self):
+        pending = DoubleSupportCandidate(
+            "DS1", "S1", "S2", 1000.0, 0.0, 1.0, 0.0, 1.0,
+            qualification_status="pending_waler",
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.double_support_settings_candidates = (pending,)
+        dialog.double_support_settings_tree = SimpleNamespace(
+            selection=lambda: ("DS1",)
+        )
+        dialog._refresh_double_support_settings_tree = lambda: None
+
+        dialog._toggle_double_support_settings_candidate()
+
+        self.assertEqual(dialog.double_support_settings_candidates, (pending,))
+
+    def test_reopening_settings_projects_latest_canonical_status(self):
+        eligible = DoubleSupportCandidate(
+            "DS1", "S1", "S2", 1000.0, 0.0, 1.0, 0.0, 1.0
+        )
+        pending = replace(
+            eligible,
+            qualification_status="pending_waler",
+            accepted=False,
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.result = _result(double_support_candidates=(eligible,))
+        self.assertEqual(
+            dialog._double_support_candidates_for_settings()[0].qualification_status,
+            "eligible",
+        )
+
+        dialog.result = _result(double_support_candidates=(pending,))
+
+        self.assertEqual(
+            dialog._double_support_candidates_for_settings()[0].qualification_status,
+            "pending_waler",
+        )
 
     def test_high_impact_coordinate_apply_uses_confirmation_boundary(self):
         candidate = _candidate("W1-P1", "W1", (10.0, 20.0))

@@ -18,6 +18,113 @@
 
 本文件以目前實作為主。尚未實作、但已由產品確認的行為會標示為 `Confirmed Desired Behavior`，不得解讀為目前 runtime 已有的功能。
 
+### OpenSpec change 文件閱讀方式
+
+OpenSpec change 的文件有不同責任，不應把 `proposal.md`、`design.md` 與
+`spec.md` 當成同一份文件的不同版本：
+
+| 文件 | 主要用途 | 何時閱讀 |
+| --- | --- | --- |
+| `proposal.md` | 用白話說明問題、目標流程、範圍與不變事項 | 判斷是否採用這個方向時先讀 |
+| `design.md` | 說明技術方案、架構對齊、取捨與被拒絕的替代方案 | 準備實作，或流程仍可能調整時閱讀 |
+| 相關 `spec.md` | 定義可觀察行為、工程規則、邊界與失敗語意 | 實作或修改測試前閱讀直接相關的區段 |
+| `tasks.md` | 定義實作依賴順序與驗證條件 | 開始執行 change 時閱讀 |
+
+建議順序為：
+
+```text
+proposal.md
+    ↓ 確認方向
+design.md
+    ↓ 確認方案與取捨
+相關 spec.md
+    ↓ 確認精確行為與邊界
+tasks.md
+    ↓ 依序實作與驗證
+```
+
+不需要為了理解一個 change 而閱讀所有既有 spec。Proposal 應包含
+「閱讀指引」，列出本次 change 直接相關的 capability、Requirement 或
+scenario；若缺少閱讀指引，應先從 `proposal.md` 的 Modified Capabilities
+與 scope 推導最小閱讀範圍。
+
+Proposal 的開頭應先提供 30 秒摘要，至少包含：
+
+- 現在遇到的問題。
+- 改完後使用者或工程流程會看到的主要變化。
+- 一段現況到目標的白話流程。
+- 哪些行為維持不變。
+
+必要的 domain term 應在第一次出現時用白話解釋。候選排序、資料欄位、
+state machine、fallback 等實作細節，應留在 `design.md` 或 `spec.md`，
+不要讓 proposal 成為 spec 的縮寫。
+
+### OpenSpec artifact 的固定輸出結構
+
+上述閱讀方式必須實際輸出在文件內，而不是只由 Agent 在對話中提醒。
+未來產出的 OpenSpec 文件應遵守以下結構：
+
+#### `proposal.md`
+
+文件開頭依序提供：
+
+1. `## 閱讀導航`：用表格列出 P0「現在必讀」、P1「實作前閱讀」、P2「需要時再讀」。每一列都要包含要回答的問題、文件／段落與閱讀目的。
+2. `## 快速摘要`：用 3～5 點說明問題、決定、主要流程變化與不變事項。
+3. `## 現況與目標`：用 Before／After 或現況／目標對照。
+4. `## 主要流程`：用短流程圖或編號步驟描述使用者可理解的流程。
+5. `## 不變事項`：列出本次 change 明確不會改變的行為。
+
+之後再放 OpenSpec 標準的 `Why`、`What Changes`、`Capabilities` 與
+`Impact`。若存在多份相關 spec，必須另外列出「本次先不用看」的
+文件或區段；不要要求使用者閱讀整個 `openspec/specs/`。
+
+#### `design.md`
+
+文件開頭依序提供：
+
+1. `## 閱讀導航`：指出哪些 Decision 是實作者現在必須理解的，哪些是只有遇到特定模組或風險時才需要閱讀。
+2. `## 方案摘要`：用一段文字或流程圖把技術方案對應回 proposal 的主要流程。
+3. `## 決策對照`：列出 Decision、選擇原因、被拒絕的替代方案，以及會影響哪些 spec／task。
+
+詳細的 Architecture Alignment、state ownership、相容性、風險與
+Migration Plan 放在後面，不讓讀者一開始就被實作細節淹沒。
+
+#### `spec.md`
+
+在 `Purpose`（新 capability）或 `## ADDED / MODIFIED Requirements`
+之前提供 `## 閱讀導航`，把 Requirements 分成：
+
+- 這次行為一定要理解的 Requirements。
+- 只有修改特定模組或測試時才需要閱讀的 Requirements。
+- 本次 change 不涉及、可以先跳過的 Requirements。
+
+每個 Requirement 仍須保留完整的 SHALL／MUST 規則與 WHEN／THEN
+Scenario；閱讀導航只是降低閱讀成本，不得刪除規範內容。
+
+#### `tasks.md`
+
+開頭提供 `## 實作前閱讀`，列出開始每個 task group 前必須閱讀的
+proposal、design Decision 與 spec Requirement；每個 task 另外標示其
+對應的行為或驗證條件。
+
+如果某一份 artifact 不需要建立，應在上一層文件的閱讀導航中明確寫出
+「不需要此文件」及原因，而不是讓使用者自行猜測。
+
+### OpenSpec archive 與開發歷程
+
+Codex 透過 `.agents/skills/openspec-archive-change/SKILL.md` 完成 archive move 後，
+會呼叫專案的 development-history updater，將 archived change 的日期、名稱、路徑、
+完成摘要、capability 與實際驗證狀態寫入 `docs/DEVELOPMENT_HISTORY.md`。新條目位於
+「Codex／OpenSpec 封存紀錄」區塊最上方；更新器不得修改人工補充或截至
+2026/09/28 早上的起始歷史。
+
+相同 archived change 可安全重跑補寫，不會產生重複條目。若 archive 已成功但開發
+歷程寫入失敗，archive 維持成功，Codex 必須回報「開發歷程待補寫」、archive 路徑、
+錯誤原因與重跑方式，不得將 change 移回 active changes。
+
+此自動更新由 Codex archive workflow 保證。直接執行原生 `openspec archive` CLI
+不包含此專案 hook，也不會自動執行 Git、GPT、Copilot、LINE 或其他外部平台操作。
+
 ## 2. Workflow State Overview
 
 ### 2.1 Authoritative state
@@ -199,6 +306,16 @@ Recognition canonical geometry 維持 WCS。Local coordinate 是透過 `Coordina
 
 Dialog outcome 主要為 `pause` 或 `complete`。完成 Review 不等於 Dialog 已修改 `ProjectDataModel`；Project mutation 由 Main／Application boundary 執行。
 
+#### Waler contact-face canonical finalization
+
+Waler、Strut 與 Brace 先各自完成 source recognition；Waler recognition 保留 source-supported provisional axis、完整 component envelope、outer faces 與 provenance，不在此階段以全域 endpoint 距離投票選接觸面。Importer 在 Column source recognition 完成後、建立 Joist context 前，使用已完成的 immutable member facts 建立 terminal-to-Waler identity，再由 provisional 交會點朝 member 本體的方向判定支撐側，選擇該側 envelope 的最外實體表面。
+
+一輪辨識先建立 canonical terminal relations，再以這些 relations 完成 Waler contact face，最後才建立 runtime-only Brace member verdict。唯一候選標為 `unique`，同一 ambiguity set 內的 best 與 competitors 都標為 `competing`；兩者共用同一份 provisional 交點、body direction 與來源 provenance，不另建幾何 truth。Waler 判側採 unique-first：只要有可靠 `unique` evidence 就忽略相反的 `competing` side authority並留下 warning；沒有可靠 `unique` 時才使用 `competing` evidence，同側可完成正式接觸面，兩側衝突才是 contact-face ambiguity。Brace／Strut 正式 endpoint 與 connection 始終只消費 `unique` relations。member verdict 不回頭改變 contact-face outcome，依賴方向固定為 `terminal relations → Waler contact face → unique-only member verdict`，避免循環判定。
+
+同一份 staged contact resolution 同時提交正式 Waler line、contextual Strut endpoint 與完整 Brace connection；CandidatePoint、association、diagnostics、CornerBrace refinement 及 Joist context 只消費已提交結果，不各自重算內外側。一般 Strut 保留既有逐端 direct relation，BIM contextual Strut 保留已選 source identity；Brace 仍使用 250 mm direct／600 mm outward-extension eligibility，但只有兩端各自唯一、連到不同 Waler、兩個 selected contact faces 都為 formal、來源軸與兩面都有合法有限交點且提交後長度合法時，才一次提交兩端 geometry 與 pair identities。任一條件失敗時整支 Brace unresolved，不保留部分正式 geometry 或 connection。若兩個 terminal relations 在數值精度內無法區分，系統回報 blocking ambiguity，不以 Waler ID、handle、幾何候選點或 collection order 打破平手。
+
+完整 envelope 無法唯一建立、authoritative evidence set 沒有可靠方向、或同一 authority level 的可靠 evidence 同時指向兩側時，系統建立 blocking Review problem。Terminal identity ambiguity 仍是獨立的 blocking member problem，但不再單獨迫使已有一致 side evidence 的 Waler 降為 provisional。Provisional axis 只供 preview／diagnostic，不代替正式接觸面；流程不使用全域 framing centroid、row order、source entity order或最先出現的平行線強行選側。Source Exclusion／Restore、manual replay、confirmation invalidation 與 Pause／Resume 均從目前 source facts 重新建立 resolution，不保存第二份 Project／Solver schema。
+
 #### BIM Block Strut／Brace role-aware recognition
 
 一般 DXF recognition 仍是預設路徑。只有位於 Strut 或 Brace role layer、具有有效 root handle 的 root `INSERT`，才會在跨來源 geometry merge 前依自己的 role 獨立進入 BIM component-like 判定；其他 role 不進入此路徑。Nested INSERT 會遞迴展開並套用 insertion、rotation、scale 與 OCS → WCS transform；child entity 即使位於 Layer 0，role 仍由最外層 root layer 決定，provenance 則保留最外層 root handle。
@@ -215,23 +332,33 @@ Brace 重用同一套 pure WCS fragment／topology evidence，但使用 Brace ro
 - `recognized`：只建立一個 role-correct、使用完整工程軸的 Strut 或 Brace candidate，並保留 root source identity。
 - `failed`／`ambiguous`：建立 blocking recognition problem 與 unresolved ReviewItem，不回退到局部 fragment recognition。
 
-不同 root INSERT 即使共線也不會合併。Brace whole-axis recognition 完成後，才進入有限 Waler segment 的 endpoint connection 流程：每個端點先沿用既有 `connection_tolerance_mm = 250 mm` 內的 direct snap；只有 `selection_source == "auto"` 且仍未連接的端點，才沿既有可靠 Brace 軸向外搜尋 finite Waler segment 的實際交點。軸向 extension distance `<= 600 mm` 時，唯一最近交點可成為正式 endpoint 並建立 `FromWaler`／`ToWaler`；`> 600 mm` 的交點不採用，來源支持的 endpoint 維持不變。600 mm 是 Brace 專用的 automatic connection safety boundary，不會放寬 direct snap 或其他 member role。系統亦不採用 inward、Waler 無限延長線或改變 Brace 角度的解。距離差 `<= ambiguous_connection_delta_mm` 的最近合法多解，以及兩端連到同一 Waler，均為 blocking connection error。零端或單端沒有 600 mm 內合法交點時，仍分別保留既有 `BRACE_NOT_CONNECTED`／`BRACE_ONE_END_NOT_CONNECTED`。
+不同 root INSERT 即使共線也不會合併。Brace whole-axis recognition 完成後，才進入有限 Waler segment 的 endpoint connection 流程：每個端點先沿用既有 `connection_tolerance_mm = 250 mm` 內的 direct 判定；只有 `selection_source == "auto"` 且該端沒有 direct candidate，才沿既有可靠 Brace 軸向外搜尋 finite Waler segment 的實際交點。direct 若有多解即為 blocking ambiguity，不得改走 extension。軸向 extension distance `<= 600 mm` 時，唯一最近交點才具備 terminal eligibility；`> 600 mm` 的交點不採用。600 mm 是 Brace 專用的 automatic connection safety boundary，不會放寬 direct 判定或其他 member role。系統亦不採用 inward、Waler 無限延長線或改變 Brace 角度的解。距離差 `<= ambiguous_connection_delta_mm` 的最近合法多解，以及兩端連到同一 Waler，均為 blocking connection error。零端或單端沒有合法關係時，仍使用既有 `BRACE_NOT_CONNECTED`／`BRACE_ONE_END_NOT_CONNECTED` diagnostics，但正式結果一律是整支 Brace unresolved。
 
-上述 extension 只延長 formal connection geometry，不反向改寫 source-supported recognition axis、辨識方法、寬度或 provenance。成功端點會保留 Brace 與 Waler source handles 的 candidate-point provenance；自動 extension candidates 也以 source-supported recognition line 為距離原點，不會從已延伸的 formal endpoint 再次連續延伸。未成功端點維持原 source-supported endpoint。人工 Candidate Point／CAD 工程線不會自動延伸，但仍可使用既有 direct snap。Source Exclusion／Restore、recognition rebuild、confirmation invalidation 與 Pause／Resume 都重新推導 connection outcome，不保存另一份持久化 Waler connection truth。
+上述 extension 只產生 terminal evidence，不反向改寫 source-supported recognition axis、辨識方法、寬度或 provenance。完整 resolved 時，兩端才一起採用 Brace 軸線與各自 Waler selected formal contact face 的有限交點；unresolved 時保留完整 source-supported axis 供 preview／evidence，但 Candidate Point 不建立 recommendation／selection，也不提交任何 Waler pair。人工 Candidate Point／CAD 工程線不會自動延伸；重播後必須依目前 active Waler sources 與相同 direct 規則重新推導 identities，不保存舊 identity，幾何點本身不能替重疊 Waler 指定 winner。Source Exclusion／Restore、recognition rebuild、confirmation invalidation 與 Pause／Resume 都重建 terminal evidence、contact faces 與 member verdict，不保存另一份持久化 Waler connection truth。
 
 Original DXF、source geometry preview、source exclusion／restore、manual override replay、confirmation、Pause／Resume 與 `DXFImportResult → Project rows` boundary 仍沿用既有契約；BIM child metadata 不進入 `ProjectDataModel`。一般非 BIM Brace、非 HATCH Waler 與其他 role 的辨識規則維持不變。Guided Recognition 仍是未來需求。
+
+#### BIM Joist Column-qualified terminal residual recovery
+
+Beam-role root `INSERT` 先依既有 whole-source 強證據建立雙 C base axes；只有同一組 axes 已由 same-Strut、opposite-side、`518 ± 5 mm` spacing 與 Column midpoint `±2 mm` 唯一建立 paired relation，才會開啟 Column-qualified terminal recovery。系統從 formal Column center 沿既有 Joist 軸朝該 terminal 外側使用 signed `0～700 mm` inclusive window，重新檢查同 root、同方向且可唯一對齊既有六條 longitudinal rail bands 的短 fragments；700 mm 只限制候選 evidence，不是固定延長量，也不放寬一般 20% whole-source 門檻。
+
+兩個 sibling envelopes 必須各自至少由兩個相異 rail bands 支持，並各自從自己的來源 evidence 決定 terminal station。兩個 stations 相差 `<= 50 mm` 只確認它們屬於同一 paired terminal event；兩條 formal axes 仍分別停在自身 source-supported endpoint，不取較外值、不平均、不互相延伸。任一 sibling 缺少 quorum 時放棄該 terminal recovery並保留 base axes；兩側各自完整但不相容，或同側存在多個完整 interpretations 時，回報 blocking ambiguity。
+
+Preliminary relation只在 pure Joist service 內開啟 recovery，不進入 candidate、Review 或 Project。Recovery 後以 finalized axes 重新計算 finite contacts與pair relations；恢復後實際穿越 Strut 的接觸改為 direct finite crossing，不再同時保留 `endpoint_face_contact`。若 final proof單純不足，從base axes重建正式結果；若 finalized axes改指其他 Strut／Column identity、同時形成多個 identities或其他明確 context drift，回報blocking diagnostic，不提交preliminary truth。結果仍只透過既有 Beam geometry、crossings與associations傳遞，不新增Project persistence schema；一般 MLINE／closed-outline Beam與Brace-contact single Joist不進入此 recovery。
 
 #### HATCH RC Waler recognition
 
 位於使用者指定 Waler role 圖層的 `HATCH` 會以各自 root handle 進入 RC 圍令特殊路徑；pattern 名稱、角度、比例及 solid／patterned fill 不影響 RC 語意。Importer 從 HATCH boundary 取得 OCS → WCS 幾何，只有唯一封閉、可支持一支完整直線長條圍令的 exterior 才建立 candidate；L 形、多個不連續 exterior、曲線／無效 boundary 或多解會形成指向該 HATCH 的 blocking Review problem，不以一般外框辨識回退。此 RC 路徑不受一般構件 600 mm 最大寬度 recognition setting 限制。
 
-HATCH candidate 保留完整中心軸、實際寬度及兩條縱向邊界，再沿用既有 inner-contact-face selection 產生正式 Waler 工程線。Base recognition material 為 `RC / auto_hatch`，優先於寬度材料對應；STEP4 人工材料修改、confirmation invalidation 與 replay 仍沿用既有 workflow，Project row 仍只使用既有 `material_spec` 欄位。
+HATCH candidate 保留完整中心軸、實際寬度及兩條縱向外表面，再由共用 Waler contact-face canonical finalization 產生正式工程線；HATCH RC 不受一般構件 600 mm 最大寬度 gate 限制。Base recognition material 為 `RC / auto_hatch`，優先於寬度材料對應；STEP4 人工材料修改、confirmation invalidation 與 replay 仍沿用既有 workflow，Project row 仍只使用既有 `material_spec` 欄位。
 
 幾何等價的外框 LINE／POLYLINE 只保留為 immutable preview／diagnostic evidence，不再進入一般 Waler group merge。此 runtime claim 在 HATCH recognized、failed、ambiguous 或被排除時都會由原始 boundary 重建，因此排除 HATCH 不會讓同一外框換 identity 重新出現；無法證明等價的幾何不會被吞掉。Source Exclusion／Restore、Pause／Resume、fingerprint safety 與 completed import lifecycle 均繼續以 HATCH handle 作為 durable source identity，不新增 Project persistence schema。
 
-STEP4 提供明確觸發的 CornerBrace repair，處理 BIM 遮擋後只剩局部殘線、或自動辨識已有正式角撐但軸線不正確的情況。此工具不放寬 automatic recognizer：Workflow 先以 exact target source residual、至少一支有效的 automatic recognized primary reference，以及有限 Waler inner line／Strut centreline 交點建立 staged candidates；reference 的長度、side 與 topology 只作一致性檢查，不會複製座標或移動正式交點。只有通過全部 hard eligibility 的 candidates 會出現在 Preview；零候選只顯示拒絕原因，唯一或多個候選都必須經使用者明確 Apply 才會原子更新 Review state。
+STEP4 提供明確觸發的 CornerBrace repair，處理 BIM 遮擋後只剩局部殘線、或自動辨識已有正式角撐但軸線不正確的情況。此工具不放寬 automatic recognizer：Workflow 只從 exact target source geometry 擷取可靠方向與 positional anchor，再由 compatible automatic-primary 的唯一 CornerBraceConnection 取得 Waler offset、Strut inward station 與 endpoint topology，依 target finite Waler／Strut local frame 執行 `same_side` 或 `mirrored` transfer。Transferred endpoints 必須通過 target direction／anchor、有限構件、duplicate、minimum-length 與既有 connection validation；reference fixed length 只供 Preview、provenance 與 diagnostic comparison，不參與求點、等長修正或 eligibility。Manual repaired secondary 只能提供 consistency evidence，不能成為 geometry template。
 
-已套用 repair 會以 optional payload 保存於既有 version 2 `manual_overrides`。Same-fingerprint Pause／Resume 會重新驗證 exact repair subject、target Waler／Strut 與保存的 primary／secondary references後才 replay；失敗只回報 needs-review，不猜替代 reference。內容不同的 compatible recovery 不轉移 repair geometry：exact role/source subject 保留為 `requires_review`，來源消失或 role 改變則為 `disabled`，兩者都不能成為後續 repair reference。Cancel、關閉 Preview、stale plan 或 commit failure 均不修改 live Review truth。
+每個可預覽 candidate 唯一保存 target Waler／Strut relationship、selected automatic template、transfer mode 與 local values。Recognized replace 可呈現多組各自完整的 relationship candidates；unresolved create 只有全體 hard-eligible candidates 指向同一 relationship 時才能進入 Preview。零候選只顯示拒絕原因，唯一或多個候選都必須經使用者明確 Apply 才會原子更新 Review state。
+
+已套用 repair 會以 optional payload 保存於既有 version 2 `manual_overrides`，不提升 Review state version。新格式 same-fingerprint Pause／Resume 以保存的 selected template、transfer mode、Waler offset 與 Strut station 重建等價 candidate，並核對 adopted world line；不得改選目前最近 reference。缺少 template fields 的 legacy version 2 payload 只驗證既有 adopted world line、target identities 與 saved references，不套用新 ranking。任一 selected template、target relationship、local transfer 或工程線無法重建時只回報 needs-review。內容不同的 compatible recovery 不轉移 repair geometry 或 template decision：exact role/source subject 保留為 `requires_review`，來源消失或 role 改變則為 `disabled`，兩者都不能成為後續 repair reference。Cancel、關閉 Preview、stale plan 或 commit failure 均不修改 live Review truth。
 
 ### 5.3 Pause
 
@@ -291,6 +418,10 @@ Compatible recovery 先顯示互斥的 `preserved`／`requires_review`／`disabl
 完成 outcome 進入 Application staging 後，先以最終 reviewed Waler／Strut world geometry建立 initial Zoning suggestion，再經 `DXFImportResult.to_project_rows()`。圖層辨識、Review polling、人工確認途中與 Pause 都不執行分組。
 
 Initial grouping 使用 continuous Waler chain topology 與 deterministic transverse geometry 建立連續群組；missing／ambiguous topology 才使用保守的空間相鄰 fallback。已確認的 DXF double-support pair 是一個 ordering unit，兩 lane 取得相同初始 Zoning。這是新 rows 的 suggestion，不是後續 authoritative state。
+
+雙路支撐 Review 先以可靠、具來源支持的 Strut WCS 軸線建立完整幾何候選圖，再以同一次辨識產生的 structured terminal facts 分類為 `eligible`、`pending_waler` 或 `incompatible_waler`。`pending_waler` 會留在雙路設定中作為警告，讓使用者先處理端點圍令歧義；只有 `eligible` 且已接受的 pair 才能共享 Column／Beam association、建立 `SharedLayoutGroup`、合併 initial Zoning ordering unit 或進入 Project／Solver。任何 endpoint、Waler contact、來源排除或重新辨識造成 canonical Review state 改變時，都必須從目前 finalized axes 與 terminal facts 重建候選、量測、狀態與 one-to-one ambiguity；暫定狀態不持久化，也不得被誤存成 explicit rejection。
+
+中間柱關聯修補是 STEP4「修改工具」中的獨立人工判定流程。使用者須先在 Review 清單或圖面選取一支目前有效的正式 Column，工具才會出現；開啟後只顯示並固定該 Column，不提供全案柱清單。選取 Strut、Brace、Waler、其他角色、未形成正式 Column 的待修來源或清除選取時，工具不啟用。每次 Review selection 改變都會重評入口，但已開啟 Preview 不會切換 subject，提交仍由既有 stale-plan validation 決定。只有同一 Column 對兩支非共享 Strut 形成明確距離歧義，且來源身分唯一時才提供選項；第三支同樣接近或正式雙路共享不得任選兩支。預覽顯示兩支有限軸距離及各自 station，不修改 WCS result 或 revision。套用時重驗 revision、fingerprint、目前 geometry 與候選來源後原子提交；人工單選完整取代該柱的自動最近 association，雙選則在兩支各自軸線產生禁止點，但不建立 SharedLayoutGroup 或改變雙路資格。有效決策只解除該柱的距離歧義 warning，並保留資訊性的人工 provenance；再次選取已修 Column 可查看目前決策並撤銷。撤銷會依目前 geometry 重建自動最近關聯與原歧義警告；正式 Column 仍存在的失效決策可開啟並顯示既有 `requires_review` 原因，不套用舊 station。決策對應 Column 已不存在時不建立虛構工具 subject，但既有 Review 問題清單仍保留 `requires_review` 診斷。無關的 Waler、雙路及 source identity 問題仍在。Review state version 2 可保存此人工決策；same-fingerprint 續作重驗後才生效，changed-content compatible recovery 僅列為需重新檢查，不轉移其效果。
 
 正式 Project rows 為 Walers、Struts 與 Braces。Columns、Beams、Corner Braces 及 DXF provenance 不直接成為獨立 Project rows；Project 所需衍生資訊由正式 member fields 承接。
 

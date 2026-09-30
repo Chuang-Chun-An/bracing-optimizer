@@ -7,6 +7,10 @@ from enum import Enum
 import math
 from typing import Sequence
 
+from .beam_contacts import (
+    BEAM_MEMBER_PERPENDICULAR_TOLERANCE_DEG,
+    finite_perpendicular_contact,
+)
 from .geometry import (
     Point,
     _angle_difference_deg,
@@ -26,6 +30,8 @@ JOIST_PAIR_NOMINAL_STATION_SPACING_MM = 518.0
 JOIST_PAIR_STATION_SPACING_TOLERANCE_MM = 5.0
 JOIST_PAIR_COLUMN_MIDPOINT_TOLERANCE_MM = 2.0
 JOIST_STRUT_FACE_CONTACT_TOLERANCE_MM = 25.0
+JOIST_COLUMN_TERMINAL_WINDOW_MM = 700.0
+JOIST_TERMINAL_RAIL_BAND_QUORUM = 2
 
 # These topology values describe the confirmed Y05 double-C source shape.
 # They are recognition evidence, not material or Solver design rules.
@@ -33,7 +39,9 @@ JOIST_ENVELOPE_WIDTH_MIN_MM = 60.0
 JOIST_ENVELOPE_WIDTH_MAX_MM = 120.0
 JOIST_LONGITUDINAL_OFFSET_CLUSTER_TOLERANCE_MM = 2.0
 JOIST_MINIMUM_LONGITUDINAL_LENGTH_RATIO = 0.20
-JOIST_PERPENDICULAR_TOLERANCE_DEG = 5.0
+JOIST_PERPENDICULAR_TOLERANCE_DEG = (
+    BEAM_MEMBER_PERPENDICULAR_TOLERANCE_DEG
+)
 
 
 class JoistRecognitionStatus(str, Enum):
@@ -137,6 +145,20 @@ class _LongitudinalEvidence:
     offset: float
     minimum_station: float
     maximum_station: float
+
+
+@dataclass(frozen=True)
+class _TerminalRecoverySeed:
+    strut_id: str
+    column_id: str
+    column_point: Point
+    endpoint_index: int
+
+
+@dataclass(frozen=True)
+class _TerminalBandEndpoint:
+    band_index: int
+    station: float
 
 
 def pair_spacing_is_eligible(actual_spacing: float) -> bool:
@@ -355,26 +377,285 @@ def _source_axes(
     return (whole_axis,), ""
 
 
+def _column_point_for_relation(
+    context: JoistContextSnapshot,
+    relation: JoistPairRelation,
+) -> Point | None:
+    struts = tuple(item for item in context.struts if item.id == relation.strut_id)
+    columns = tuple(
+        item
+        for item in context.column_stations
+        if item.id == relation.column_id and item.strut_id == relation.strut_id
+    )
+    if len(struts) != 1 or len(columns) != 1:
+        return None
+    direction = _unit(struts[0].start, struts[0].end)
+    if direction is None:
+        return None
+    return (
+        struts[0].start[0] + direction[0] * columns[0].station,
+        struts[0].start[1] + direction[1] * columns[0].station,
+    )
+
+
+def _axis_endpoint_index(axis: JoistAxis, point: Point) -> int | None:
+    distances = (_distance(axis.start, point), _distance(axis.end, point))
+    closest = min(range(2), key=distances.__getitem__)
+    if distances[closest] > 1e-6:
+        return None
+    return closest
+
+
+def _terminal_recovery_seeds(
+    axes: Sequence[JoistAxis],
+    contacts: Sequence[JoistContact],
+    relations: Sequence[JoistPairRelation],
+    context: JoistContextSnapshot,
+) -> tuple[_TerminalRecoverySeed, ...]:
+    axes_by_slot = {axis.slot: axis for axis in axes}
+    seeds: list[_TerminalRecoverySeed] = []
+    for relation in relations:
+        endpoint_contacts = tuple(
+            contact
+            for contact in contacts
+            if contact.member_role == "strut"
+            and contact.member_id == relation.strut_id
+            and contact.recognition_method == "endpoint_face_contact"
+        )
+        if {item.axis_slot for item in endpoint_contacts} != {0, 1}:
+            continue
+        endpoint_indices = tuple(
+            _axis_endpoint_index(
+                axes_by_slot[contact.axis_slot],
+                contact.source_contact_point,
+            )
+            for contact in endpoint_contacts
+        )
+        if None in endpoint_indices or len(set(endpoint_indices)) != 1:
+            continue
+        column_point = _column_point_for_relation(context, relation)
+        if column_point is None:
+            continue
+        seeds.append(
+            _TerminalRecoverySeed(
+                relation.strut_id,
+                relation.column_id,
+                column_point,
+                int(endpoint_indices[0]),
+            )
+        )
+    return tuple(
+        sorted(
+            seeds,
+            key=lambda item: (
+                item.strut_id,
+                item.column_id,
+                item.endpoint_index,
+            ),
+        )
+    )
+
+
+def _terminal_interpretations(
+    endpoints: Sequence[_TerminalBandEndpoint],
+    *,
+    outward_sign: float,
+    tolerance: float,
+) -> tuple[float, ...]:
+    ordered = tuple(sorted(endpoints, key=lambda item: (item.station, item.band_index)))
+    candidate_groups: list[tuple[_TerminalBandEndpoint, ...]] = []
+    for start_index, first in enumerate(ordered):
+        group = tuple(
+            item
+            for item in ordered[start_index:]
+            if item.station - first.station <= tolerance + 1e-9
+        )
+        if len({item.band_index for item in group}) < JOIST_TERMINAL_RAIL_BAND_QUORUM:
+            continue
+        candidate_groups.append(group)
+
+    maximal_groups: list[tuple[_TerminalBandEndpoint, ...]] = []
+    for group in candidate_groups:
+        key = frozenset((item.band_index, round(item.station, 9)) for item in group)
+        if any(
+            key
+            < frozenset(
+                (item.band_index, round(item.station, 9))
+                for item in other
+            )
+            for other in candidate_groups
+        ):
+            continue
+        if group not in maximal_groups:
+            maximal_groups.append(group)
+
+    stations = {
+        (
+            min(item.station for item in group)
+            if outward_sign < 0.0
+            else max(item.station for item in group)
+        )
+        for group in maximal_groups
+    }
+    return tuple(sorted(stations))
+
+
+def _axis_with_terminal_station(
+    axis: JoistAxis,
+    direction: Point,
+    endpoint_index: int,
+    terminal_station: float,
+) -> JoistAxis:
+    normal = -direction[1], direction[0]
+    offset = _dot(axis.start, normal)
+    terminal = (
+        direction[0] * terminal_station + normal[0] * offset,
+        direction[1] * terminal_station + normal[1] * offset,
+    )
+    start, end = (
+        _ordered_line(terminal, axis.end)
+        if endpoint_index == 0
+        else _ordered_line(axis.start, terminal)
+    )
+    return JoistAxis(start, end, axis.source_width, axis.slot)
+
+
+def _recover_column_terminal_axes(
+    source: JoistRecognitionInput,
+    base_axes: Sequence[JoistAxis],
+    preliminary_contacts: Sequence[JoistContact],
+    preliminary_relations: Sequence[JoistPairRelation],
+    context: JoistContextSnapshot,
+    tolerances: GeometryTolerances,
+) -> tuple[tuple[JoistAxis, ...], str, bool]:
+    clustered = _cluster_longitudinal_evidence(source, tolerances)
+    if clustered is None:
+        return tuple(base_axes), "", False
+    direction, rail_evidence, _ambiguous = clustered
+    if len(base_axes) != 2 or len(rail_evidence) != 6:
+        return tuple(base_axes), "", False
+    seeds = _terminal_recovery_seeds(
+        base_axes,
+        preliminary_contacts,
+        preliminary_relations,
+        context,
+    )
+    if not seeds:
+        return tuple(base_axes), "", False
+
+    axes_by_slot = {axis.slot: axis for axis in base_axes}
+    reference = ((0.0, 0.0), direction)
+    normal = -direction[1], direction[0]
+    recovered = False
+    for seed in seeds:
+        outward_sign = -1.0 if seed.endpoint_index == 0 else 1.0
+        column_station = _dot(seed.column_point, direction)
+        endpoints: list[_TerminalBandEndpoint] = []
+        for primitive in source.primitives:
+            for segment in primitive.segments():
+                if (
+                    _angle_difference_deg(segment, reference)
+                    > tolerances.parallel_angle_tolerance_deg
+                ):
+                    continue
+                offset = (
+                    _dot(segment[0], normal) + _dot(segment[1], normal)
+                ) / 2.0
+                matching_bands = tuple(
+                    index
+                    for index, evidence in enumerate(rail_evidence)
+                    if abs(offset - evidence.offset)
+                    <= JOIST_LONGITUDINAL_OFFSET_CLUSTER_TOLERANCE_MM
+                )
+                if len(matching_bands) != 1:
+                    continue
+                band_index = matching_bands[0]
+                sibling_slot = 0 if band_index < 3 else 1
+                base_axis = axes_by_slot[sibling_slot]
+                base_endpoint = (
+                    base_axis.start
+                    if seed.endpoint_index == 0
+                    else base_axis.end
+                )
+                base_signed_projection = outward_sign * (
+                    _dot(base_endpoint, direction) - column_station
+                )
+                endpoint_stations = tuple(_dot(point, direction) for point in segment)
+                signed_projections = tuple(
+                    outward_sign * (station - column_station)
+                    for station in endpoint_stations
+                )
+                far_index = max(range(2), key=signed_projections.__getitem__)
+                far_signed_projection = signed_projections[far_index]
+                if not (
+                    -1e-9
+                    <= far_signed_projection
+                    <= JOIST_COLUMN_TERMINAL_WINDOW_MM + 1e-9
+                ):
+                    continue
+                if far_signed_projection <= base_signed_projection + 1e-9:
+                    continue
+                endpoints.append(
+                    _TerminalBandEndpoint(
+                        band_index,
+                        endpoint_stations[far_index],
+                    )
+                )
+
+        interpretations = tuple(
+            _terminal_interpretations(
+                tuple(item for item in endpoints if item.band_index in band_range),
+                outward_sign=outward_sign,
+                tolerance=tolerances.endpoint_tolerance_mm,
+            )
+            for band_range in (range(0, 3), range(3, 6))
+        )
+        if any(len(items) > 1 for items in interpretations):
+            return (
+                tuple(axes_by_slot[index] for index in sorted(axes_by_slot)),
+                "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+                recovered,
+            )
+        if any(not items for items in interpretations):
+            continue
+        first_station = interpretations[0][0]
+        second_station = interpretations[1][0]
+        if abs(second_station - first_station) > tolerances.endpoint_tolerance_mm + 1e-9:
+            return (
+                tuple(axes_by_slot[index] for index in sorted(axes_by_slot)),
+                "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+                recovered,
+            )
+        axes_by_slot[0] = _axis_with_terminal_station(
+            axes_by_slot[0],
+            direction,
+            seed.endpoint_index,
+            first_station,
+        )
+        axes_by_slot[1] = _axis_with_terminal_station(
+            axes_by_slot[1],
+            direction,
+            seed.endpoint_index,
+            second_station,
+        )
+        recovered = True
+
+    return (
+        tuple(axes_by_slot[index] for index in sorted(axes_by_slot)),
+        "",
+        recovered,
+    )
+
+
 def _finite_perpendicular_contact(
     axis: JoistAxis,
     member: JoistMemberReference,
 ) -> tuple[Point, float] | None:
-    member_segment = (member.start, member.end)
-    if (
-        abs(90.0 - _angle_difference_deg(axis.segment, member_segment))
-        > JOIST_PERPENDICULAR_TOLERANCE_DEG
-    ):
-        return None
-    point = _segment_intersection_point(axis.segment, member_segment, 1e-6)
-    if point is None:
-        return None
-    member_direction = _unit(*member_segment)
-    if member_direction is None:
-        return None
-    station = _dot(_vector(member.start, point), member_direction)
-    if not (-1e-6 <= station <= _length(*member_segment) + 1e-6):
-        return None
-    return point, max(0.0, min(_length(*member_segment), station))
+    return finite_perpendicular_contact(
+        axis.segment,
+        (member.start, member.end),
+        angle_tolerance_deg=JOIST_PERPENDICULAR_TOLERANCE_DEG,
+    )
 
 
 def _endpoint_face_contact(
@@ -550,6 +831,44 @@ def _pair_relations(
     return tuple(relations), ""
 
 
+def _evaluate_pair_axes(
+    axes: Sequence[JoistAxis],
+    context: JoistContextSnapshot,
+) -> tuple[
+    tuple[JoistContact, ...],
+    tuple[JoistPairRelation, ...],
+    str,
+]:
+    strut_contacts, contact_diagnostic = _contacts(
+        axes,
+        context.struts,
+        "strut",
+    )
+    if contact_diagnostic:
+        return (), (), contact_diagnostic
+    brace_contacts, _ = _contacts(axes, context.braces, "brace")
+    contacts = (*strut_contacts, *brace_contacts)
+    relations, relation_diagnostic = _pair_relations(contacts, context)
+    return tuple(contacts), relations, relation_diagnostic
+
+
+def _pair_failure_status(diagnostic_code: str) -> JoistRecognitionStatus:
+    if diagnostic_code in {
+        "BIM_JOIST_PAIR_AMBIGUOUS",
+        "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+        "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+        "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+    }:
+        return JoistRecognitionStatus.AMBIGUOUS
+    return JoistRecognitionStatus.FAILED
+
+
+def _pair_identity(
+    relations: Sequence[JoistPairRelation],
+) -> frozenset[tuple[str, str]]:
+    return frozenset((item.strut_id, item.column_id) for item in relations)
+
+
 def recognize_bim_joist(
     source: JoistRecognitionInput,
     context: JoistContextSnapshot,
@@ -570,6 +889,80 @@ def recognize_bim_joist(
             ),
             diagnostic_code=axis_diagnostic,
         )
+    if len(axes) == 2:
+        base_contacts, base_relations, diagnostic_code = _evaluate_pair_axes(
+            axes,
+            context,
+        )
+        if diagnostic_code:
+            return JoistRecognitionOutcome(
+                _pair_failure_status(diagnostic_code),
+                axes,
+                base_contacts,
+                diagnostic_code=diagnostic_code,
+            )
+        finalized_axes, recovery_diagnostic, recovered = (
+            _recover_column_terminal_axes(
+                source,
+                axes,
+                base_contacts,
+                base_relations,
+                context,
+                tolerances,
+            )
+        )
+        if recovery_diagnostic:
+            return JoistRecognitionOutcome(
+                JoistRecognitionStatus.AMBIGUOUS,
+                diagnostic_code=recovery_diagnostic,
+            )
+        if recovered:
+            final_contacts, final_relations, final_diagnostic = (
+                _evaluate_pair_axes(finalized_axes, context)
+            )
+            if final_diagnostic:
+                if final_diagnostic == "BIM_JOIST_PAIR_UNPAIRED":
+                    fallback_contacts, fallback_relations, fallback_diagnostic = (
+                        _evaluate_pair_axes(axes, context)
+                    )
+                    if not fallback_diagnostic:
+                        return JoistRecognitionOutcome(
+                            JoistRecognitionStatus.RECOGNIZED_PAIR,
+                            axes,
+                            fallback_contacts,
+                            fallback_relations,
+                        )
+                return JoistRecognitionOutcome(
+                    JoistRecognitionStatus.AMBIGUOUS,
+                    diagnostic_code="BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+                )
+            base_identity = _pair_identity(base_relations)
+            final_identity = _pair_identity(final_relations)
+            if final_identity != base_identity:
+                if final_identity < base_identity:
+                    fallback_contacts, fallback_relations, fallback_diagnostic = (
+                        _evaluate_pair_axes(axes, context)
+                    )
+                    if not fallback_diagnostic:
+                        return JoistRecognitionOutcome(
+                            JoistRecognitionStatus.RECOGNIZED_PAIR,
+                            axes,
+                            fallback_contacts,
+                            fallback_relations,
+                        )
+                return JoistRecognitionOutcome(
+                    JoistRecognitionStatus.AMBIGUOUS,
+                    diagnostic_code="BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+                )
+            axes = finalized_axes
+            base_contacts = final_contacts
+            base_relations = final_relations
+        return JoistRecognitionOutcome(
+            JoistRecognitionStatus.RECOGNIZED_PAIR,
+            axes,
+            base_contacts,
+            base_relations,
+        )
     strut_contacts, contact_diagnostic = _contacts(
         axes,
         context.struts,
@@ -583,26 +976,6 @@ def recognize_bim_joist(
         )
     brace_contacts, _ = _contacts(axes, context.braces, "brace")
     contacts = (*strut_contacts, *brace_contacts)
-    if len(axes) == 2:
-        relations, diagnostic_code = _pair_relations(contacts, context)
-        if diagnostic_code:
-            status = (
-                JoistRecognitionStatus.AMBIGUOUS
-                if diagnostic_code == "BIM_JOIST_PAIR_AMBIGUOUS"
-                else JoistRecognitionStatus.FAILED
-            )
-            return JoistRecognitionOutcome(
-                status,
-                axes,
-                tuple(contacts),
-                diagnostic_code=diagnostic_code,
-            )
-        return JoistRecognitionOutcome(
-            JoistRecognitionStatus.RECOGNIZED_PAIR,
-            axes,
-            tuple(contacts),
-            relations,
-        )
     if brace_contacts and not strut_contacts:
         return JoistRecognitionOutcome(
             JoistRecognitionStatus.RECOGNIZED_SINGLE,
@@ -622,6 +995,7 @@ def recognize_bim_joist(
 
 
 __all__ = [
+    "JOIST_COLUMN_TERMINAL_WINDOW_MM",
     "JOIST_PAIR_COLUMN_MIDPOINT_TOLERANCE_MM",
     "JOIST_PAIR_NOMINAL_STATION_SPACING_MM",
     "JOIST_PAIR_STATION_SPACING_TOLERANCE_MM",

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,8 +14,10 @@ from typing import Any, Mapping, Sequence
 
 from bracing_optimizer.presentation.cad_view_interaction import CADViewport
 from bracing_optimizer.presentation.field_labels import (
+    corner_brace_transfer_mode_label,
     dxf_entity_type_label,
     engineering_field_label,
+    member_role_label,
     recognition_method_label,
 )
 
@@ -101,6 +105,79 @@ class DXFImportDialogOutcome:
     world_result: DXFImportResult | None = None
 
 
+@dataclass(frozen=True)
+class WalerConnectedMemberSummary:
+    """Presentation-only reverse projection of formal Waler connections."""
+
+    strut_ids: tuple[str, ...] = ()
+    brace_ids: tuple[str, ...] = ()
+    corner_brace_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ErrorSourceHitIndexStamp:
+    """Inputs that make screen-space unresolved-error hit records current."""
+
+    viewport_transform: tuple[float, float, float, float, float] | None
+    render_generation: int
+    visibility_signature: tuple[bool, bool, tuple[str, ...]]
+    review_items_signature: tuple[tuple[Any, ...], ...]
+    active_result_signature: tuple[int, str]
+
+
+def _member_id_sort_key(identifier: str) -> tuple[tuple[object, ...], ...]:
+    """Sort member IDs naturally without assigning engineering meaning."""
+
+    return tuple(
+        (0, int(token), token)
+        if token.isdigit()
+        else (1, token.casefold(), token)
+        for token in re.split(r"(\d+)", identifier)
+        if token
+    )
+
+
+def build_waler_connected_member_summary(
+    result: DXFImportResult | None,
+    waler_id: str,
+) -> WalerConnectedMemberSummary:
+    """Project formal connection identities into an immutable UI summary."""
+
+    if result is None or not waler_id:
+        return WalerConnectedMemberSummary()
+
+    strut_ids = {
+        member.id
+        for member in result.struts
+        if member.id
+        and (member.from_waler == waler_id or member.to_waler == waler_id)
+    }
+    brace_ids = {
+        member.id
+        for member in result.braces
+        if member.id
+        and member.has_formal_connection
+        and (member.from_waler == waler_id or member.to_waler == waler_id)
+    }
+    formal_corner_ids = {
+        member.id for member in result.corner_braces if member.id
+    }
+    corner_brace_ids = {
+        connection.corner_brace_id
+        for connection in result.corner_brace_connections
+        if connection.corner_brace_id in formal_corner_ids
+        and connection.waler_id == waler_id
+    }
+
+    return WalerConnectedMemberSummary(
+        strut_ids=tuple(sorted(strut_ids, key=_member_id_sort_key)),
+        brace_ids=tuple(sorted(brace_ids, key=_member_id_sort_key)),
+        corner_brace_ids=tuple(
+            sorted(corner_brace_ids, key=_member_id_sort_key)
+        ),
+    )
+
+
 def format_review_recovery_summary(summary: RecoverySummary) -> str:
     """Format the planner-owned recovery meaning without recalculating it."""
 
@@ -183,6 +260,7 @@ class DXFImportDialog:
         viewport = getattr(self, "preview_viewport", None)
         if viewport is not None:
             viewport.set_view_bounds(bounds)
+            self._invalidate_error_source_hit_index()
 
     LAYER_USE_OPTIONS = (
         "圍令",
@@ -363,7 +441,13 @@ class DXFImportDialog:
         self.corner_brace_repair_plan: CornerBraceRepairPlan | None = None
         self.corner_brace_repair_candidate_id = ""
         self.corner_brace_repair_window: Any = None
+        self.corner_brace_repair_tree: Any = None
+        self.corner_brace_repair_audit_expanded = False
         self._corner_brace_repair_overlay_items: list[int] = []
+        self.column_repair_window: Any = None
+        self.column_repair_plan: Any = None
+        self.column_repair_details_var: Any = None
+        self._column_repair_overlay_items: list[int] = []
         self._contact_panel_waler_id = ""
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.selected_problem: ProblemRecord | None = None
@@ -386,6 +470,11 @@ class DXFImportDialog:
             tuple[str, tuple[float, float], tuple[float, float]]
         ] = []
         self.canvas_candidate_hit_points: list[tuple[str, Point]] = []
+        self.canvas_error_source_hit_lines: list[
+            tuple[str, Point, Point]
+        ] = []
+        self._error_source_hit_index_stamp: ErrorSourceHitIndexStamp | None = None
+        self._preview_render_generation = 0
         self.preview_scene = PreviewScene()
         self.preview_renderer: PreviewRenderer | None = None
         self.preview_window: Any = None
@@ -568,6 +657,7 @@ class DXFImportDialog:
         """Refresh the dialog's single read-only Review-state projection."""
 
         self._review_snapshot: DXFReviewSnapshot = self.review_workflow.snapshot
+        self._invalidate_error_source_hit_index()
 
     def _show_workflow_confirmation_invalidations(
         self,
@@ -1311,6 +1401,12 @@ class DXFImportDialog:
             state="disabled",
         )
         self.corner_brace_repair_button.pack(side="left", padx=(10, 0))
+        self.column_association_repair_button = self.ttk.Button(
+            self.geometry_tools_frame,
+            text="中間柱關聯修補",
+            command=self._open_column_association_repair,
+        )
+        self.column_association_repair_button.pack(side="left", padx=(10, 0))
 
         self.source_tools_frame = self.ttk.Frame(self.modification_tools_frame)
         self.source_tools_frame.grid(
@@ -2115,6 +2211,12 @@ class DXFImportDialog:
         self._update_selected_member_panel(
             rebuild_candidates=rebuild_candidate_tree
         )
+        if getattr(self, "double_support_settings_window", None) is not None:
+            self.double_support_settings_candidates = (
+                self._double_support_candidates_for_settings()
+            )
+            self._refresh_double_support_settings_tree()
+            self._on_double_support_settings_selected()
         self.debug_text.delete("1.0", "end")
         self.debug_text.insert("1.0", json.dumps(self.result.to_debug_dict(), ensure_ascii=False, indent=2))
         self._update_coordinate_display()
@@ -2165,8 +2267,8 @@ class DXFImportDialog:
         window = self.tk.Toplevel(self.window)
         self.double_support_settings_window = window
         window.title("雙路支撐設定")
-        window.geometry("680x420")
-        window.minsize(580, 320)
+        window.geometry("880x440")
+        window.minsize(720, 340)
         window.protocol(
             "WM_DELETE_WINDOW",
             lambda: self._close_settings_window(
@@ -2178,7 +2280,14 @@ class DXFImportDialog:
         )
         self.double_support_settings_tree = self.ttk.Treeview(
             window,
-            columns=("first", "second", "spacing", "accepted"),
+            columns=(
+                "first",
+                "second",
+                "spacing",
+                "status",
+                "warning",
+                "accepted",
+            ),
             show="headings",
             selectmode="browse",
             height=12,
@@ -2187,6 +2296,8 @@ class DXFImportDialog:
             ("first", "第一支撐", 130),
             ("second", "第二支撐", 130),
             ("spacing", "距離", 130),
+            ("status", "狀態", 150),
+            ("warning", "警告摘要", 260),
             ("accepted", "是否接受", 110),
         ):
             self.double_support_settings_tree.heading(column, text=label)
@@ -2202,15 +2313,30 @@ class DXFImportDialog:
             "<Double-1>",
             lambda _event: self._toggle_double_support_settings_candidate(),
         )
+        self.double_support_settings_tree.bind(
+            "<<TreeviewSelect>>",
+            self._on_double_support_settings_selected,
+        )
         self._refresh_double_support_settings_tree()
+
+        self.double_support_settings_detail_var = self.tk.StringVar(
+            value="選取候選以查看狀態與端點圍令資訊。"
+        )
+        self.ttk.Label(
+            window,
+            textvariable=self.double_support_settings_detail_var,
+            wraplength=640,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(0, 4))
 
         footer = self.ttk.Frame(window)
         footer.pack(fill="x", padx=10, pady=(4, 10))
-        self.ttk.Button(
+        self.double_support_settings_toggle_button = self.ttk.Button(
             footer,
             text="切換接受／不接受",
             command=self._toggle_double_support_settings_candidate,
-        ).pack(side="left")
+        )
+        self.double_support_settings_toggle_button.pack(side="left")
         self.ttk.Button(
             footer,
             text="取消",
@@ -2226,7 +2352,39 @@ class DXFImportDialog:
 
     def _double_support_candidates_for_settings(self) -> tuple[Any, ...]:
         result = getattr(self, "result", None)
-        return tuple(result.double_support_candidates) if result is not None else ()
+        return (
+            tuple(
+                candidate
+                for candidate in result.double_support_candidates
+                if candidate.qualification_status
+                in {"eligible", "pending_waler"}
+            )
+            if result is not None
+            else ()
+        )
+
+    @staticmethod
+    def _double_support_status_text(candidate: Any) -> str:
+        if candidate.qualification_status == "pending_waler":
+            return "警告：圍令待確認"
+        if candidate.qualification_status == "incompatible_waler":
+            return "圍令不相容"
+        return "可接受" if not candidate.ambiguous else "配對有歧義"
+
+    @staticmethod
+    def _double_support_detail_text(candidate: Any) -> str:
+        lines = list(candidate.warnings)
+        for issue in candidate.issues:
+            terminal = issue.terminal_name or "配對"
+            competitors = ", ".join(
+                "/".join(identity)
+                for identity in issue.competing_waler_source_handles
+            ) or "無"
+            lines.append(
+                f"{issue.member_id} {terminal}：{issue.message}"
+                f"（候選圍令：{competitors}；{issue.code}）"
+            )
+        return "\n".join(dict.fromkeys(lines)) or "此候選目前可依既有流程接受或拒絕。"
 
     def _refresh_double_support_settings_tree(self) -> None:
         tree = getattr(self, "double_support_settings_tree", None)
@@ -2247,7 +2405,13 @@ class DXFImportDialog:
                     candidate.first_strut_id,
                     candidate.second_strut_id,
                     f"{candidate.centerline_spacing:.1f}",
-                    "接受" if candidate.accepted else "不接受",
+                    self._double_support_status_text(candidate),
+                    "；".join(candidate.warnings) or "—",
+                    (
+                        "接受" if candidate.accepted else "不接受"
+                    )
+                    if candidate.qualification_status == "eligible"
+                    else "不可接受",
                 ),
             )
         if selected and tree.exists(selected[0]):
@@ -2263,7 +2427,7 @@ class DXFImportDialog:
             (item for item in candidates if item.id == candidate_id),
             None,
         )
-        if candidate is None:
+        if candidate is None or candidate.qualification_status != "eligible":
             return
         self.double_support_settings_candidates = (
             set_double_support_candidate_accepted(
@@ -2274,9 +2438,44 @@ class DXFImportDialog:
         )
         self._refresh_double_support_settings_tree()
 
+    def _on_double_support_settings_selected(self, _event: Any = None) -> None:
+        tree = getattr(self, "double_support_settings_tree", None)
+        selection = tree.selection() if tree is not None else ()
+        candidate = next(
+            (
+                item
+                for item in getattr(
+                    self, "double_support_settings_candidates", ()
+                )
+                if selection and item.id == str(selection[0])
+            ),
+            None,
+        )
+        detail_var = getattr(self, "double_support_settings_detail_var", None)
+        if detail_var is not None:
+            detail_var.set(
+                self._double_support_detail_text(candidate)
+                if candidate is not None
+                else "選取候選以查看狀態與端點圍令資訊。"
+            )
+        button = getattr(self, "double_support_settings_toggle_button", None)
+        if button is not None:
+            button.configure(
+                state=(
+                    "normal"
+                    if candidate is not None
+                    and candidate.qualification_status == "eligible"
+                    else "disabled"
+                )
+            )
+
     def _apply_double_support_settings(self) -> None:
         self._commit_double_support_candidates(
-            self.double_support_settings_candidates
+            tuple(
+                candidate
+                for candidate in self.double_support_settings_candidates
+                if candidate.qualification_status == "eligible"
+            )
         )
         self._close_settings_window("double_support_settings_window")
 
@@ -2461,6 +2660,240 @@ class DXFImportDialog:
             return item
         return self._review_item_for_member_id(self.selected_member_id)
 
+    def _selected_column_repair_subject_id(self) -> str:
+        """Return the selected formal Column id without evaluating eligibility."""
+
+        item = self._selected_review_item()
+        if (
+            item is None
+            or item.status != "recognized"
+            or item.role != "column"
+            or not item.member_id
+        ):
+            return ""
+        world = self.review_workflow.world_result
+        if world is None:
+            return ""
+        matches = [column for column in world.columns if column.id == item.member_id]
+        return item.member_id if len(matches) == 1 else ""
+
+    def _column_repair_problem_reason(self, plan: Any) -> str:
+        source = normalize_source_handles(plan.column_source_handles)
+        return next(
+            (
+                record.description
+                for record in getattr(self, "problem_records", ())
+                if record.code == "COLUMN_ASSOCIATION_REQUIRES_REVIEW"
+                and normalize_source_handles(record.source_handles) == source
+            ),
+            "找不到既有失效原因，請重新整理 DXF Review。",
+        )
+
+    def _column_repair_detail_lines(self, plan: Any) -> tuple[str, ...]:
+        status_label = {
+            "unresolved": "待修",
+            "repaired": "已修",
+            "requires_review": "需重新檢查",
+        }.get(plan.status, plan.status)
+        lines = [f"{plan.column_id}｜{status_label}"]
+        world = self.review_workflow.world_result
+        column = next(
+            (item for item in world.columns if item.id == plan.column_id),
+            None,
+        ) if world else None
+        if column is not None:
+            center = column.world_reference_point or _midpoint(
+                column.world_start or column.start,
+                column.world_end or column.end,
+            )
+            lines.append(f"柱中心 WCS：({center[0]:.1f}, {center[1]:.1f}) mm")
+        for distance_mm, strut_id, station, projection in plan.options:
+            lines.append(
+                f"{strut_id}：距離 {distance_mm:.1f} mm；station {station:.1f} mm；"
+                f"投影 WCS ({projection[0]:.1f}, {projection[1]:.1f})"
+            )
+        if plan.status == "repaired":
+            lines.append("目前人工決策：" + "、".join(plan.selected_strut_ids))
+        elif plan.status == "requires_review":
+            lines.append("失效原因：" + self._column_repair_problem_reason(plan))
+        return tuple(lines)
+
+    def _clear_column_repair_overlay(self) -> None:
+        canvas = getattr(self, "canvas", None)
+        for item_id in getattr(self, "_column_repair_overlay_items", ()):
+            if canvas is not None:
+                try:
+                    canvas.delete(item_id)
+                except self.tk.TclError:
+                    pass
+        self._column_repair_overlay_items = []
+
+    @staticmethod
+    def _column_repair_selected_ids(plan: Any, choice: str) -> tuple[str, ...]:
+        if plan is None:
+            return ()
+        return {
+            "first": plan.candidate_strut_ids[:1],
+            "second": plan.candidate_strut_ids[1:],
+            "both": plan.candidate_strut_ids,
+        }.get(choice, ())
+
+    def _draw_column_repair_overlay(self, plan: Any, selected: Sequence[str]) -> None:
+        self._clear_column_repair_overlay()
+        if self.preview_renderer is None or self.preview_transform is None or self.result is None:
+            return
+        world = self.review_workflow.world_result
+        if world is None:
+            return
+        column = next((item for item in world.columns if item.id == plan.column_id), None)
+        if column is None:
+            return
+        center = column.world_reference_point or _midpoint(
+            column.world_start or column.start, column.world_end or column.end,
+        )
+        transform = self.result.coordinate_system.transform
+        self._column_repair_overlay_items = []
+        for _distance_mm, strut_id, _station, projection in plan.options:
+            start = self._project_preview_point(transform(center))
+            end = self._project_preview_point(transform(projection))
+            item_id = self.preview_renderer.create_line(
+                "temporary_overlay", *start, *end,
+                fill="#0d47a1" if strut_id in selected else "#9e9e9e",
+                width=4 if strut_id in selected else 2,
+                dash=() if strut_id in selected else (4, 3),
+            )
+            self._column_repair_overlay_items.append(item_id)
+
+    def _close_column_association_repair(self) -> None:
+        self._clear_column_repair_overlay()
+        window = getattr(self, "column_repair_window", None)
+        self.column_repair_window = None
+        self.column_repair_plan = None
+        self.column_repair_details_var = None
+        if window is not None:
+            try:
+                window.destroy()
+            except self.tk.TclError:
+                pass
+
+    def _open_column_association_repair(self) -> None:
+        from tkinter import messagebox
+
+        column_id = self._selected_column_repair_subject_id()
+        if not column_id:
+            messagebox.showwarning(
+                "中間柱關聯修補",
+                "請先選取一支目前有效的正式中間柱。",
+                parent=self.window,
+            )
+            return
+        try:
+            plan = self.review_workflow.plan_column_association_repair(column_id)
+        except DXFImportError as exc:
+            messagebox.showinfo(
+                "中間柱關聯修補",
+                str(exc),
+                parent=self.window,
+            )
+            return
+        self._close_column_association_repair()
+        window = self.tk.Toplevel(self.window)
+        self.column_repair_window = window
+        self.column_repair_plan = plan
+        window.title("中間柱關聯修補")
+        window.transient(self.window)
+        window.protocol("WM_DELETE_WINDOW", self._close_column_association_repair)
+        frame = self.ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+        status_label = {
+            "unresolved": "待修",
+            "repaired": "已修",
+            "requires_review": "需重新檢查",
+        }.get(plan.status, plan.status)
+        self.ttk.Label(
+            frame,
+            text=f"{plan.column_id}｜{status_label}（本視窗只處理此中間柱）",
+        ).pack(anchor="w")
+        lines = self._column_repair_detail_lines(plan)
+        self.column_repair_details_var = self.tk.StringVar(value="\n".join(lines))
+        self.ttk.Label(
+            frame,
+            textvariable=self.column_repair_details_var,
+            justify="left",
+        ).pack(anchor="w")
+        selected = tuple(plan.selected_strut_ids)
+        initial_choice = {
+            tuple(plan.candidate_strut_ids[:1]): "first",
+            tuple(plan.candidate_strut_ids[1:]): "second",
+            tuple(plan.candidate_strut_ids): "both",
+        }.get(selected, "")
+        choice = self.tk.StringVar(value=initial_choice)
+        options_frame = self.ttk.Frame(frame)
+        options_frame.pack(fill="x", pady=8)
+        buttons = []
+        for label, value in (("第一支", "first"), ("第二支", "second"), ("兩支", "both")):
+            button = self.ttk.Radiobutton(options_frame, text=label, variable=choice, value=value)
+            button.pack(side="left", padx=(0, 12))
+            buttons.append(button)
+
+        def selected_ids() -> tuple[str, ...]:
+            return self._column_repair_selected_ids(self.column_repair_plan, choice.get())
+
+        def update_overlay(*_args: Any) -> None:
+            current_plan = self.column_repair_plan
+            if current_plan is not None:
+                overlay_ids = (
+                    current_plan.selected_strut_ids
+                    if current_plan.status == "requires_review"
+                    else selected_ids()
+                )
+                self._draw_column_repair_overlay(current_plan, overlay_ids)
+
+        choice.trace_add("write", update_overlay)
+        if plan.status == "requires_review":
+            for button in buttons:
+                button.configure(state="disabled")
+        update_overlay()
+        actions = self.ttk.Frame(frame)
+        actions.pack(fill="x")
+
+        def apply_choice() -> None:
+            plan = self.column_repair_plan
+            if plan is None or not selected_ids():
+                messagebox.showwarning("中間柱關聯修補", "請選擇第一支、第二支或兩支。", parent=window)
+                return
+            try:
+                mutation = self.review_workflow.commit_column_association_repair(plan, selected_ids())
+            except DXFImportError as exc:
+                messagebox.showwarning("中間柱關聯需重新預覽", str(exc), parent=window)
+                return
+            self._close_column_association_repair()
+            self._refresh_result_views(preview_dirty=RenderDirty.FULL_SCENE)
+            self._show_workflow_confirmation_invalidations(mutation)
+
+        def withdraw_choice() -> None:
+            plan = self.column_repair_plan
+            if plan is None or plan.status == "unresolved":
+                return
+            try:
+                mutation = self.review_workflow.withdraw_column_association_repair(plan)
+            except DXFImportError as exc:
+                messagebox.showwarning("中間柱關聯需重新預覽", str(exc), parent=window)
+                return
+            self._close_column_association_repair()
+            self._refresh_result_views(preview_dirty=RenderDirty.FULL_SCENE)
+            self._show_workflow_confirmation_invalidations(mutation)
+
+        apply_button = self.ttk.Button(actions, text="套用", command=apply_choice)
+        apply_button.pack(side="left")
+        if plan.status == "requires_review":
+            apply_button.configure(state="disabled")
+        withdraw_button = self.ttk.Button(actions, text="撤銷", command=withdraw_choice)
+        withdraw_button.pack(side="left", padx=8)
+        if plan.status == "unresolved":
+            withdraw_button.configure(state="disabled")
+        self.ttk.Button(actions, text="取消", command=self._close_column_association_repair).pack(side="right")
+
     def _open_corner_brace_repair_preview(self) -> None:
         """Plan first; only hard-eligible candidates enter the modal preview."""
 
@@ -2509,62 +2942,140 @@ class DXFImportDialog:
         body.pack(fill="both", expand=True)
         self.ttk.Label(
             body,
-            text="下列項目均已通過 residual、reference 與有限構件交點檢查；仍需明確套用。",
+            text="下列候選均已通過目標證據、模板移植與有限構件檢查；仍需明確套用。",
             wraplength=720,
             justify="left",
         ).pack(fill="x", pady=(0, 6))
-        tree = self.ttk.Treeview(
-            body,
-            columns=("relationship", "length", "primary", "secondary"),
-            show="headings",
-            height=min(max(len(plan.candidates), 2), 8),
-            selectmode="browse",
-        )
-        self.corner_brace_repair_tree = tree
-        for column, label, width in (
-            ("relationship", "目標 Waler / Strut", 190),
-            ("length", "長度 mm", 100),
-            ("primary", "Automatic primary", 145),
-            ("secondary", "Manual secondary", 145),
-        ):
-            tree.heading(column, text=label)
-            tree.column(column, width=width, anchor="center")
-        for candidate in plan.candidates:
-            tree.insert(
-                "",
-                "end",
-                iid=candidate.id,
-                values=(
-                    f"{candidate.target_waler_id} / {candidate.target_strut_id}",
-                    f"{candidate.fixed_length_mm:.1f}",
-                    ", ".join(ref.member_id for ref in candidate.primary_references),
-                    ", ".join(ref.member_id for ref in candidate.secondary_references) or "—",
+        self.corner_brace_repair_tree = None
+        if len(plan.candidates) > 1:
+            tree = self.ttk.Treeview(
+                body,
+                columns=(
+                    "relationship",
+                    "template",
+                    "mode",
+                    "offset",
+                    "station",
+                    "length",
+                    "reference_length",
+                    "primary",
+                    "secondary",
                 ),
+                show="headings",
+                height=min(max(len(plan.candidates), 2), 8),
+                selectmode="browse",
             )
-        tree.pack(fill="both", expand=True)
-        tree.bind("<<TreeviewSelect>>", self._on_corner_brace_repair_candidate_selected)
-        self.corner_brace_repair_detail_var = self.tk.StringVar(
-            value="請選擇候選以預覽 target residual 與 proposed axis。"
+            self.corner_brace_repair_tree = tree
+            for column, label, width in (
+                ("relationship", "目標圍令／支撐", 190),
+                ("template", "選用模板", 120),
+                ("mode", "移植方式", 95),
+                ("offset", "圍令端定位距離", 135),
+                ("station", "支撐端定位距離", 135),
+                ("length", "結果長度", 115),
+                ("reference_length", "參考固定長度", 125),
+                ("primary", "自動辨識主要依據", 155),
+                ("secondary", "人工修補次要依據", 155),
+            ):
+                tree.heading(column, text=label)
+                tree.column(column, width=width, anchor="center")
+            for candidate in plan.candidates:
+                tree.insert(
+                    "",
+                    "end",
+                    iid=candidate.id,
+                    values=(
+                        f"{candidate.target_waler_id} / {candidate.target_strut_id}",
+                        (
+                            candidate.template_reference.member_id
+                            if candidate.template_reference is not None
+                            else "本體關係選擇"
+                        ),
+                        corner_brace_transfer_mode_label(candidate.transfer_mode),
+                        self._format_corner_brace_repair_length(
+                            candidate.reference_waler_offset_mm
+                        ),
+                        self._format_corner_brace_repair_length(
+                            candidate.reference_strut_station_mm
+                        ),
+                        self._format_corner_brace_repair_length(
+                            candidate.fixed_length_mm
+                        ),
+                        self._format_corner_brace_repair_length(
+                            candidate.reference_fixed_length_mm
+                        ),
+                        ", ".join(
+                            ref.member_id for ref in candidate.primary_references
+                        ),
+                        ", ".join(
+                            ref.member_id for ref in candidate.secondary_references
+                        )
+                        or "—",
+                    ),
+                )
+            tree.pack(fill="both", expand=True, pady=(0, 6))
+            tree.bind(
+                "<<TreeviewSelect>>",
+                self._on_corner_brace_repair_candidate_selected,
+            )
+
+        summary = self.ttk.LabelFrame(body, text="建議修補方案")
+        summary.pack(fill="x", pady=(0, 6))
+        self.corner_brace_repair_summary_var = self.tk.StringVar(
+            value="請選擇候選以預覽建議修補方案。"
         )
         self.ttk.Label(
-            body,
-            textvariable=self.corner_brace_repair_detail_var,
+            summary,
+            textvariable=self.corner_brace_repair_summary_var,
             wraplength=720,
             justify="left",
-        ).pack(fill="x", pady=6)
-        if plan.diagnostics:
-            self.ttk.Label(
-                body,
-                text="\n".join(plan.diagnostics),
-                foreground="#795548",
-                wraplength=720,
-                justify="left",
-            ).pack(fill="x", pady=(0, 6))
+        ).pack(fill="x", padx=8, pady=(6, 3))
+        self.ttk.Label(
+            summary,
+            text=(
+                "量測基準：目標圍令與支撐的交會點；"
+                "支撐端定位距離沿支撐內側方向量測。"
+            ),
+            wraplength=720,
+            justify="left",
+            foreground="#455a64",
+        ).pack(fill="x", padx=8, pady=(0, 6))
+
+        audit_host = self.ttk.Frame(body)
+        audit_host.pack(fill="x", pady=(0, 6))
+        audit_header = self.ttk.Frame(audit_host)
+        audit_header.pack(fill="x")
+        self.corner_brace_repair_audit_expanded = False
+        self.corner_brace_repair_audit_button = self.ttk.Button(
+            audit_header,
+            text="顯示稽核與診斷",
+            command=self._toggle_corner_brace_repair_audit,
+        )
+        self.corner_brace_repair_audit_button.pack(side="left")
+        self.corner_brace_repair_diagnostic_hint_var = self.tk.StringVar(value="")
+        self.ttk.Label(
+            audit_header,
+            textvariable=self.corner_brace_repair_diagnostic_hint_var,
+            foreground="#795548",
+        ).pack(side="left", padx=(8, 0))
+        self.corner_brace_repair_audit_frame = self.ttk.LabelFrame(
+            audit_host,
+            text="稽核與診斷",
+        )
+        self.corner_brace_repair_audit_var = self.tk.StringVar(
+            value=self._corner_brace_repair_audit_text(None)
+        )
+        self.ttk.Label(
+            self.corner_brace_repair_audit_frame,
+            textvariable=self.corner_brace_repair_audit_var,
+            wraplength=720,
+            justify="left",
+        ).pack(fill="x", padx=8, pady=6)
         actions = self.ttk.Frame(body)
         actions.pack(fill="x")
         self.corner_brace_repair_apply_button = self.ttk.Button(
             actions,
-            text="套用所選修補",
+            text="套用此修補",
             command=self._apply_corner_brace_repair,
             state="disabled",
         )
@@ -2575,9 +3086,139 @@ class DXFImportDialog:
             command=self._cancel_corner_brace_repair,
         ).pack(side="right")
         if len(plan.candidates) == 1:
-            tree.selection_set(plan.candidates[0].id)
-            tree.focus(plan.candidates[0].id)
+            self.corner_brace_repair_candidate_id = plan.candidates[0].id
             self._on_corner_brace_repair_candidate_selected()
+
+    @staticmethod
+    def _format_corner_brace_repair_scalar(value: float) -> str:
+        return f"{value:.3f}"
+
+    @classmethod
+    def _format_corner_brace_repair_length(cls, value: float) -> str:
+        return f"{cls._format_corner_brace_repair_scalar(value)} mm"
+
+    @classmethod
+    def _format_corner_brace_repair_point(cls, point: Point) -> str:
+        return (
+            f"({cls._format_corner_brace_repair_scalar(point[0])}, "
+            f"{cls._format_corner_brace_repair_scalar(point[1])})"
+        )
+
+    @classmethod
+    def _format_corner_brace_repair_line(
+        cls,
+        start: Point,
+        end: Point,
+    ) -> str:
+        return (
+            f"{cls._format_corner_brace_repair_point(start)} → "
+            f"{cls._format_corner_brace_repair_point(end)}"
+        )
+
+    def _corner_brace_repair_summary_text(
+        self,
+        candidate: CornerBraceRepairCandidate | None,
+    ) -> str:
+        if candidate is None:
+            return "請選擇候選以預覽建議修補方案。"
+        if (
+            getattr(candidate, "selection_mode", "reference_template")
+            == "body_relationship_selection"
+            and getattr(candidate, "relationship_assessment", None) is not None
+        ):
+            assessment = candidate.relationship_assessment
+            return (
+                "本體已辨識，工程關係有歧義；請明確選擇。\n"
+                f"目標圍令／支撐：{candidate.target_waler_id} / "
+                f"{candidate.target_strut_id}\n"
+                "有限端點："
+                f"{self._format_corner_brace_repair_line(candidate.world_start, candidate.world_end)}\n"
+                "結果長度："
+                f"{self._format_corner_brace_repair_length(candidate.fixed_length_mm)}；"
+                f"分類：{assessment.classification}\n"
+                "兩軌覆蓋率："
+                f"{assessment.per_rail_union_coverage[0]:.1%} / "
+                f"{assessment.per_rail_union_coverage[1]:.1%}\n"
+                "Waler／Strut 端延伸："
+                f"{assessment.per_end_extensions_mm[0]:.3f} / "
+                f"{assessment.per_end_extensions_mm[1]:.3f} mm；"
+                f"驗證：{'通過' if assessment.hard_valid else '未通過'}"
+            )
+        transfer_mode = corner_brace_transfer_mode_label(candidate.transfer_mode)
+        return (
+            f"目標圍令／支撐：{candidate.target_waler_id} / "
+            f"{candidate.target_strut_id}\n"
+            "選用模板："
+            f"{candidate.template_reference.member_id if candidate.template_reference is not None else '不適用（本體關係選擇）'}；"
+            f"移植方式：{transfer_mode}\n"
+            f"結果長度：{self._format_corner_brace_repair_length(candidate.fixed_length_mm)}\n"
+            "圍令端定位距離："
+            f"{self._format_corner_brace_repair_length(candidate.reference_waler_offset_mm)}；"
+            "支撐端定位距離："
+            f"{self._format_corner_brace_repair_length(candidate.reference_strut_station_mm)}\n"
+            "目標方向：有效；定位錨點：有效"
+        )
+
+    def _corner_brace_repair_audit_text(
+        self,
+        candidate: CornerBraceRepairCandidate | None,
+    ) -> str:
+        plan = self.corner_brace_repair_plan
+        if candidate is None:
+            plan_diagnostics = tuple(plan.diagnostics) if plan is not None else ()
+            return "\n".join(plan_diagnostics) or "選取候選後顯示完整稽核資料。"
+        primary = ", ".join(
+            ref.member_id for ref in candidate.primary_references
+        ) or "—"
+        secondary = ", ".join(
+            ref.member_id for ref in candidate.secondary_references
+        ) or "—"
+        diagnostics = tuple(candidate.diagnostics)
+        if plan is not None:
+            diagnostics += tuple(plan.diagnostics)
+        diagnostic_text = "\n".join(diagnostics) or "無"
+        relationship_text = ""
+        if getattr(candidate, "relationship_assessment", None) is not None:
+            assessment = candidate.relationship_assessment
+            relationship_text = (
+                f"Body signature：{candidate.body_signature}\n"
+                f"Internal gaps：{len(assessment.internal_gaps)}；"
+                f"Terminal gaps：{len(assessment.terminal_gaps)}；"
+                "逐 gap evidence："
+                f"{sum(bool(item.occluder_lines) for item in assessment.gap_occluder_assignments)}"
+                f"/{len(assessment.gap_occluder_assignments)}\n"
+            )
+        return (
+            relationship_text
+            + "參考固定長度："
+            f"{self._format_corner_brace_repair_length(candidate.reference_fixed_length_mm)}\n"
+            "工程線："
+            f"{self._format_corner_brace_repair_line(candidate.world_start, candidate.world_end)}\n"
+            "定位錨點："
+            f"{self._format_corner_brace_repair_point(candidate.positional_anchor)}\n"
+            f"自動辨識主要依據：{primary}\n"
+            f"人工修補次要依據：{secondary}\n"
+            f"診斷：{diagnostic_text}"
+        )
+
+    def _toggle_corner_brace_repair_audit(self) -> None:
+        self.corner_brace_repair_audit_expanded = not getattr(
+            self,
+            "corner_brace_repair_audit_expanded",
+            False,
+        )
+        frame = getattr(self, "corner_brace_repair_audit_frame", None)
+        button = getattr(self, "corner_brace_repair_audit_button", None)
+        if self.corner_brace_repair_audit_expanded:
+            if frame is not None:
+                frame.pack(fill="x", pady=(3, 0))
+            if button is not None:
+                button.configure(text="隱藏稽核與診斷")
+        else:
+            if frame is not None:
+                frame.pack_forget()
+            if button is not None:
+                button.configure(text="顯示稽核與診斷")
 
     def _selected_corner_brace_repair_candidate(
         self,
@@ -2596,23 +3237,32 @@ class DXFImportDialog:
 
     def _on_corner_brace_repair_candidate_selected(self, _event: Any = None) -> None:
         tree = getattr(self, "corner_brace_repair_tree", None)
-        selection = tree.selection() if tree is not None else ()
-        self.corner_brace_repair_candidate_id = str(selection[0]) if selection else ""
+        if tree is not None:
+            selection = tree.selection()
+            self.corner_brace_repair_candidate_id = (
+                str(selection[0]) if selection else ""
+            )
         candidate = self._selected_corner_brace_repair_candidate()
         button = getattr(self, "corner_brace_repair_apply_button", None)
         if button is not None:
             button.configure(state="normal" if candidate is not None else "disabled")
+        summary_var = getattr(self, "corner_brace_repair_summary_var", None)
+        if summary_var is not None:
+            summary_var.set(self._corner_brace_repair_summary_text(candidate))
+        audit_var = getattr(self, "corner_brace_repair_audit_var", None)
+        if audit_var is not None:
+            audit_var.set(self._corner_brace_repair_audit_text(candidate))
+        plan = self.corner_brace_repair_plan
+        has_diagnostics = bool(
+            (candidate is not None and candidate.diagnostics)
+            or (plan is not None and plan.diagnostics)
+        )
+        hint_var = getattr(self, "corner_brace_repair_diagnostic_hint_var", None)
+        if hint_var is not None:
+            hint_var.set("有診斷資料" if has_diagnostics else "")
         if candidate is None:
             self._clear_corner_brace_repair_overlay()
             return
-        primary = ", ".join(ref.member_id for ref in candidate.primary_references)
-        secondary = ", ".join(ref.member_id for ref in candidate.secondary_references) or "—"
-        self.corner_brace_repair_detail_var.set(
-            f"Proposed axis: {candidate.world_start} → {candidate.world_end}\n"
-            f"Target: {candidate.target_waler_id} / {candidate.target_strut_id}\n"
-            f"Automatic primary: {primary}; repaired secondary: {secondary}\n"
-            + "\n".join(candidate.diagnostics)
-        )
         self._draw_corner_brace_repair_overlay(candidate)
 
     def _apply_corner_brace_repair(self) -> None:
@@ -2644,6 +3294,8 @@ class DXFImportDialog:
         self._clear_corner_brace_repair_overlay()
         self.corner_brace_repair_plan = None
         self.corner_brace_repair_candidate_id = ""
+        self.corner_brace_repair_tree = None
+        self.corner_brace_repair_audit_expanded = False
         window = self.corner_brace_repair_window
         self.corner_brace_repair_window = None
         if window is not None:
@@ -2993,7 +3645,12 @@ class DXFImportDialog:
             if item.highest_severity != "success"
             else ""
         )
-        manual = " ＊" if item.member_id and item.selection_source != "auto" else ""
+        manual = (
+            " ＊"
+            if item.member_id
+            and item.selection_source not in {"auto", "unresolved"}
+            else ""
+        )
         problem_count = f" ({item.problem_count})" if item.problem_count else ""
         confirmation = " ✓" if confirmed else ""
         prefix = f"{icon} " if icon else ""
@@ -3140,7 +3797,7 @@ class DXFImportDialog:
         group_number = 1
         assigned: set[str] = set()
         for candidate in result.double_support_candidates:
-            if not candidate.accepted:
+            if not candidate.is_formally_accepted:
                 continue
             if (
                 candidate.first_strut_id in assigned
@@ -3227,6 +3884,24 @@ class DXFImportDialog:
                     self._associated_strut_ids_for_member(member)
                 ),
             }
+        elif isinstance(member, Waler):
+            connected = build_waler_connected_member_summary(
+                getattr(self, "result", None),
+                member.id,
+            )
+            row = {
+                **row,
+                "ContactFaceState": (
+                    "正式接觸面"
+                    if member.has_formal_contact_face
+                    else "暫定中心軸（尚未完成接觸面）"
+                ),
+                "ConnectedStrutIDs": "、".join(connected.strut_ids) or "—",
+                "ConnectedBraceIDs": "、".join(connected.brace_ids) or "—",
+                "ConnectedCornerBraceIDs": (
+                    "、".join(connected.corner_brace_ids) or "—"
+                ),
+            }
         role, _role_label = self._member_role(member)
         rows = [
             (
@@ -3235,6 +3910,13 @@ class DXFImportDialog:
             )
             for key, value in row.items()
         ]
+        if isinstance(member, (Brace, CornerBrace)):
+            rows.append(
+                (
+                    "構件寬度（mm）",
+                    self._engineering_width_display(member.source_width),
+                )
+            )
         rows.append(
             (
                 engineering_field_label(role, "Length"),
@@ -3242,6 +3924,16 @@ class DXFImportDialog:
             )
         )
         return tuple(rows)
+
+    @staticmethod
+    def _engineering_width_display(value: Any) -> str:
+        try:
+            width = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if not math.isfinite(width) or width <= 0.0:
+            return "—"
+        return f"{width:.3f}"
 
     def _update_engineering_data_panel(
         self,
@@ -3375,19 +4067,20 @@ class DXFImportDialog:
     def corner_brace_repair_disabled_reason(item: ReviewItem | None) -> str:
         """Return an empty string only for safely identifiable repair subjects."""
 
+        corner_brace = member_role_label("corner_brace")
         if item is None:
-            return "請先選取角撐或待修角撐來源。"
+            return f"請先選取{corner_brace}或待修{corner_brace}來源。"
         if item.status == "excluded":
-            return "已排除的 DXF 來源不能修補角撐。"
+            return f"已排除的 DXF 來源不能修補{corner_brace}。"
         if item.role != "corner_brace":
-            return "只有 CornerBrace 可使用角撐修補。"
+            return f"只有{corner_brace}可使用{corner_brace}修補。"
         if not normalize_source_handles(item.source_handles):
-            return "角撐修補需要明確的 DXF source identity。"
+            return f"{corner_brace}修補需要明確的 DXF 來源識別。"
         if item.status == "recognized" and item.member_id:
             return ""
         if item.status == "unresolved" and item.member_id is None:
             return ""
-        return "此 Review item 不是可修補的正式或 unresolved CornerBrace。"
+        return f"此檢視項目不是可修補的正式{corner_brace}或待修{corner_brace}來源。"
 
     def _update_modification_tools(
         self,
@@ -3415,6 +4108,7 @@ class DXFImportDialog:
         self.endpoint_tools_frame.pack_forget()
         self.cad_engineering_line_button.pack_forget()
         self.corner_brace_repair_button.pack_forget()
+        self.column_association_repair_button.pack_forget()
         if has_candidates:
             self.endpoint_tools_frame.pack(side="left")
         if cad_supported:
@@ -3427,7 +4121,13 @@ class DXFImportDialog:
             self.corner_brace_repair_button.pack(side="left", padx=(10, 0))
         else:
             self.corner_brace_repair_button.configure(state="disabled")
-        if has_candidates or cad_supported or repair_supported:
+        column_repair_available = bool(self._selected_column_repair_subject_id())
+        if column_repair_available:
+            self.column_association_repair_button.configure(state="normal")
+            self.column_association_repair_button.pack(side="left", padx=(10, 0))
+        else:
+            self.column_association_repair_button.configure(state="disabled")
+        if has_candidates or cad_supported or repair_supported or column_repair_available:
             self.geometry_tools_frame.grid()
         else:
             self.geometry_tools_frame.grid_remove()
@@ -3437,7 +4137,7 @@ class DXFImportDialog:
         else:
             self.source_tools_frame.grid_remove()
             self.source_exclusion_status_label.grid_remove()
-        if has_candidates or cad_supported or repair_supported or source_supported:
+        if has_candidates or cad_supported or repair_supported or column_repair_available or source_supported:
             frame.grid()
         else:
             frame.grid_remove()
@@ -3934,17 +4634,40 @@ class DXFImportDialog:
             source="component_tree",
         )
 
-    def _select_unresolved_review_item(self, item: ReviewItem) -> None:
+    def _tree_iid_for_review_item_key(self, review_key: str) -> str:
+        return next(
+            (
+                iid
+                for iid, key in getattr(
+                    self,
+                    "review_item_by_tree_iid",
+                    {},
+                ).items()
+                if key == review_key
+            ),
+            "",
+        )
+
+    def _select_unresolved_review_item(
+        self,
+        item: ReviewItem,
+        *,
+        source: str = "component_tree",
+    ) -> None:
         self.selected_problem = None
         self.selected_review_item_key = item.key
         self.focus_member_ids.clear()
         self.focus_handles = set(item.source_handles)
         revision = getattr(self.selection_state, "revision", 0) + 1
         self.selection_state = SelectionState(
-            selection_source="component_tree",
+            selection_source=source,
             revision=revision,
         )
         self.selection_controller.state = self.selection_state
+        if source != "component_tree":
+            iid = self._tree_iid_for_review_item_key(item.key)
+            if iid:
+                self.member_tree_selection.select(iid)
         if self.selected_only_var.get():
             self.selected_only_var.set(False)
             self._refresh_problem_tree()
@@ -4012,6 +4735,7 @@ class DXFImportDialog:
     def _selection_source_label(source: str) -> str:
         return {
             "auto": "自動辨識",
+            "unresolved": "未解析",
             "manual_candidate_points": "人工候選點",
             "cad_manual": "CAD 人工指定",
             "waler_contact_adjustment": "圍令接觸位置調整",
@@ -4339,6 +5063,153 @@ class DXFImportDialog:
             tolerance_pixels,
         )
 
+    def _invalidate_error_source_hit_index(self) -> None:
+        """Discard screen-space records whenever one projection input changes."""
+
+        self.canvas_error_source_hit_lines = []
+        self._error_source_hit_index_stamp = None
+
+    @staticmethod
+    def _ui_boolean_value(variable: Any, default: bool) -> bool:
+        try:
+            return bool(variable.get())
+        except (AttributeError, TypeError):
+            return default
+
+    def _current_error_source_hit_index_stamp(
+        self,
+    ) -> ErrorSourceHitIndexStamp:
+        result = getattr(self, "result", None)
+        viewport = getattr(self, "preview_viewport", None)
+        viewport_transform = (
+            None
+            if viewport is None or viewport.view_bounds is None
+            else viewport.legacy_transform
+        )
+        review_items_signature = tuple(
+            sorted(
+                (
+                    item.key,
+                    item.status,
+                    item.highest_severity,
+                    normalize_source_handles(item.source_handles),
+                )
+                for item in getattr(self, "review_items", ())
+            )
+        )
+        return ErrorSourceHitIndexStamp(
+            viewport_transform=viewport_transform,
+            render_generation=getattr(self, "_preview_render_generation", 0),
+            visibility_signature=(
+                self._ui_boolean_value(
+                    getattr(self, "show_source_var", None),
+                    True,
+                ),
+                self._ui_boolean_value(
+                    getattr(self, "show_auxiliary_var", None),
+                    True,
+                ),
+                tuple(sorted(getattr(self, "focus_handles", ()))),
+            ),
+            review_items_signature=review_items_signature,
+            active_result_signature=(
+                id(result),
+                str(getattr(result, "source_fingerprint", "")),
+            ),
+        )
+
+    def _unresolved_error_review_keys_by_handle(
+        self,
+    ) -> dict[str, tuple[str, ...]]:
+        keys_by_handle: dict[str, set[str]] = {}
+        for item in getattr(self, "review_items", ()):
+            if (
+                item.status != "unresolved"
+                or item.highest_severity not in ERROR_SEVERITIES
+            ):
+                continue
+            for handle in normalize_source_handles(item.source_handles):
+                keys_by_handle.setdefault(handle, set()).add(item.key)
+        return {
+            handle: tuple(sorted(keys))
+            for handle, keys in keys_by_handle.items()
+        }
+
+    def _rebuild_error_source_hit_index(self) -> None:
+        """Project only currently rendered unresolved-error source segments."""
+
+        self.canvas_error_source_hit_lines = []
+        result = getattr(self, "result", None)
+        viewport = getattr(self, "preview_viewport", None)
+        if result is not None and viewport is not None and viewport.view_bounds is not None:
+            keys_by_handle = self._unresolved_error_review_keys_by_handle()
+            visible_geometry = self._visible_preview_source_geometry(
+                result,
+                show_source=self._ui_boolean_value(
+                    getattr(self, "show_source_var", None),
+                    True,
+                ),
+                show_auxiliary=self._ui_boolean_value(
+                    getattr(self, "show_auxiliary_var", None),
+                    True,
+                ),
+                focus_handles=getattr(self, "focus_handles", ()),
+            )
+            coordinate_system = result.coordinate_system
+            for geometry in visible_geometry:
+                normalized = normalize_source_handles(
+                    (geometry.source_handle,)
+                )
+                if not normalized:
+                    continue
+                review_keys = keys_by_handle.get(normalized[0], ())
+                if not review_keys:
+                    continue
+                displayed_points = tuple(
+                    coordinate_system.transform(point)
+                    for point in geometry.points
+                )
+                if (
+                    len(displayed_points) < 2
+                    or not self._preview_intersects(displayed_points)
+                ):
+                    continue
+                projected = tuple(
+                    self._project_preview_point(point)
+                    for point in displayed_points
+                )
+                segments = tuple(zip(projected, projected[1:]))
+                if geometry.closed and len(projected) > 2:
+                    segments = (*segments, (projected[-1], projected[0]))
+                self.canvas_error_source_hit_lines.extend(
+                    (review_key, start, end)
+                    for review_key in review_keys
+                    for start, end in segments
+                )
+        self._error_source_hit_index_stamp = (
+            self._current_error_source_hit_index_stamp()
+        )
+
+    def _ensure_error_source_hit_index_current(self) -> bool:
+        current_stamp = self._current_error_source_hit_index_stamp()
+        if getattr(self, "_error_source_hit_index_stamp", None) != current_stamp:
+            self._rebuild_error_source_hit_index()
+        return self._error_source_hit_index_stamp == current_stamp
+
+    def _error_source_hits(
+        self,
+        point: Point,
+        tolerance_pixels: float = 12.0,
+    ) -> tuple[str, ...]:
+        if not self._ensure_error_source_hit_index_current():
+            return ()
+        hits = PreviewController.segment_hits(
+            point,
+            self.canvas_error_source_hit_lines,
+            tolerance_pixels,
+        )
+        return tuple(dict.fromkeys(hits))
+
     def _pending_endpoint_hits(self, point: Point) -> tuple[str, ...]:
         component_id = self.selection_state.selected_component_id
         if not component_id:
@@ -4403,6 +5274,27 @@ class DXFImportDialog:
                 clear_problem=True,
                 source="canvas",
             )
+            return
+        error_hits = self._error_source_hits(canvas_point)
+        if len(error_hits) == 1:
+            review_item = getattr(self, "review_item_by_key", {}).get(
+                error_hits[0]
+            )
+            if (
+                review_item is not None
+                and review_item.status == "unresolved"
+                and review_item.highest_severity in ERROR_SEVERITIES
+            ):
+                self._select_unresolved_review_item(
+                    review_item,
+                    source="canvas",
+                )
+            return
+        if len(error_hits) > 1:
+            self.candidate_action_status_var.set(
+                "此位置重疊多個錯誤元件，請放大圖面後再點選，"
+                "或從元件清單選取。"
+            )
 
     def _locate_selected_member(self) -> None:
         self._open_preview_window()
@@ -4428,12 +5320,6 @@ class DXFImportDialog:
             if self.selection_state.mode == "idle"
             else ()
         )
-        try:
-            self.canvas.configure(
-                cursor=("hand2" if point_hits or endpoint_hits else "crosshair")
-            )
-        except self.tk.TclError:
-            pass
         hovered_point_id = point_hits[0] if point_hits else ""
         hovered_member_id = ""
         if not hovered_point_id:
@@ -4441,6 +5327,26 @@ class DXFImportDialog:
                 (float(event.x), float(event.y)),
                 self.canvas_member_hit_lines,
             )
+        error_hits = ()
+        if (
+            not point_hits
+            and not endpoint_hits
+            and not hovered_member_id
+            and self.selection_state.mode == "idle"
+        ):
+            error_hits = self._error_source_hits(
+                (float(event.x), float(event.y))
+            )
+        try:
+            self.canvas.configure(
+                cursor=(
+                    "hand2"
+                    if point_hits or endpoint_hits or len(error_hits) == 1
+                    else "crosshair"
+                )
+            )
+        except self.tk.TclError:
+            pass
         self.selection_controller.set_hovered_candidate(hovered_point_id)
         self.selection_controller.set_hovered_component(hovered_member_id)
 
@@ -4568,6 +5474,10 @@ class DXFImportDialog:
         except self.tk.TclError:
             return
         started_at = time.perf_counter()
+        self._preview_render_generation = (
+            getattr(self, "_preview_render_generation", 0) + 1
+        )
+        self._invalidate_error_source_hit_index()
         if self.preview_renderer is None:
             self.preview_renderer = PreviewRenderer(canvas, self.preview_scene)
         renderer = self.preview_renderer
@@ -4688,6 +5598,7 @@ class DXFImportDialog:
             self._draw_corner_brace_repair_overlay(repair_candidate)
         self._draw_coordinate_axis_layer()
         self._update_source_layer_visibility()
+        self._rebuild_error_source_hit_index()
         for layer in PreviewRenderer.LAYERS:
             try:
                 canvas.tag_raise(layer)
@@ -4706,7 +5617,15 @@ class DXFImportDialog:
         if self.result is None:
             return []
         return [
-            *((member, "#2e7d32", 4, None) for member in self.result.walers),
+            *(
+                (
+                    member,
+                    "#2e7d32" if member.has_formal_contact_face else "#ef6c00",
+                    4 if member.has_formal_contact_face else 3,
+                    None if member.has_formal_contact_face else (6, 4),
+                )
+                for member in self.result.walers
+            ),
             *((member, "#2e7d32", 3, None) for member in self.result.struts),
             *((member, "#2e7d32", 3, (8, 4)) for member in self.result.braces),
             *((member, "#2e7d32", 3, (10, 3)) for member in self.result.beams),
@@ -5463,12 +6382,25 @@ class DXFImportDialog:
             self._corner_brace_repair_overlay_items.append(item_id)
 
         for residual in self.corner_brace_repair_plan.residual_segments:
-            draw(residual, fill="#fb8c00", width=2, dash=(4, 3))
+            draw(residual, fill="#9e9e9e", width=2, dash=(4, 3))
         draw(
             (candidate.world_start, candidate.world_end),
             fill="#0d47a1",
             width=5,
         )
+        displayed_anchor = coordinate_system.transform(candidate.positional_anchor)
+        anchor_x, anchor_y = self._project_preview_point(displayed_anchor)
+        anchor_id = self.preview_renderer.create_oval(
+            "temporary_overlay",
+            anchor_x - 5,
+            anchor_y - 5,
+            anchor_x + 5,
+            anchor_y + 5,
+            fill="#fb8c00",
+            outline="#e65100",
+            width=2,
+        )
+        self._corner_brace_repair_overlay_items.append(anchor_id)
         self.canvas.tag_raise("temporary_overlay")
 
     def _draw_waler_adjustment_overlay(self) -> None:
@@ -5612,6 +6544,7 @@ class DXFImportDialog:
         )
 
     def _update_source_layer_visibility(self) -> None:
+        self._invalidate_error_source_hit_index()
         canvas = getattr(self, "canvas", None)
         if canvas is None:
             return
@@ -5630,7 +6563,8 @@ class DXFImportDialog:
                         handle,
                         (),
                     ):
-                        canvas.itemconfigure(item_id, state="normal")
+                        if item_id in self.preview_scene.source_geometry_items:
+                            canvas.itemconfigure(item_id, state="normal")
         except self.tk.TclError:
             return
 
@@ -5640,6 +6574,12 @@ class DXFImportDialog:
             iid = getattr(self, "member_tree_iid_by_member_id", {}).get(
                 member_id,
                 "",
+            )
+            if iid:
+                self.member_tree_selection.select(iid)
+        elif getattr(self, "selected_review_item_key", ""):
+            iid = self._tree_iid_for_review_item_key(
+                self.selected_review_item_key
             )
             if iid:
                 self.member_tree_selection.select(iid)

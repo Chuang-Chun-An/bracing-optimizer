@@ -1951,14 +1951,6 @@ class SupportInputApp:
         )
         self.result_scope_label.pack(fill="x", padx=6, pady=(0, 5))
 
-        result_action_frame = ttk.Frame(frame)
-        result_action_frame.pack(fill="x", padx=4, pady=(0, 6))
-        self.export_results_excel_button = ttk.Button(
-            result_action_frame,
-            text="匯出目前 0 個配置成果 Excel",
-            command=self._export_visible_results_to_excel,
-        )
-        self.export_results_excel_button.pack(side="left", padx=(0, 6))
         material_frame = ttk.LabelFrame(material_tab, text="目前顯示方案的材料用量與庫存比較")
         material_frame.pack(fill="both", expand=True, padx=8, pady=8)
         material_frame.rowconfigure(1, weight=1)
@@ -2013,10 +2005,31 @@ class SupportInputApp:
 
         self._build_execution_messages(diagnostics_tab)
 
-        export_frame = ttk.LabelFrame(export_tab, text="DXF 配置成果")
-        export_frame.pack(fill="x", padx=12, pady=12)
+        excel_export_frame = ttk.LabelFrame(
+            export_tab,
+            text="Excel 配置材料明細",
+        )
+        excel_export_frame.pack(fill="x", padx=12, pady=(12, 6))
         ttk.Label(
-            export_frame,
+            excel_export_frame,
+            text=(
+                "將「配置結果」中目前勾選顯示的圍令與支撐方案，"
+                "匯出為逐根材料明細與材料彙總 Excel。"
+            ),
+            wraplength=900,
+            justify="left",
+        ).pack(fill="x", padx=10, pady=(10, 8))
+        self.export_results_excel_button = ttk.Button(
+            excel_export_frame,
+            text="匯出目前 0 個配置成果 Excel",
+            command=self._export_visible_results_to_excel,
+        )
+        self.export_results_excel_button.pack(anchor="w", padx=10, pady=(0, 10))
+
+        dxf_export_frame = ttk.LabelFrame(export_tab, text="DXF 配置成果")
+        dxf_export_frame.pack(fill="x", padx=12, pady=(6, 12))
+        ttk.Label(
+            dxf_export_frame,
             text=(
                 "將「配置結果」中目前勾選顯示的圍令與支撐方案寫回 DXF。"
                 "右側共用預覽圖仍顯示相同的最終工程模型與配置結果。"
@@ -2025,7 +2038,7 @@ class SupportInputApp:
             justify="left",
         ).pack(fill="x", padx=10, pady=(10, 8))
         self.export_results_dxf_button = ttk.Button(
-            export_frame,
+            dxf_export_frame,
             text="匯出目前 0 個配置成果 DXF",
             command=self._export_visible_results_to_dxf,
         )

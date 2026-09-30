@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -7,8 +8,14 @@ from unittest.mock import patch
 
 import ezdxf
 from dxf_import.dialog import DXFImportDialog
-from dxf_import.importer import DXFImporter, Y05_LAYER_MAPPING
+from dxf_import.importer import (
+    DXFImporter,
+    Y05_LAYER_MAPPING,
+    Y1A_LAYER_MAPPING,
+    Y29_LAYER_MAPPING,
+)
 from dxf_import.models import (
+    Beam,
     CoordinateSystem,
     DXFImportResult,
     ExcludedSource,
@@ -16,16 +23,20 @@ from dxf_import.models import (
 )
 from dxf_import.recognition import (
     _BIMJoistRouteResult,
+    _Candidate,
     _GeometryGroup,
     _Primitive,
     _route_bim_joist_block,
 )
 from dxf_import.validation import build_review_items
 from dxf_import.joist_recognition import (
+    JOIST_COLUMN_TERMINAL_WINDOW_MM,
     JOIST_STRUT_FACE_CONTACT_TOLERANCE_MM,
     JoistColumnStationReference,
+    JoistContact,
     JoistContextSnapshot,
     JoistMemberReference,
+    JoistPairRelation,
     JoistPrimitive,
     JoistRecognitionInput,
     JoistRecognitionStatus,
@@ -37,6 +48,8 @@ from dxf_import.joist_recognition import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 Y05_DXF_PATH = next(PROJECT_ROOT.glob("670-CO-Y05*.dxf"), None)
+Y1A_DXF_PATH = PROJECT_ROOT / "Y1A擋土支撐簡化版.dxf"
+Y29_DXF_PATH = PROJECT_ROOT / "Y29_test.dxf"
 
 
 def _line(
@@ -61,6 +74,39 @@ def _source(offsets: tuple[float, ...], *, start: float = 0.0, end: float = 1000
 
 def _double_c_source(*, start: float = 0.0, end: float = 1000.0):
     return _source((0.0, 50.0, 100.0, 518.0, 568.0, 618.0), start=start, end=end)
+
+
+def _terminal_residual_source(
+    residual_segments: dict[int, tuple[tuple[float, float], ...]] | None = None,
+) -> JoistRecognitionInput:
+    offsets = (0.0, 50.0, 100.0, 518.0, 568.0, 618.0)
+    if residual_segments is None:
+        residual_segments = {
+            **{index: ((-675.0, -175.0),) for index in range(3)},
+            **{index: ((-640.0, -175.0),) for index in range(3, 6)},
+        }
+    primitives = [
+        _line((175.0, offset), (3000.0, offset), f"MAIN{index}")
+        for index, offset in enumerate(offsets)
+    ]
+    primitives.extend(
+        _line((start, offsets[index]), (end, offsets[index]), f"R{index}_{part}")
+        for index, segments in sorted(residual_segments.items())
+        for part, (start, end) in enumerate(segments)
+    )
+    return JoistRecognitionInput(
+        root_handle="ROOT",
+        root_entity_type="INSERT",
+        role="beam",
+        primitives=tuple(primitives),
+    )
+
+
+def _terminal_context() -> JoistContextSnapshot:
+    return JoistContextSnapshot(
+        struts=(_strut("S1", 0.0, width=350.0),),
+        column_stations=(_column("C1", "S1"),),
+    )
 
 
 def _single_c_source(*, start: float = 0.0, end: float = 1000.0):
@@ -127,6 +173,47 @@ class JoistEngineeringBoundaryTests(unittest.TestCase):
 
 
 class BIMJoistRecognitionTests(unittest.TestCase):
+    def test_terminal_recovery_ambiguity_routes_as_runtime_critical_diagnostic(self):
+        source = _terminal_residual_source(
+            {
+                index: ((-675.0, -175.0), (-500.0, -175.0))
+                for index in range(6)
+            }
+        )
+        group = _GeometryGroup(
+            "beam:ROOT",
+            "beam",
+            "BEAM",
+            [
+                _Primitive(
+                    list(item.points),
+                    item.closed,
+                    item.entity_type,
+                    item.source_handle,
+                )
+                for item in source.primitives
+            ],
+            {"ROOT"},
+            {"LINE", "INSERT"},
+            [],
+            "ROOT",
+            "INSERT",
+        )
+
+        routed = _route_bim_joist_block(
+            group,
+            DXFImporter("unused.dxf").tolerances,
+            _terminal_context(),
+        )
+
+        self.assertTrue(routed.handled)
+        self.assertEqual((), routed.candidates)
+        self.assertEqual("critical", routed.messages[0].severity)
+        self.assertEqual(
+            "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+            routed.messages[0].code,
+        )
+
     def test_ambiguous_bim_root_stays_unresolved_and_never_stages_beams(self):
         primitives = [
             _Primitive(list(item.points), False, "LINE", item.source_handle)
@@ -312,6 +399,225 @@ class BIMJoistRecognitionTests(unittest.TestCase):
             contact.recognition_method for contact in outcome.contacts
         })
 
+    def test_column_terminal_window_uses_inclusive_outward_signed_projection(self):
+        self.assertEqual(700.0, JOIST_COLUMN_TERMINAL_WINDOW_MM)
+        for terminal, expected_start in (
+            (0.0, 0.0),
+            (-700.0, -700.0),
+            (-700.001, 175.0),
+        ):
+            with self.subTest(terminal=terminal):
+                inner_endpoint = 100.0 if terminal == 0.0 else -175.0
+                segments = {
+                    index: ((terminal, inner_endpoint),)
+                    for index in range(6)
+                }
+                outcome = recognize_bim_joist(
+                    _terminal_residual_source(segments),
+                    _terminal_context(),
+                )
+                self.assertEqual(
+                    JoistRecognitionStatus.RECOGNIZED_PAIR,
+                    outcome.status,
+                )
+                self.assertEqual(
+                    (expected_start, expected_start),
+                    tuple(axis.start[0] for axis in outcome.axes),
+                )
+
+        reverse_side = {
+            index: ((200.0, 300.0),)
+            for index in range(6)
+        }
+        reverse_outcome = recognize_bim_joist(
+            _terminal_residual_source(reverse_side),
+            _terminal_context(),
+        )
+        self.assertEqual(
+            (175.0, 175.0),
+            tuple(axis.start[0] for axis in reverse_outcome.axes),
+        )
+
+    def test_terminal_recovery_requires_quorum_for_each_sibling(self):
+        missing_second_quorum = {
+            0: ((-675.0, -175.0),),
+            1: ((-675.0, -175.0),),
+            3: ((-640.0, -175.0),),
+        }
+
+        outcome = recognize_bim_joist(
+            _terminal_residual_source(missing_second_quorum),
+            _terminal_context(),
+        )
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, outcome.status)
+        self.assertEqual(
+            (175.0, 175.0),
+            tuple(axis.start[0] for axis in outcome.axes),
+        )
+        self.assertEqual(
+            {"endpoint_face_contact"},
+            {contact.recognition_method for contact in outcome.contacts},
+        )
+
+    def test_terminal_recovery_rejects_unmatched_offsets_and_directions(self):
+        base = _terminal_residual_source({})
+        source = replace(
+            base,
+            primitives=(
+                *base.primitives,
+                _line((-675.0, 25.0), (-175.0, 25.0), "OFFSET-A"),
+                _line((-675.0, 543.0), (-175.0, 543.0), "OFFSET-B"),
+                _line((-675.0, 0.0), (-175.0, 25.0), "ANGLE-A"),
+                _line((-675.0, 518.0), (-175.0, 543.0), "ANGLE-B"),
+            ),
+        )
+
+        outcome = recognize_bim_joist(source, _terminal_context())
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, outcome.status)
+        self.assertEqual(
+            (175.0, 175.0),
+            tuple(axis.start[0] for axis in outcome.axes),
+        )
+
+    def test_compatible_siblings_keep_independent_source_supported_endpoints(self):
+        outcome = recognize_bim_joist(
+            _terminal_residual_source(),
+            _terminal_context(),
+        )
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, outcome.status)
+        self.assertEqual(
+            (-675.0, -640.0),
+            tuple(axis.start[0] for axis in outcome.axes),
+        )
+        self.assertEqual(
+            {"finite_segment_intersection"},
+            {contact.recognition_method for contact in outcome.contacts},
+        )
+
+    def test_terminal_event_compatibility_uses_inclusive_fifty_mm_boundary(self):
+        for second_terminal, expected_status in (
+            (-625.0, JoistRecognitionStatus.RECOGNIZED_PAIR),
+            (-624.999, JoistRecognitionStatus.AMBIGUOUS),
+        ):
+            with self.subTest(second_terminal=second_terminal):
+                segments = {
+                    **{index: ((-675.0, -175.0),) for index in range(3)},
+                    **{
+                        index: ((second_terminal, -175.0),)
+                        for index in range(3, 6)
+                    },
+                }
+                outcome = recognize_bim_joist(
+                    _terminal_residual_source(segments),
+                    _terminal_context(),
+                )
+                self.assertEqual(expected_status, outcome.status)
+                if expected_status is JoistRecognitionStatus.RECOGNIZED_PAIR:
+                    self.assertEqual(
+                        (-675.0, -625.0),
+                        tuple(axis.start[0] for axis in outcome.axes),
+                    )
+                else:
+                    self.assertEqual(
+                        "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+                        outcome.diagnostic_code,
+                    )
+
+    def test_multiple_complete_terminal_interpretations_are_order_independent(self):
+        segments = {
+            index: ((-675.0, -175.0), (-500.0, -175.0))
+            for index in range(6)
+        }
+        source = _terminal_residual_source(segments)
+        reversed_source = replace(source, primitives=tuple(reversed(source.primitives)))
+
+        first = recognize_bim_joist(source, _terminal_context())
+        second = recognize_bim_joist(reversed_source, _terminal_context())
+
+        self.assertEqual(JoistRecognitionStatus.AMBIGUOUS, first.status)
+        self.assertEqual(first.status, second.status)
+        self.assertEqual(
+            "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+            first.diagnostic_code,
+        )
+        self.assertEqual(first.diagnostic_code, second.diagnostic_code)
+        self.assertEqual((), first.contacts)
+        self.assertEqual((), first.pair_relations)
+
+    def test_brace_clipped_fragments_count_as_collective_per_sibling_evidence(self):
+        segments = {
+            0: ((-675.0, -175.0),),
+            1: ((-675.0, -175.0),),
+            2: ((-675.0, -175.0),),
+            3: ((-640.0, -483.699),),
+            4: ((-627.0, -444.724),),
+            5: ((-630.0, -627.548),),
+        }
+
+        outcome = recognize_bim_joist(
+            _terminal_residual_source(segments),
+            _terminal_context(),
+        )
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, outcome.status)
+        self.assertEqual(
+            (-675.0, -640.0),
+            tuple(axis.start[0] for axis in outcome.axes),
+        )
+
+    def test_final_relation_proof_failure_falls_back_without_preliminary_leak(self):
+        relation = JoistPairRelation("S1", "C1", 150.0, 668.0, 518.0, 0.0)
+        with patch(
+            "dxf_import.joist_recognition._pair_relations",
+            side_effect=(
+                ((relation,), ""),
+                ((), "BIM_JOIST_PAIR_UNPAIRED"),
+                ((relation,), ""),
+            ),
+        ):
+            outcome = recognize_bim_joist(
+                _terminal_residual_source(),
+                _terminal_context(),
+            )
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, outcome.status)
+        self.assertEqual(
+            (175.0, 175.0),
+            tuple(axis.start[0] for axis in outcome.axes),
+        )
+        self.assertEqual(
+            {"endpoint_face_contact"},
+            {contact.recognition_method for contact in outcome.contacts},
+        )
+
+    def test_final_relation_identity_drift_is_blocking_without_preliminary_truth(self):
+        preliminary = JoistPairRelation(
+            "S1", "C1", 150.0, 668.0, 518.0, 0.0
+        )
+        conflicting = JoistPairRelation(
+            "S2", "C2", 150.0, 668.0, 518.0, 0.0
+        )
+        with patch(
+            "dxf_import.joist_recognition._pair_relations",
+            side_effect=(((preliminary,), ""), ((conflicting,), "")),
+        ):
+            outcome = recognize_bim_joist(
+                _terminal_residual_source(),
+                _terminal_context(),
+            )
+
+        self.assertEqual(JoistRecognitionStatus.AMBIGUOUS, outcome.status)
+        self.assertEqual(
+            "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+            outcome.diagnostic_code,
+        )
+        self.assertEqual((), outcome.axes)
+        self.assertEqual((), outcome.contacts)
+        self.assertEqual((), outcome.pair_relations)
+
     def test_fragmented_lines_continue_to_whole_source_terminal_extent(self):
         source = JoistRecognitionInput(
             root_handle="ROOT",
@@ -352,6 +658,43 @@ class BIMJoistRecognitionTests(unittest.TestCase):
         self.assertEqual(JoistRecognitionStatus.RECOGNIZED_SINGLE, outcome.status)
         self.assertEqual(1, len(outcome.axes))
         self.assertEqual("brace", outcome.contacts[0].member_role)
+
+    def test_importer_maps_brace_contact_without_creating_strut_crossing(self):
+        candidate = _Candidate(
+            (0.0, 0.0),
+            (1000.0, 0.0),
+            "bim_joist_single_axis",
+            True,
+            100.0,
+            1.0,
+            "BEAM",
+            {"ROOT"},
+            {"INSERT"},
+            [],
+            {"ROOT:joist-axis:0"},
+            [],
+            path_points=((0.0, 0.0), (1000.0, 0.0)),
+            joist_assembly_key="ROOT",
+            joist_axis_slot=0,
+            joist_contacts=(
+                JoistContact(
+                    0,
+                    "brace",
+                    "B1",
+                    (500.0, 0.0),
+                    100.0,
+                    (500.0, 0.0),
+                ),
+            ),
+        )
+
+        beam = DXFImporter._make_auxiliary(Beam, "BM", "beam", 1, candidate)
+
+        self.assertEqual((), beam.crossings)
+        self.assertEqual(1, len(beam.brace_contacts))
+        self.assertEqual("B1", beam.brace_contacts[0].brace_id)
+        self.assertEqual((500.0, 0.0), beam.brace_contacts[0].world_point)
+        self.assertEqual((), beam.associated_strut_ids)
 
     def test_l_angle_detail_is_not_promoted_to_a_joist(self):
         source = JoistRecognitionInput(
@@ -648,9 +991,16 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
             for contact in outcome.contacts
             if contact.recognition_method == "endpoint_face_contact"
         )
+        direct_contacts = tuple(
+            contact
+            for outcome in pair_outcomes
+            for contact in outcome.contacts
+            if contact.recognition_method == "finite_segment_intersection"
+        )
 
         self.assertEqual(68, len(relations))
-        self.assertEqual(40, len(endpoint_contacts))
+        self.assertEqual(0, len(endpoint_contacts))
+        self.assertEqual(136, len(direct_contacts))
         self.assertGreaterEqual(min(item.spacing for item in relations), 518.0 - 1e-3)
         self.assertLessEqual(max(item.spacing for item in relations), 518.001)
         self.assertLessEqual(
@@ -702,32 +1052,25 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
                     self.assertTrue(relation.column_id)
                     self.assertTrue(pair_spacing_is_eligible(relation.spacing))
                     self.assertLessEqual(abs(relation.midpoint_error), 2.0)
-                    expected_method = (
-                        "endpoint_face_contact"
-                        if relation.strut_id == strut_ids[0]
-                        else "finite_segment_intersection"
-                    )
                     self.assertEqual(
-                        {expected_method},
+                        {"finite_segment_intersection"},
                         {item.recognition_method for item in contacts},
                     )
                     for contact in contacts:
-                        if expected_method == "endpoint_face_contact":
-                            self.assertNotEqual(
-                                contact.source_contact_point,
-                                contact.point,
-                            )
-                        else:
-                            self.assertEqual(
-                                contact.source_contact_point,
-                                contact.point,
-                            )
+                        self.assertEqual(
+                            contact.source_contact_point,
+                            contact.point,
+                        )
 
     def test_e8f_uses_large_root_axes_and_small_overlaps_remain_details(self):
         e8f = self.outcomes["E8F"]
         first_main_strut_id = self.strut_id_by_source_handle["CD6"]
         self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, e8f.status)
         self.assertEqual(2, len(e8f.axes))
+        self.assertEqual(
+            (-36173.5, -36173.5),
+            tuple(round(axis.start[0], 3) for axis in e8f.axes),
+        )
         first_main_strut_contacts = tuple(
             contact
             for contact in e8f.contacts
@@ -735,18 +1078,14 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
         )
         self.assertEqual(2, len(first_main_strut_contacts))
         self.assertEqual(
-            {"endpoint_face_contact"},
+            {"finite_segment_intersection"},
             {
                 contact.recognition_method
                 for contact in first_main_strut_contacts
             },
         )
         for contact in first_main_strut_contacts:
-            self.assertAlmostEqual(
-                175.0,
-                abs(contact.source_contact_point[0] - contact.point[0]),
-                places=3,
-            )
+            self.assertEqual(contact.source_contact_point, contact.point)
         for handle in ("16BC", "16C6", "16DF", "16E0"):
             with self.subTest(handle=handle):
                 self.assertEqual(
@@ -754,13 +1093,34 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
                     self.outcomes[handle].status,
                 )
 
+    def test_f2a_keeps_per_sibling_source_supported_terminal_endpoints(self):
+        f2a = self.outcomes["F2A"]
+
+        self.assertEqual(JoistRecognitionStatus.RECOGNIZED_PAIR, f2a.status)
+        self.assertEqual(
+            (-36173.5, -36127.267),
+            tuple(round(axis.start[0], 3) for axis in f2a.axes),
+        )
+        self.assertLessEqual(
+            abs(f2a.axes[1].start[0] - f2a.axes[0].start[0]),
+            50.0,
+        )
+        self.assertNotEqual(f2a.axes[0].start[0], f2a.axes[1].start[0])
+
     def test_y05_importer_emits_58_beams_and_validated_crossings(self):
         self.assertEqual(58, len(self.result.beams))
         self.assertEqual(136, len(self.result.beam_crossings))
         self.assertEqual(
-            40,
+            0,
             sum(
                 crossing.recognition_method == "endpoint_face_contact"
+                for crossing in self.result.beam_crossings
+            ),
+        )
+        self.assertEqual(
+            136,
+            sum(
+                crossing.recognition_method == "finite_segment_intersection"
                 for crossing in self.result.beam_crossings
             ),
         )
@@ -796,14 +1156,14 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
                 if crossing.strut_id == first_main_strut_id
             )
             self.assertEqual(
-                "endpoint_face_contact",
+                "finite_segment_intersection",
                 first_main_strut_crossing.recognition_method,
             )
             self.assertIsNotNone(
                 first_main_strut_crossing.world_source_contact_point
             )
             self.assertAlmostEqual(
-                175.0,
+                0.0,
                 first_main_strut_crossing.distance,
                 places=3,
             )
@@ -886,7 +1246,7 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
         }
         self.assertTrue(e8f_stations.issubset(projected_stations))
 
-    def test_endpoint_face_source_and_engineering_points_transform_together(self):
+    def test_finalized_direct_source_and_engineering_points_transform_together(self):
         localized = apply_coordinate_system(
             self.result,
             CoordinateSystem("local", 1000.0, -2000.0, "test"),
@@ -894,10 +1254,11 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
         crossing = next(
             item
             for item in localized.beam_crossings
-            if item.recognition_method == "endpoint_face_contact"
+            if item.recognition_method == "finite_segment_intersection"
         )
 
         self.assertIsNotNone(crossing.world_source_contact_point)
+        self.assertEqual(crossing.world_point, crossing.world_source_contact_point)
         self.assertEqual(
             (
                 crossing.world_source_contact_point[0] - 1000.0,
@@ -941,6 +1302,80 @@ class Y05BIMJoistCharacterizationTests(unittest.TestCase):
             2,
             sum("E8F" in beam.source_handles for beam in restored.beams),
         )
+
+
+@unittest.skipUnless(
+    Y1A_DXF_PATH.is_file() and Y29_DXF_PATH.is_file(),
+    "Y1A/Y29 DXF fixtures unavailable",
+)
+class LegacyBeamAssetRegressionTests(unittest.TestCase):
+    def test_y1a_and_y29_beam_geometry_and_associations_stay_on_legacy_routes(self):
+        cases = (
+            (
+                Y1A_DXF_PATH,
+                Y1A_LAYER_MAPPING,
+                20,
+                {"mline_center_path": 20},
+                60,
+                (
+                    ("BM1", (349788.287, -711843.7), (369788.287, -710993.7)),
+                    ("BM20", (429585.787, -716547.569), (434288.287, -716547.569)),
+                ),
+            ),
+            (
+                Y29_DXF_PATH,
+                Y29_LAYER_MAPPING,
+                56,
+                {"mline_center_path": 40, "closed_outline_axis": 16},
+                279,
+                (
+                    ("BM1", (315460.79, -430353.499), (323114.664, -430353.499)),
+                    ("BM56", (281300.157, -455777.157), (282965.843, -457442.843)),
+                ),
+            ),
+        )
+        for path, mapping, beam_count, methods, crossings, endpoint_samples in cases:
+            with self.subTest(path=path.name):
+                importer = DXFImporter(path).read()
+                layer_roles = {
+                    layer: DXFImportDialog.USE_TO_ROLE[label]
+                    for layer, label in mapping.items()
+                    if layer in importer.layer_names
+                }
+                result = importer.convert(layer_roles=layer_roles)
+                beam_associations = tuple(
+                    item
+                    for item in result.component_associations
+                    if item.component_role == "beam"
+                )
+
+                self.assertEqual(beam_count, len(result.beams))
+                self.assertEqual(
+                    methods,
+                    dict(Counter(beam.recognition_method for beam in result.beams)),
+                )
+                self.assertEqual(crossings, len(result.beam_crossings))
+                self.assertEqual(crossings, len(beam_associations))
+                by_id = {beam.id: beam for beam in result.beams}
+                for beam_id, expected_start, expected_end in endpoint_samples:
+                    beam = by_id[beam_id]
+                    self.assertEqual(
+                        expected_start,
+                        tuple(round(value, 3) for value in beam.start),
+                    )
+                    self.assertEqual(
+                        expected_end,
+                        tuple(round(value, 3) for value in beam.end),
+                    )
+                self.assertFalse(
+                    any(
+                        message.code.startswith("BIM_JOIST_TERMINAL_")
+                        for message in result.messages
+                    )
+                )
+                self.assertFalse(
+                    any(beam.joist_assembly_key for beam in result.beams)
+                )
 
 
 if __name__ == "__main__":

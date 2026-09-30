@@ -624,7 +624,35 @@ Solver 在上述離散搜尋空間中建立 feasible path，並使用 DFS 尋找
 
 目前設定有最多 1,000,000 次 DFS visits 的實作上限；這是 Search Heuristic，不是工程規則。
 
-### 8.4 No material cutting
+### 8.4 Search representation and evaluation pipeline
+
+Single Waler GA 使用「接頭位置型」染色體，不直接把 segment lengths 當成 genes。
+每一個 gene 對應一個 candidate joint position：
+
+```text
+0：不選擇該接頭
+1：選擇該接頭
+```
+
+固定起點 `0` 與已解析的 `steel_target_length` 不放入染色體。解碼時先取出
+值為 `1` 的 candidate positions，排序並去重，再用相鄰節點差值建立
+segments。解碼本身只轉換表示法，不判斷合法性。
+
+每個 individual 的評估順序為：
+
+```text
+0/1 individual
+→ decode joints and segments
+→ validate joint clearance、segment range 與 purchasable lengths
+→ exact-length inventory／purchase allocation
+→ Short／Mid／Long ratio analysis
+→ local score 與 diagnostics payload
+```
+
+無效 individual 會取得供搜尋排序與診斷使用的 invalid penalty，但不會因此
+成為合法工程方案。正式候選仍必須通過全部 hard constraints。
+
+### 8.5 No material cutting
 
 Waler 不允許把較長庫存料裁成較短 segment。
 
@@ -637,7 +665,24 @@ Waler 不允許把較長庫存料裁成較短 segment。
 
 因此 `total_waste` 仍被計算及保存，但在現行 exact-length allocation 下通常為 0。
 
-### 8.5 Repair
+### 8.6 Feasible paths and initial population
+
+初始個體不是任意產生 bits 後等待 repair。Solver 先建立由合法 candidate
+positions 組成的有向圖；只有符合 segment range 且存在於 purchasable lengths
+的兩個節點之間才建立 edge。
+
+初始族群的建立流程為：
+
+1. 先檢查 `0 → steel_target_length` 是否至少存在一條可行路徑。
+2. 以 randomized DFS 取得不同的合法 joint sequences。
+3. 將 joint sequence 轉回 0/1 individual。
+4. 對初始個體再執行 repair，作為合法性與簡化保險。
+5. Randomized attempts 未取得路徑時，使用 deterministic DFS fallback。
+
+Randomization 只影響嘗試路徑與候選多樣性；所有成功路徑仍須符合相同 hard
+constraints。DFS visit cap 與 randomized attempt count 都是 Search Heuristic。
+
+### 8.7 Repair
 
 GA individual 是 candidate joint positions 的 bit sequence。
 
@@ -651,7 +696,29 @@ GA individual 是 candidate joint positions 的 bit sequence。
 
 Repair 是搜尋工具。它不改變正式合法性規則，也不代表人工方案必須經過相同修補程序。
 
-### 8.6 Staged GA
+Repair 每次只接受重新驗證後仍合法的局部變更。若迭代上限內仍無法取得合法
+individual，會放棄局部結果並重新建立一條合法路徑；這是搜尋 fallback，不是
+放寬 `purchasable_lengths`、joint clearance 或 segment range。
+
+### 8.8 Per-stage evolution
+
+每個 GA stage 先評估初始族群，之後每一代依序執行：
+
+```text
+依 score 排序
+→ 保留 elite
+→ tournament selection
+→ single-point crossover
+→ bit-flip mutation
+→ repair children
+→ 評估新的 population
+```
+
+Tournament selection 必須使用與 population index 對齊的 evaluation；elite
+則從依 score 排序後的 evaluation 取得。每一代的新 population 只評估一次，
+並記錄最佳合法分數、合法候選數與唯一合法方案數供搜尋穩定度判斷。
+
+### 8.9 Staged GA
 
 Single Waler 使用 staged Genetic Algorithm。
 
@@ -672,7 +739,7 @@ Single Waler 使用 staged Genetic Algorithm。
 
 固定 seed 使相同輸入及相同版本下的搜尋較可重現，但 GA 本身仍屬啟發式搜尋。
 
-### 8.7 Search escalation
+### 8.10 Search escalation
 
 每個階段會檢查：
 
@@ -686,13 +753,14 @@ Single Waler 使用 staged Genetic Algorithm。
 
 DEEP 完成後即停止；即使結果仍未穩定，也不再擴大搜尋。
 
-### 8.8 Candidate merge
+### 8.11 Candidate merge
 
 每個 GA stage 最多輸出 5 個 local candidates。
 
 所有已執行階段的結果會：
 
-1. 以 Waler solution signature 去重。
+1. 以完整 Waler solution signature 去重；signature 包含 ordered segments、
+   joints、tail adjustment 與 tail remainder。
 2. 相同 signature 保留較低 score。
 3. 依 score 與 deterministic signature 排序。
 4. 最終最多保留 5 個候選。

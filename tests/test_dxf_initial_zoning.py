@@ -14,6 +14,7 @@ from bracing_optimizer.infrastructure.project_persistence import DxfWorkflowStat
 from dxf_import.initial_zoning import (
     INITIAL_ZONING_TOPOLOGY_AMBIGUOUS,
     INITIAL_ZONING_TOPOLOGY_CONFLICT,
+    _build_units,
     assign_initial_zoning,
 )
 from dxf_import.models import (
@@ -215,6 +216,38 @@ class InitialZoningTests(unittest.TestCase):
         self.assertEqual(
             {frozenset(("S0", "S1-A", "S1-B", "S2"))},
             zoning_members(outcome),
+        )
+
+    def test_pending_double_support_never_becomes_one_ordering_unit(self):
+        first = strut("S1-A", 100, walers=("WL-A", "WR-A"))
+        second = strut("S1-B", 110, walers=("WL-A", "WR-A"))
+        candidate = DoubleSupportCandidate(
+            id="D1",
+            first_strut_id=first.id,
+            second_strut_id=second.id,
+            centerline_spacing=10,
+            angle_difference_deg=0,
+            overlap_ratio=1,
+            length_difference=0,
+            confidence=1,
+            qualification_status="pending_waler",
+            accepted=True,
+        )
+        object.__setattr__(candidate, "accepted", True)
+        source = result(
+            walers=self.chain_walers,
+            struts=(first, second),
+            candidates=(candidate,),
+        )
+
+        units = _build_units(
+            source,
+            {"WL-A": 0, "WR-A": 0, "WL-B": 1, "WR-B": 1},
+        )
+
+        self.assertEqual(
+            {unit.member_ids for unit in units},
+            {("S1-A",), ("S1-B",)},
         )
 
     def test_shared_unit_with_explicit_topology_conflict_stays_atomic_and_independent(self):

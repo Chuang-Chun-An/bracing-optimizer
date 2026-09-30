@@ -18,6 +18,7 @@ from bracing_optimizer.domain.support_adjacency import (
 
 from .geometry import _distance, _dot, _line_distance, _unit
 from .models import DXFImportResult, GeometryTolerances, Strut, Waler
+from .support_pairing import is_formally_accepted_double_support
 
 
 INITIAL_ZONING_TOPOLOGY_AMBIGUOUS = "INITIAL_ZONING_TOPOLOGY_AMBIGUOUS"
@@ -189,7 +190,7 @@ def _build_units(
         (
             tuple(sorted((candidate.first_strut_id, candidate.second_strut_id)))
             for candidate in result.double_support_candidates
-            if candidate.accepted
+            if is_formally_accepted_double_support(candidate)
             and candidate.first_strut_id in members
             and candidate.second_strut_id in members
         ),

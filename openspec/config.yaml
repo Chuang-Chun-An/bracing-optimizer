@@ -84,16 +84,30 @@ context: |
 
 rules:
   proposal:
+    - 產出文件時，必須把閱讀架構寫入 proposal.md，不得只在對話回覆中提供閱讀建議。
+    - 文件開頭必須依序包含「閱讀導航」、「快速摘要」、「現況與目標」、「主要流程」與「不變事項」。
+    - 「閱讀導航」必須用 P0 現在必讀、P1 實作前閱讀、P2 需要時再讀分級，列出具體文件與段落；P0 項目應控制在 3 至 5 項內。
+    - 閱讀導航必須列出本次可以先跳過的相關 spec 或區段；不得把整個 specs inventory 當成使用者的必讀清單。
+    - 快速摘要應以 3 至 5 點說明問題、決定、主要流程變化與不變事項。
+    - 現況與目標應使用 Before／After 或對照表；主要流程應使用短流程圖或編號步驟。
+    - 開頭必須提供可在 30 秒內理解的摘要，說明問題、目標、主要流程變化與不變事項。
+    - 優先使用白話描述現況與目標，必要的 domain term 第一次出現時必須簡短定義。
+    - 建議用現況／目標或 Before／After 對照說明主要流程，不要只列技術名詞。
     - 說明這次 change 想改變的 user-visible behavior 或 engineering behavior。
     - 必須包含清楚的 In Scope 與 Out of Scope。
     - 明確指出受影響的 capability。
     - 說明是否預期改變既有 Architecture、Domain、Solver 或 Workflow truth。
+    - 必須包含閱讀指引，指出實作者需要閱讀的相關 design、spec capability、Requirement 或 scenario；不得要求無差別閱讀所有 spec。
+    - 若流程或方案仍可能調整，應另外列出尚未決定的事項與會觸發重新評估的條件，不得把暫時假設寫成已確認規則。
     - Proposal 應精簡，Implementation detail 留到 design.md。
     - 不要因為現有 code 結構不漂亮，就把 cleanup 自動納入 proposal。
 
   specs:
+    - 產出文件時，必須在 Purpose（新 capability）或 ADDED／MODIFIED Requirements 之前加入「閱讀導航」，把 Requirements 分為必讀、條件式閱讀與可先跳過。
+    - 閱讀導航只能降低閱讀成本，不得取代或刪減完整的 SHALL／MUST 規則與 WHEN／THEN Scenario。
     - 已確認需求視為 authoritative behavior，不是建議。
     - Requirement 必須描述 observable behavior 或 domain behavior。
+    - Requirement 標題與 Scenario 敘述應優先使用可理解的行為語句；必要的識別字與 domain term 才放入精確條件。
     - 已確認的數值 engineering boundary 不得自行更改。
     - 必須區分 Engineering Hard Constraint、Solver Preference、
       Temporary Solver Heuristic 與 Implementation Detail。
@@ -105,8 +119,13 @@ rules:
       除非它只是純 Implementation Choice。
 
   design:
+    - 產出文件時，必須在開頭加入「閱讀導航」、「方案摘要」與「決策對照」。
+    - 閱讀導航必須指出實作者現在必須理解的 Decision，以及只有遇到特定模組或風險時才需要閱讀的 Decision。
+    - 決策對照必須連結每個重要 Decision 會影響的 spec Requirement 或 task；不得只列技術名詞。
     - design.md 的章節標題與說明文字預設使用繁體中文；
       程式識別字、檔名、狀態值、資料欄位與指令保留原始英文。
+    - 開頭應先用簡短文字或流程圖說明方案，再展開技術細節。
+    - 必須說明專有名詞在本 change 中的實際意思，以及它們如何對應到 proposal 的白話流程。
     - 在分配 layer responsibility 前，必須閱讀 docs/ARCHITECTURE.md。
     - 明確列出受影響的 layer 與 dependency direction。
     - 必須包含 Architecture Alignment。
@@ -127,6 +146,8 @@ rules:
       應先回頭修正 Spec，不得硬寫 code 滿足錯誤假設。
 
   tasks:
+    - 產出文件時，tasks.md 開頭必須加入「實作前閱讀」，列出每個 task group 開始前要看的 proposal、design Decision 與 spec Requirement。
+    - 每個 task 必須標示對應的行為或驗證條件，讓實作者不必重新通讀整份 change 才能開始。
     - tasks.md 的章節標題與任務敘述預設使用繁體中文；
       checkbox、任務編號、程式識別字、檔名、狀態值與指令保留原始格式。
     - 建立 tasks 前，必須閱讀已核准的 specs 與 design。
@@ -167,5 +188,8 @@ operations:
       - Archive 前確認 main specs 與 implemented behavior 一致。
       - 若 long-term Architecture、Domain、Solver 或 Workflow truth 已改變，
         必須確認對應長期文件已更新。
+      - Codex archive workflow 成功移動 change 後，必須使用專案 development-history updater 更新 `docs/DEVELOPMENT_HISTORY.md`，並回報 updated、already-recorded 或待補寫。
+      - 開發歷程更新失敗不得回滾已完成的 archive；必須保留 archive 路徑、錯誤原因與可重跑補寫方式。
+      - 此自動更新只由 Codex archive workflow 保證；不得宣稱直接執行原生 `openspec archive`、Git 或外部平台操作也會自動更新。
       - 不得將 unresolved known failure 當成成功完成並 archive。
       - 不得因 archive 而刪除仍具有 long-term reference value 的文件。

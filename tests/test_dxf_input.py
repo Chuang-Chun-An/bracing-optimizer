@@ -46,6 +46,7 @@ from dxf_import.models import (
 )
 from dxf_import.preview import (
     CandidateTreeAdapter,
+    PreviewController,
     PreviewRenderer,
     PreviewScene,
     RenderDirty,
@@ -695,7 +696,7 @@ class DXFInputRecognitionTests(unittest.TestCase):
         self.assertTrue(all(member.engineering_line_kind == "inner_line" for member in result.walers))
         self.assertEqual(
             {member.recognition_method for member in result.walers},
-            {"inner_boundary_line"},
+            {"closed_outline_axis", "parallel_edges_midline"},
         )
         self.assertEqual(sorted(member.start[1] for member in result.walers), [20.0, 980.0])
         self.assertEqual(sorted(member.end[1] for member in result.walers), [20.0, 980.0])
@@ -714,7 +715,7 @@ class DXFInputRecognitionTests(unittest.TestCase):
         self.add_default_strut_and_brace(model)
         result, _path = self.convert(doc)
         self.assertEqual(len(result.walers), 2)
-        self.assertTrue(all(member.recognition_method == "existing_inner_line" for member in result.walers))
+        self.assertTrue(all(member.recognition_method == "existing_centerline" for member in result.walers))
         self.assertTrue(all(not member.centerline_computed for member in result.walers))
 
     def test_manual_waler_candidate_replaces_result_and_solver_row(self):
@@ -1010,6 +1011,38 @@ class DXFInputRecognitionTests(unittest.TestCase):
         )
         self.assertEqual(hits, ("P01", "P02"))
 
+    def test_error_segment_hit_test_keeps_all_overlapping_identities(self):
+        hits = PreviewController.segment_hits(
+            (100.0, 100.0),
+            (
+                ("review-b", (90.0, 104.0), (110.0, 104.0)),
+                ("review-a", (90.0, 102.0), (110.0, 102.0)),
+                ("outside", (90.0, 120.0), (110.0, 120.0)),
+            ),
+            tolerance_pixels=8.0,
+        )
+
+        self.assertEqual(hits, ("review-a", "review-b"))
+        self.assertEqual(
+            PreviewController.segment_hits(
+                (100.0, 100.0),
+                tuple(reversed((
+                    ("review-b", (90.0, 104.0), (110.0, 104.0)),
+                    ("review-a", (90.0, 102.0), (110.0, 102.0)),
+                ))),
+                tolerance_pixels=8.0,
+            ),
+            ("review-a", "review-b"),
+        )
+        self.assertEqual(
+            PreviewController.segment_hits(
+                (100.0, 100.0),
+                (("outside", (90.0, 120.0), (110.0, 120.0)),),
+                tolerance_pixels=8.0,
+            ),
+            (),
+        )
+
     def test_preview_endpoint_hit_test_uses_visible_marker_pixels(self):
         hits = DXFImportDialog._preview_endpoint_hits(
             (100.0, 100.0),
@@ -1053,7 +1086,23 @@ class DXFInputRecognitionTests(unittest.TestCase):
             close=True,
             dxfattribs={"layer": "BEARER_AUX"},
         )
-        model.add_line((0, 0), (200, 200), dxfattribs={"layer": "CORNER_AUX"})
+        # A formal 300 mm CornerBrace centered from the lower Waler at
+        # (0, 0) to the Strut at (250, 900).  This test exercises layer
+        # classification, so its fixture must not rely on the removed generic
+        # single-line CornerBrace fallback.
+        axis_length = math.hypot(250, 900)
+        offset_x = -900 / axis_length * 150
+        offset_y = 250 / axis_length * 150
+        model.add_lwpolyline(
+            [
+                (offset_x, offset_y),
+                (250 + offset_x, 900 + offset_y),
+                (250 - offset_x, 900 - offset_y),
+                (-offset_x, -offset_y),
+            ],
+            close=True,
+            dxfattribs={"layer": "CORNER_AUX"},
+        )
         self.counter += 1
         path = Path(self.temp_dir.name) / f"classified_{self.counter}.dxf"
         doc.saveas(path)
@@ -1301,43 +1350,28 @@ class DXFInputRecognitionTests(unittest.TestCase):
         doc = self.new_doc()
         doc.layers.add("CORNER")
         model = doc.modelspace()
-        model.add_line((0, 0), (1000, 0), dxfattribs={"layer": "WALER"})
-        model.add_line((0, 1000), (1000, 1000), dxfattribs={"layer": "WALER"})
-        model.add_line((500, 0), (500, 1000), dxfattribs={"layer": "STRUT"})
+        model.add_line((0, 0), (2000, 0), dxfattribs={"layer": "WALER"})
+        model.add_line((0, 2000), (2000, 2000), dxfattribs={"layer": "WALER"})
+        model.add_line((1000, 0), (1000, 2000), dxfattribs={"layer": "STRUT"})
         block = doc.blocks.new("CORNER_PAIR")
 
-        def add_brace(
-            first_start,
-            first_end,
-            second_start,
-            second_end,
-            waler_contacts,
-            strut_contacts,
-        ):
+        def add_brace(first_start, first_end, second_start, second_end):
             block.add_line(first_start, first_end)
             block.add_line(second_start, second_end)
             block.add_line(first_start, second_start)
             block.add_line(first_end, second_end)
-            block.add_line(waler_contacts[0], first_start)
-            block.add_line(waler_contacts[1], second_start)
-            block.add_line(strut_contacts[0], first_end)
-            block.add_line(strut_contacts[1], second_end)
 
         add_brace(
-            (200, 200),
-            (450, 450),
-            (240, 160),
-            (490, 410),
-            ((100, 0), (300, 0)),
-            ((500, 300), (500, 550)),
+            (80.0, 190.0),
+            (880.0, 1256.6666666667),
+            (320.0, 10.0),
+            (1120.0, 1076.6666666667),
         )
         add_brace(
-            (800, 200),
-            (550, 450),
-            (760, 160),
-            (510, 410),
-            ((900, 0), (700, 0)),
-            ((500, 300), (500, 550)),
+            (1680.0, 10.0),
+            (880.0, 1076.6666666667),
+            (1920.0, 190.0),
+            (1120.0, 1256.6666666667),
         )
         model.add_blockref(
             "CORNER_PAIR",
@@ -1360,18 +1394,24 @@ class DXFInputRecognitionTests(unittest.TestCase):
         self.assertEqual(len(result.corner_braces), 2)
         self.assertEqual(
             {member.recognition_method for member in result.corner_braces},
-            {"brace_centerline_intersections"},
+            {"corner_brace_complete_tracks"},
         )
         self.assertEqual(
-            {(member.world_start, member.world_end) for member in result.corner_braces},
             {
-                ((40.0, 0.0), (500.0, 460.0)),
-                ((500.0, 460.0), (960.0, 0.0)),
+                tuple(
+                    (round(point[0], 6), round(point[1], 6))
+                    for point in (member.world_start, member.world_end)
+                )
+                for member in result.corner_braces
+            },
+            {
+                ((125.0, 0.0), (1000.0, 1166.666667)),
+                ((1000.0, 1166.666667), (1875.0, 0.0)),
             },
         )
         strut = result.struts[0]
-        self.assertEqual(strut.from_brace_to_waler_start_len, 460.0)
-        self.assertEqual(strut.from_brace_to_waler_end_len, 460.0)
+        self.assertEqual(strut.from_brace_to_waler_start_len, 875.0)
+        self.assertEqual(strut.from_brace_to_waler_end_len, 875.0)
         self.assertFalse(
             any(
                 message.code == "MULTIPLE_MODELS_FROM_ONE_SOURCE"
@@ -1383,12 +1423,18 @@ class DXFInputRecognitionTests(unittest.TestCase):
         doc = self.new_doc()
         doc.layers.add("CORNER")
         model = doc.modelspace()
-        model.add_line((0, 0), (1000, 0), dxfattribs={"layer": "WALER"})
-        model.add_line((0, 1000), (1000, 1000), dxfattribs={"layer": "WALER"})
-        model.add_line((500, 0), (500, 1000), dxfattribs={"layer": "STRUT"})
+        model.add_line((0, 0), (2000, 0), dxfattribs={"layer": "WALER"})
+        model.add_line((0, 2000), (2000, 2000), dxfattribs={"layer": "WALER"})
+        model.add_line((1000, 0), (1000, 2000), dxfattribs={"layer": "STRUT"})
         block = doc.blocks.new("PARALLEL_CORNER")
-        block.add_line((200, 200), (450, 450))
-        block.add_line((240, 160), (490, 410))
+        first_start = (80.0, 190.0)
+        first_end = (880.0, 1256.6666666667)
+        second_start = (320.0, 10.0)
+        second_end = (1120.0, 1076.6666666667)
+        block.add_line(first_start, first_end)
+        block.add_line(second_start, second_end)
+        block.add_line(first_start, second_start)
+        block.add_line(first_end, second_end)
         model.add_blockref(
             "PARALLEL_CORNER",
             (0, 0),
@@ -1409,11 +1455,11 @@ class DXFInputRecognitionTests(unittest.TestCase):
 
         self.assertEqual(len(result.corner_braces), 1)
         corner = result.corner_braces[0]
-        self.assertEqual(corner.recognition_method, "brace_centerline_intersections")
-        self.assertEqual(
-            (corner.world_start, corner.world_end),
-            ((40.0, 0.0), (500.0, 460.0)),
-        )
+        self.assertEqual(corner.recognition_method, "corner_brace_complete_tracks")
+        self.assertAlmostEqual(corner.world_start[0], 125.0)
+        self.assertAlmostEqual(corner.world_start[1], 0.0)
+        self.assertAlmostEqual(corner.world_end[0], 1000.0)
+        self.assertAlmostEqual(corner.world_end[1], 1166.6666666667)
         selected_start = next(
             point
             for point in corner.candidate_points
@@ -1424,19 +1470,25 @@ class DXFInputRecognitionTests(unittest.TestCase):
             for point in corner.candidate_points
             if point.id == corner.selected_end_point_id
         )
-        self.assertEqual(selected_start.world_point, (40.0, 0.0))
-        self.assertEqual(selected_end.world_point, (500.0, 460.0))
+        self.assertAlmostEqual(selected_start.world_point[0], 125.0)
+        self.assertAlmostEqual(selected_start.world_point[1], 0.0)
+        self.assertAlmostEqual(selected_end.world_point[0], 1000.0)
+        self.assertAlmostEqual(selected_end.world_point[1], 1166.6666666667)
         self.assertEqual(
             result.struts[0].from_brace_to_waler_start_len,
-            460.0,
+            875.0,
         )
         self.assertEqual(len(result.corner_brace_connections), 1)
         connection = result.corner_brace_connections[0]
-        self.assertEqual(connection.baseline_waler_attachment, (40.0, 0.0))
-        self.assertEqual(connection.baseline_strut_attachment, (500.0, 460.0))
+        self.assertAlmostEqual(connection.baseline_waler_attachment[0], 125.0)
+        self.assertAlmostEqual(connection.baseline_waler_attachment[1], 0.0)
+        self.assertAlmostEqual(connection.baseline_strut_attachment[0], 1000.0)
+        self.assertAlmostEqual(
+            connection.baseline_strut_attachment[1], 1166.6666666667
+        )
         self.assertAlmostEqual(
             connection.fixed_length_mm,
-            math.hypot(460.0, 460.0),
+            math.hypot(875.0, 1166.6666666667),
         )
 
     @staticmethod
@@ -1819,24 +1871,28 @@ class DXFInputRecognitionTests(unittest.TestCase):
         self.assertEqual(result.struts[0].recognition_method, "closed_outline_axis")
         self.assertTrue(result.struts[0].centerline_computed)
 
-    def test_diagonal_rectangle_brace_computes_one_arbitrary_angle_axis(self):
+    def test_diagonal_rectangle_brace_below_minimum_width_is_rejected(self):
         doc = self.new_doc()
         model = doc.modelspace()
         self.add_vertical_walers(model)
         model.add_line((0, 500), (1000, 500), dxfattribs={"layer": "STRUT"})
-        model.add_lwpolyline(
+        outline = model.add_lwpolyline(
             self.outline_around((0, 0), (1000, 1000), 20),
             close=True,
             dxfattribs={"layer": "BRACE"},
         )
         result, _path = self.convert(doc)
-        self.assertEqual(len(result.braces), 1)
-        brace = result.braces[0]
-        self.assertTrue(brace.centerline_computed)
-        self.assertAlmostEqual(abs((brace.end[1] - brace.start[1]) / (brace.end[0] - brace.start[0])), 1.0, places=3)
-        self.assertTrue(result.can_import)
+        self.assertEqual(result.braces, ())
+        width_messages = tuple(
+            message
+            for message in result.messages
+            if message.code == "BRACE_BODY_WIDTH_TOO_SMALL"
+        )
+        self.assertEqual(len(width_messages), 1)
+        self.assertEqual(width_messages[0].source_handles, (outline.dxf.handle,))
+        self.assertFalse(result.can_import)
 
-    def test_brace_outline_and_center_line_are_deduplicated(self):
+    def test_invalid_narrow_outline_does_not_merge_into_legal_centerline(self):
         doc = self.new_doc()
         model = doc.modelspace()
         self.add_vertical_walers(model)
@@ -1850,17 +1906,13 @@ class DXFInputRecognitionTests(unittest.TestCase):
         result, _path = self.convert(doc)
         self.assertEqual(len(result.braces), 1)
         self.assertEqual(result.braces[0].recognition_method, "existing_centerline")
-        self.assertEqual(set(result.braces[0].source_handles), {line.dxf.handle, outline.dxf.handle})
-        self.assertIn("DUPLICATED_COMPONENT", {message.code for message in result.messages})
-        duplicate_problem = next(
+        self.assertEqual(result.braces[0].source_handles, (line.dxf.handle,))
+        width_problem = next(
             item for item in build_problem_records(result)
-            if item.code == "DUPLICATED_COMPONENT"
+            if item.code == "BRACE_BODY_WIDTH_TOO_SMALL"
         )
-        self.assertEqual(duplicate_problem.component, "B1")
-        self.assertIn(
-            "重複幾何已自動合併",
-            " ".join(item.text for item in build_validation_overview(result)),
-        )
+        self.assertEqual(width_problem.source_handles, (outline.dxf.handle,))
+        self.assertNotIn("DUPLICATED_COMPONENT", {message.code for message in result.messages})
 
     def test_rotated_and_scaled_insert_uses_world_coordinates(self):
         doc = self.new_doc()
@@ -1924,7 +1976,7 @@ class DXFInputRecognitionTests(unittest.TestCase):
         with self.assertRaises(DXFImportError):
             result.to_project_rows()
 
-    def test_multiple_near_walers_marks_ambiguous_connection(self):
+    def test_numerically_equal_waler_relations_block_connection(self):
         doc = self.new_doc()
         model = doc.modelspace()
         model.add_line((-500, 0), (1000, 0), dxfattribs={"layer": "WALER"})
@@ -1933,8 +1985,15 @@ class DXFInputRecognitionTests(unittest.TestCase):
         model.add_line((5, 5), (500, 1000), dxfattribs={"layer": "STRUT"})
         model.add_line((100, 0), (900, 1000), dxfattribs={"layer": "BRACE"})
         result, _path = self.convert(doc)
-        self.assertIn("AMBIGUOUS_WALER_CONNECTION", {message.code for message in result.messages})
-        self.assertTrue(result.struts[0].from_waler)
+        ambiguity = next(
+            message
+            for message in result.messages
+            if message.code == "AMBIGUOUS_WALER_CONNECTION"
+            and message.role == "strut"
+        )
+        self.assertEqual(ambiguity.severity, "error")
+        self.assertFalse(result.can_import)
+        self.assertEqual(result.struts[0].from_waler, "")
 
     def test_summary_precedes_full_debug_and_append_ids_are_remapped(self):
         doc = self.new_doc()
@@ -2159,8 +2218,65 @@ class _FakeCanvas:
     def find_all(self):
         return tuple(self.items)
 
+    def itemconfigure(self, target, **options):
+        if isinstance(target, int):
+            targets = (target,) if target in self.items else ()
+        else:
+            targets = tuple(
+                item_id
+                for item_id, item in self.items.items()
+                if target in item["tags"]
+            )
+        for item_id in targets:
+            self.items[item_id].update(options)
+
 
 class DXFSelectionArchitectureTests(unittest.TestCase):
+    def test_hidden_source_layer_keeps_only_focused_geometry_rendered(self):
+        canvas = _FakeCanvas()
+        scene = PreviewScene()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.result = SimpleNamespace(
+            coordinate_system=CoordinateSystem(),
+            excluded_sources=(),
+        )
+        dialog.review_items = ()
+        dialog.canvas = canvas
+        dialog.preview_renderer = PreviewRenderer(canvas, scene)
+        dialog.preview_scene = scene
+        dialog.preview_viewport = CADViewport(
+            view_bounds=(-10.0, 20.0, -10.0, 20.0),
+            canvas_width=100.0,
+            canvas_height=100.0,
+        )
+        dialog.focus_handles = {"FOCUS"}
+        dialog.show_source_var = SimpleNamespace(get=lambda: False)
+        dialog.show_auxiliary_var = SimpleNamespace(get=lambda: True)
+
+        dialog._draw_source_geometry_layer(
+            (
+                SourceGeometry(
+                    "beam",
+                    "FOCUS",
+                    ((0.0, 0.0), (10.0, 0.0)),
+                    False,
+                ),
+                SourceGeometry(
+                    "beam",
+                    "HIDDEN",
+                    ((0.0, 5.0), (10.0, 5.0)),
+                    False,
+                ),
+            )
+        )
+        dialog._update_source_layer_visibility()
+
+        focused = canvas.items[scene.source_handle_items["FOCUS"][0]]
+        hidden = canvas.items[scene.source_handle_items["HIDDEN"][0]]
+        self.assertEqual(focused["fill"], "#1565c0")
+        self.assertEqual(focused["state"], "normal")
+        self.assertEqual(hidden["state"], "hidden")
+
     def test_error_column_uses_red_cross_and_label_without_status_ring(self):
         class StrictCanvas(_FakeCanvas):
             def create_oval(self, *coordinates, **options):
