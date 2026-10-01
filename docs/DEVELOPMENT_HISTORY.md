@@ -7,6 +7,16 @@
 
 <!-- codex-archive-log:start -->
 
+<!-- codex-archive-log:entry-start key="2026-10-01-reconcile-repository-documentation" -->
+### 2026-10-01｜`reconcile-repository-documentation`
+
+- Archive：[openspec/changes/archive/2026-10-01-reconcile-repository-documentation](../openspec/changes/archive/2026-10-01-reconcile-repository-documentation)
+- 完成內容：將 README 的定位從「程式碼完整鏡像」收斂為 repository 入口、系統概覽、操作／開發導覽與真相來源索引。；修正已確認的過時內容：測試案例 UI、移除的方法、legacy schema 升級、Waler 評分重複、舊測試失敗、過時 UI 結構及可由程式自動取得而不應手寫維護的數量。；對齊這次已完成的 Support Shim、暫時庫存政策、schema compatibility、manual Project result-only DXF、Material Spec editing ownership、legacy normalization 移除及 Waler evaluator 共用狀態。
+- Capabilities：無 spec-level capability
+- 驗證：Artifacts complete: proposal/design/tasks done, specs skipped; tasks 18/18 complete; openspec validate --all --strict passed 29/29.
+- Specs：No delta specs; skip_specs true; main specs unchanged.
+<!-- codex-archive-log:entry-end key="2026-10-01-reconcile-repository-documentation" -->
+
 <!-- codex-archive-log:entry-start key="2026-10-01-recognize-skew-cut-brace-outlines" -->
 ### 2026-10-01｜`recognize-skew-cut-brace-outlines`
 

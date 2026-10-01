@@ -1130,9 +1130,9 @@ Search Heuristic 不應用來判定人工方案 invalid。
 
 ---
 
-## 14. Known Solver Gaps
+## 14. Known Gap 與已確認的暫時 Solver 政策
 
-Known Gap 表示已知 Domain 與目前實作之間仍有差異，不代表必須立即修改。
+Known Gap 表示已知 Domain 與目前實作之間仍有差異，不代表必須立即修改。已確認的暫時政策是目前刻意保留的求解行為，只有在所列外部條件成立時才重新評估。
 
 ### Gap 1 — Support inventory scoring
 
@@ -1140,19 +1140,17 @@ Known Gap 表示已知 Domain 與目前實作之間仍有差異，不代表必�
 - Current：Support Solver 使用 purchasable lengths 判斷合法性，但 Inventory Qty／purchase quantity 尚未進入 score。
 - Waler Solver 已具有 local inventory／purchase scoring。
 
-### Gap 2 — Empty Material Spec fallback
+### 已確認暫時政策 1 — Empty Material Spec fallback
 
-- Domain：Material Spec 應決定可購買料長與庫存來源。
-- Current：Material Spec 空白時，以 Usage 下料長及每種 99 根近似無限庫存。
-- Classification：Implementation Fallback，不是工程規則。
+- Product decision：Material Spec 可以留空，不因空白而拒絕求解。
+- Current：Material Spec 空白時，以 Usage 下料長及每種 99 根近似無限庫存；有提供 Material Spec 與 Inventory Qty 時，沿用使用者目前輸入值與既有評估流程。
+- Classification：Implementation Fallback，不是工程規則。未來接上可靠庫存更新系統時再重新評估。
 
-### Gap 3 — Temporary Support material ratio
+### 已確認暫時政策 2 — Material ratio targets
 
-- Current：Support 預設使用 `38 / 40 / 22`。
+- Current：Support 預設使用 `38 / 40 / 22`，Waler 預設使用 `20 / 50 / 30`；兩者各自由使用者調整，不共用 target。
 - Classification：Temporary Solver Heuristic。
-- 它不是正式材料政策，未來可由成熟的庫存／採購模型取代。
-
-Waler 的 `20 / 50 / 30` 也屬 current Temporary Solver Heuristic，但不是程式 bug。
+- Ratio 只影響 scoring 與結果排序，不決定工程合法性；未來可由成熟的庫存／採購模型取代。
 
 ### Resolved — Manual Support Shim placement validation（原 Gap 4）
 

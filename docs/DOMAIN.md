@@ -364,7 +364,7 @@ Short 不代表所有小於 `4000 mm` 的材料；Solver 對 under-4000 material
 - Solver Preference：偏好現有庫存、減少採購，以及目前用來平衡材料分布的比例 scoring。
 - Implementation Fallback：Material Spec 空白時，以 Usage 下的料長及每種 `99` 根近似無限庫存，使資料不完整時仍可執行。
 
-Support Solver 現行 Short／Mid／Long 目標比例 `38% / 40% / 22%` 是 Temporary Solver Heuristic，不是固定工程政策。Material Spec 空白時的 `99` 根也不是正式 Domain rule。
+Support Solver 現行 Short／Mid／Long 預設比例為 `38% / 40% / 22%`，Waler 為 `20% / 50% / 30%`。兩者各自由使用者調整，只影響 scoring 與結果排序，屬於 Temporary Solver Heuristic，不是固定工程政策。Material Spec 空白時的 `99` 根也不是正式 Domain rule。
 
 ---
 
@@ -449,9 +449,9 @@ Solver input 會再把 Project 資訊整理成特定求解問題，例如 Strut 
 
 ---
 
-## 10. Known Domain–Implementation Gaps
+## 10. Known Gap 與已確認的暫時政策
 
-Known Gap 表示 Domain 已確認，但目前程式尚未完全符合；它不等同於自動待辦事項，後續修改仍須獨立定義 Feature Spec。
+Known Gap 表示 Domain 已確認，但目前程式尚未完全符合；它不等同於自動待辦事項，後續修改仍須獨立定義 Feature Spec。已確認的暫時政策則是目前刻意保留的產品／Solver 行為，不應再被描述成需求未定或實作落差。
 
 ### Gap 1 — Support Inventory Preference
 
@@ -459,17 +459,17 @@ Known Gap 表示 Domain 已確認，但目前程式尚未完全符合；它不�
 - Current implementation：Waler Solver 已部分考慮庫存與採購；Support Solver 尚未把 Inventory Qty／purchase quantity 納入 scoring。
 - Future：以獨立 Feature Spec 定義 Support 的庫存與採購偏好。
 
-### Gap 2 — Empty Material Spec fallback
+### 已確認暫時政策 1 — Empty Material Spec fallback
 
-- Domain：Material Spec 應決定合法可購買料長及庫存來源。
-- Current implementation：Material Spec 空白時，以 Usage 下料長及每種 `99` 根近似無限庫存。
-- Future：資料完整性機制成熟後，重新評估此 fallback。
+- Product decision：Material Spec 可以留空，不因資料不完整而拒絕求解。
+- Current implementation：Material Spec 空白時，以 Usage 下料長及每種 `99` 根近似無限庫存；使用者若提供 Material Spec 與 Inventory Qty，仍使用其目前輸入值進入既有流程。
+- Re-evaluation trigger：未來接上可靠且可持續更新的庫存系統時，再重新評估此 fallback。
 
-### Gap 3 — Temporary Material Ratio Heuristic
+### 已確認暫時政策 2 — Material Ratio Heuristic
 
-- Domain：Short／Mid／Long 分類正式有效；庫存不足仍允許採購。
-- Current implementation：Support Solver 使用 `38 / 40 / 22` 比例 scoring 暫時避免材料過度集中。
-- Future：庫存模型與庫存導向 Solver 成熟後，重新評估或取代此 heuristic。
+- Domain：Short／Mid／Long 分類正式有效；ratio target 不是工程合法性條件。
+- Current implementation：Support 預設 `38 / 40 / 22`，Waler 預設 `20 / 50 / 30`；兩者各自由使用者調整，只影響 scoring 與結果排序。
+- Re-evaluation trigger：可靠庫存系統與庫存導向 Solver 成熟後，重新評估或取代此 heuristic；Support／Waler 不共用 ratio target。
 
 ---
 
