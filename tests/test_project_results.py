@@ -55,6 +55,31 @@ class ProjectResultModelTests(unittest.TestCase):
         self.assertTrue(restored["result"]["manual_modified"])
         self.assertEqual(restored["result"]["selected_plan"]["segments"], [6000, 6000])
 
+    def test_legacy_waler_tail_adjustment_loads_without_migration(self):
+        source = {
+            "type": "waler",
+            "visible": True,
+            "result": {
+                "waler_id": "W1",
+                "selected_plan": {
+                    "segments": [6000, 6000],
+                    "tail_adjustment": 75,
+                    "pieces": [
+                        ("steel", 6000),
+                        ("steel", 6000),
+                        ("shim", 75),
+                    ],
+                },
+            },
+        }
+
+        payload = ProjectResultModel.serialize_result_item("W1-legacy", source)
+        restored = ProjectResultModel.deserialize_result_item(payload)
+
+        selected_plan = restored["result"]["selected_plan"]
+        self.assertEqual(selected_plan["tail_adjustment"], 75)
+        self.assertEqual(selected_plan["pieces"][-1], ("shim", 75))
+
     @staticmethod
     def support_solution():
         plan = support.SupportPlan(

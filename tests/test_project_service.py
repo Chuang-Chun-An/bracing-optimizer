@@ -14,6 +14,8 @@ from bracing_optimizer.infrastructure.project_persistence import (
     DxfStatus,
     DxfWorkflowStatus,
     ProjectPersistenceError,
+    PROJECT_SCHEMA_UNREADABLE_STAGE,
+    ProjectSerializer,
 )
 from bracing_optimizer.application.project_data import TABLE_COLUMNS, ProjectDataModel
 from bracing_optimizer.application.project_results import ProjectResultModel
@@ -257,6 +259,119 @@ class ProjectServiceTests(unittest.TestCase):
                 result = self.service.load_project(path)
 
                 self.assertEqual(result.payload.get("schema_version"), version)
+
+    def test_load_project_rejects_invalid_schema_versions_before_structure(self):
+        invalid_versions = ("3", 3.0, True, False, None, 0, -1)
+
+        for index, version in enumerate(invalid_versions):
+            with self.subTest(version=version, value_type=type(version).__name__):
+                path = self.root / f"invalid-version-{index}.json"
+                saved_payload = project_payload(include_asset=False)
+                saved_payload["schema_version"] = version
+                path.write_text(json.dumps(saved_payload), encoding="utf-8")
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    self.service.load_project(path)
+
+                self.assertIn("schema_version", raised.exception.stage)
+
+    def test_load_project_rejects_future_version_before_structure_validation(self):
+        path = self.root / "future.json"
+        saved_payload = project_payload(include_asset=False)
+        saved_payload["schema_version"] = 4
+        path.write_text(json.dumps(saved_payload), encoding="utf-8")
+
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            self.service.load_project(path)
+
+        self.assertIn("版本不相容", raised.exception.stage)
+        self.assertIn("較新程式", raised.exception.detail)
+        self.assertNotIn("dxf_asset", raised.exception.detail)
+
+    def test_load_project_reports_neutral_error_for_unreadable_compatible_version(self):
+        for version in (2, None):
+            with self.subTest(version=version):
+                path = self.root / f"unreadable-{version}.json"
+                saved_payload = project_payload(include_asset=False)
+                if version is None:
+                    saved_payload.pop("schema_version")
+                else:
+                    saved_payload["schema_version"] = version
+                path.write_text(json.dumps(saved_payload), encoding="utf-8")
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    self.service.load_project(path)
+
+                self.assertIn("無法以現行格式讀取", raised.exception.stage)
+                self.assertIn("dxf_asset", raised.exception.detail)
+
+    def test_load_project_keeps_current_version_validation_error(self):
+        path = self.root / "invalid-current.json"
+        path.write_text(
+            json.dumps(project_payload(include_asset=False)),
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            self.service.load_project(path)
+
+        self.assertEqual(raised.exception.stage, "JSON 驗證失敗")
+        self.assertIn("dxf_asset", raised.exception.detail)
+
+    def test_load_project_rejects_current_row_schema_mismatch_before_hydration(self):
+        path = self.root / "invalid-current-row.json"
+        saved_payload = project_payload()
+        saved_payload["input_data"] = ProjectDataModel(
+            walers=[{
+                "WalerID": "W1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 1000,
+                "EndY": 0,
+            }],
+        ).to_case_data()
+        saved_payload["input_data"]["walers"][0].pop("Remark")
+        path.write_text(json.dumps(saved_payload), encoding="utf-8")
+
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            self.service.load_project(path)
+
+        self.assertEqual(raised.exception.stage, PROJECT_SCHEMA_UNREADABLE_STAGE)
+        self.assertIn("底層驗證錯誤", raised.exception.detail)
+        self.assertIn("input_data.walers[1]", raised.exception.detail)
+        self.assertIn("Remark", raised.exception.detail)
+
+    def test_compatible_version_is_rewritten_only_by_actual_save(self):
+        for version in (2, None):
+            with self.subTest(version=version):
+                path = self.root / f"save-compatible-{version}.json"
+                saved_payload = project_payload()
+                if version is None:
+                    saved_payload.pop("schema_version")
+                else:
+                    saved_payload["schema_version"] = version
+                original_text = json.dumps(saved_payload, ensure_ascii=False)
+                path.write_text(original_text, encoding="utf-8")
+
+                loaded = self.service.load_project(path)
+
+                self.assertEqual(path.read_text(encoding="utf-8"), original_text)
+
+                self.service.save_project(
+                    SaveProjectRequest(
+                        project_path=path,
+                        payload=loaded.payload,
+                        current_project_path=path,
+                        existing_asset=loaded.payload.get("dxf_asset"),
+                        import_state=loaded.payload.get("dxf_import_state"),
+                        current_dxf_report=loaded.dxf_status_report,
+                        has_solver_result=False,
+                    )
+                )
+
+                persisted = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(persisted["schema_version"], 3)
+                ProjectSerializer.validate(persisted)
 
     def test_exact_relink_is_accepted_without_candidate_import(self):
         dxf_path = create_dxf(self.root / "same.dxf")

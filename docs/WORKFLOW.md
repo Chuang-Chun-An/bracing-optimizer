@@ -254,6 +254,8 @@ flowchart TD
 
 Load 會恢復 result visibility 與 paused Review state，但不恢復 runtime Solver cache。
 
+Project schema compatibility 在 persistence boundary 判斷。`schema_version` 只有欄位不存在才視為 missing；欄位存在時必須是排除 bool、且大於等於 `1` 的真正整數。missing、較舊版本與現行版本都必須通過同一套現行結構與 Domain 驗證；高於目前支援版本的檔案拒絕開啟並提示使用較新程式。`input_data` 只接受現行 table contract；必要 table 必須存在、optional table 可省略，已提供 table 的每筆 row 欄位集合必須完全相同。missing／較舊版本若驗證失敗，或 missing／較舊／現行版本發生 row／table schema mismatch，系統回報「無法以現行格式讀取；請建立新專案，並重新匯入 DXF 或重新輸入資料」及可辨識 table、row、field 的底層錯誤。載入流程不偵測舊格式特徵、不做 legacy 欄位轉換，也不提供舊檔轉換入口。相容檔案只有在使用者實際成功儲存時才改寫為現行 schema；僅開啟或關閉不會改寫來源檔。
+
 ### 4.3 Close Application
 
 | Item | Current behavior |
@@ -484,6 +486,10 @@ flowchart LR
 
 Input invalidation 會直接清除不再可信的 results，而不是保留 stale Solver result。這與 Solver operation failure before commit 不同。
 
+Material Spec definition 的 rename、Usage edit 與 delete 使用 Application staging：Main 將目前 row identity 與 proposed value 交給 `MaterialSpecEditing`，Application 在完整保留 persisted 及 runtime-only state 的 `ProjectDataModel` deep copy 上驗證並修改。被引用的 rename 第一次回傳 reference summary 要求既有確認；使用者接受後，Main 以相同 expected identity 與 reference summary 第二次呼叫，Application 重新驗證後才產生 staged Project／result state。取消、驗證失敗、stale request 或 staging exception 均保留原 Project、results 與 caches。
+
+Main 成功採用 staged models 時，依 Application outcome 清除必要 caches、更新材料摘要、標記 dirty 並刷新 UI。被引用的 rename 清除 result／cache；未被引用 definition 的修改與刪除保留 result 但仍標記 dirty。正式 state swap 或 cache adoption 失敗會 rollback；commit 完成後的純 UI refresh failure 不回滾已採用 state。此流程不改 DXF binding、材料政策、Solver 規則、Project schema 或 UI layout。
+
 ## 7. Solver Operations
 
 本章只描述 operation flow；搜尋與評分詳見 `SOLVER.md`。
@@ -677,12 +683,12 @@ Export 是 terminal output，不修改 Project input／results，也不改變 di
 | Export | Input | Commit point | Failure／Cancel |
 | --- | --- | --- | --- |
 | Excel | Visible Waler／Support plans、材料明細與摘要 | Temporary workbook 驗證後替換 destination | 不取代既有目的檔；Project state 不變 |
-| DXF Result | Visible plans、current Project geometry、Project → WCS metadata、可用 background | Temporary DXF 重讀與驗證後替換 destination | 不取代目的檔；必要時保留 diagnostic temp；Project state 不變 |
+| DXF Result | Visible plans；source-backed 使用 current Project geometry、Project → WCS metadata、可用 background；result-only 使用 Project identity 座標 | Temporary DXF 重讀與驗證後替換 destination | 不取代目的檔；必要時保留 diagnostic temp；Project state 不變 |
 | Preview Image | 目前完整 Preview 與輸出倍率 | Image 寫出成功 | 恢復 figure／viewport；Project state 不變 |
 
 同一 member 有多個 visible plans 時，Excel／DXF Result Export 會拒絕匯出。
 
-DXF Result Export 建立乾淨的新 DXF，不修改原始 DXF。Binding stale 目前不直接阻止 export，但必須有足夠的 Project → WCS metadata。
+DXF Result Export 建立乾淨的新 DXF，不修改原始 DXF。模式只依 `dxf_import_state` 是否存在判定，不依 `dxf_workflow_status`：欄位不存在或值為 `None` 的手動 Project 使用 result-only，把 Project 座標直接視為 WCS，只建立實際有結果的成果圖層，不輸出背景或 `SD_PROJECT_*`；state 存在時使用 source-backed，沿用既有背景、Project geometry 與圖層行為。空 Mapping `{}` 或其他不完整 state 回報座標錯誤，不 fallback。Binding stale 目前不直接阻止 source-backed export，但必須有足夠的 Project → WCS metadata。
 
 ## 12. Save / Load Persistence
 
@@ -849,9 +855,9 @@ Technical Limitation 不自動轉成 roadmap。
 
 ACK 前可恢復 Project row 與 DXF state。ACK 成功後 event 已移除；後續 invalidation、dirty 或 UI refresh 若失敗，不能以同一 event 安全重播完整 transaction。
 
-### Limitation 2 — Project → WCS metadata dependency
+### Limitation 2 — Source-backed Project → WCS metadata dependency
 
-DXF Result Export 的 Project → WCS information 目前來自 DXF import state。沒有 DXF state 的 Project 可能缺少 export 所需 metadata；目前未確認為近期產品修改。
+Source-backed DXF Result Export 的 Project → WCS information 仍來自 DXF import state；state 存在但 metadata 不完整時會停止，不猜測或降級。完全沒有 DXF state 的手動 Project 不受此限制，改以 result-only identity 座標輸出，且不宣稱與任何來源圖面對齊。
 
 ### Limitation 3 — Single-slot CAD event transport
 

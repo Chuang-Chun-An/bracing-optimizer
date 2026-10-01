@@ -1,13 +1,14 @@
 import copy
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from main import SupportInputApp
 from bracing_optimizer.application.project_data import ProjectDataModel, TABLE_COLUMNS
 from bracing_optimizer.application.project_results import ProjectResultModel
 from bracing_optimizer.application.solver_input_builder import SupportInputBuilder
 from bracing_optimizer.infrastructure.dxf_result_export import (
+    DXFExportMode,
     ExportPiece,
     MemberExportPlan,
 )
@@ -91,6 +92,15 @@ class FakeTree:
 
     def get_children(self):
         return tuple(self.children)
+
+    def delete(self, *row_ids):
+        for row_id in row_ids:
+            if row_id in self.children:
+                self.children.remove(row_id)
+
+    def insert(self, _parent, _position, *, iid, values):
+        self.children.append(iid)
+        self.values[(iid, "values")] = tuple(values)
 
     def set(self, row_id, column, value=None):
         if value is None:
@@ -246,6 +256,7 @@ class MainProjectEditingTests(unittest.TestCase):
             ),
         )
         export_report = SimpleNamespace(
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_counts=(),
             layer_name_fallbacks=(),
             dxf_version="R2010",
@@ -281,7 +292,9 @@ class MainProjectEditingTests(unittest.TestCase):
         self.assertIs(args[2], app.walers)
         self.assertIs(args[3], app.struts)
         self.assertIs(args[4], app.braces)
-        show_info.assert_called_once()
+        self.assertEqual(DXFExportMode.SOURCE_BACKED, export_results.call_args.kwargs["export_mode"])
+        self.assertEqual(2, show_info.call_count)
+        self.assertIn("Source-backed", show_info.call_args_list[0].args[0])
 
     def test_only_binding_fields_are_classified_as_dxf_stale_changes(self):
         binding_fields = {
@@ -504,6 +517,7 @@ class MainProjectEditingTests(unittest.TestCase):
             ),
         )
         export_report = SimpleNamespace(
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_counts=(),
             layer_name_fallbacks=(),
             dxf_version="R2018",
@@ -537,8 +551,9 @@ class MainProjectEditingTests(unittest.TestCase):
         export_results.assert_called_once()
         self.assertEqual(500, export_results.call_args.args[3][0]["StartX"])
 
-    def test_main_reports_missing_project_to_world_coordinate_metadata(self):
+    def test_manual_project_exports_in_result_only_mode(self):
         app = self.make_app(with_dxf=False)
+        events = []
         app._visible_dxf_export_plans = lambda: (
             MemberExportPlan(
                 "W1",
@@ -547,6 +562,110 @@ class MainProjectEditingTests(unittest.TestCase):
                 result_id="W1-plan",
             ),
         )
+
+        export_report = SimpleNamespace(
+            export_mode=DXFExportMode.RESULT_ONLY,
+            background_counts=(),
+            layer_name_fallbacks=(),
+            dxf_version="R2018",
+            coordinate_units="mm",
+            background_layer_count=0,
+            background_segment_count=0,
+            project_geometry_count=0,
+            final_audit=SimpleNamespace(error_count=0, fix_count=0),
+            actual_dimension_count=1,
+            dimension_count=1,
+            actual_jack_count=0,
+            jack_count=0,
+            result_waler_count=1,
+            result_support_count=0,
+            output_path="result.dxf",
+            merge_guidance=(
+                "本檔使用目前 Project 座標直接輸出，未對齊任何來源圖面。"
+                "合併至其他圖面時需由使用者自行定位。"
+            ),
+        )
+
+        with (
+            patch("main.messagebox.showwarning") as warning,
+            patch(
+                "main.messagebox.showinfo",
+                side_effect=lambda title, *_args, **_kwargs: events.append(
+                    f"info:{title}"
+                ),
+            ) as show_info,
+            patch("main.filedialog.asksaveasfilename", return_value="result.dxf"),
+            patch(
+                "main.export_results_to_dxf",
+                side_effect=lambda *_args, **_kwargs: (
+                    events.append("export") or export_report
+                ),
+            ) as export_results,
+        ):
+            app._export_visible_results_to_dxf()
+
+        warning.assert_not_called()
+        export_results.assert_called_once()
+        self.assertEqual(DXFExportMode.RESULT_ONLY, export_results.call_args.kwargs["export_mode"])
+        self.assertEqual("world", export_results.call_args.args[5].mode)
+        self.assertIn("Result-only", show_info.call_args_list[0].args[0])
+        completion = show_info.call_args_list[-1].args[1]
+        self.assertIn("使用 Project 座標直接輸出", completion)
+        self.assertIn("未對齊任何來源圖面", completion)
+        self.assertIn("需自行定位", completion)
+        self.assertNotIn("背景：", completion)
+        self.assertNotIn("Project 工程線", completion)
+        self.assertLess(events.index("info:DXF 匯出模式：Result-only"), events.index("export"))
+
+    def test_manual_project_cancel_preserves_state_and_skips_export(self):
+        app = self.make_app(with_dxf=False)
+        app.project_dirty = False
+        app._visible_dxf_export_plans = lambda: (
+            MemberExportPlan(
+                "W1",
+                "waler",
+                (ExportPiece("steel", 3000),),
+                result_id="W1-plan",
+            ),
+        )
+        original_rows = copy.deepcopy(app.walers)
+
+        with (
+            patch("main.messagebox.showinfo") as show_info,
+            patch("main.filedialog.asksaveasfilename", return_value=""),
+            patch("main.export_results_to_dxf") as export_results,
+        ):
+            app._export_visible_results_to_dxf()
+
+        self.assertIn("Result-only", show_info.call_args.args[0])
+        export_results.assert_not_called()
+        self.assertEqual(original_rows, app.walers)
+        self.assertFalse(app.project_dirty)
+
+    def test_missing_import_state_attribute_uses_result_only(self):
+        app = self.make_app(with_dxf=False)
+        del app.dxf_last_import_debug
+        app._visible_dxf_export_plans = lambda: (
+            MemberExportPlan(
+                "W1",
+                "waler",
+                (ExportPiece("steel", 3000),),
+                result_id="W1-plan",
+            ),
+        )
+
+        with (
+            patch("main.messagebox.showinfo"),
+            patch("main.filedialog.asksaveasfilename", return_value=""),
+            patch("main.export_results_to_dxf") as export_results,
+        ):
+            app._export_visible_results_to_dxf()
+
+        export_results.assert_not_called()
+
+    def test_empty_import_state_reports_coordinate_error_without_fallback(self):
+        app = self.make_app(with_dxf=False)
+        app.dxf_last_import_debug = {}
 
         with (
             patch("main.messagebox.showwarning") as warning,
@@ -559,6 +678,30 @@ class MainProjectEditingTests(unittest.TestCase):
         self.assertIn("Project → World", warning.call_args.args[0])
         save_dialog.assert_not_called()
         export_results.assert_not_called()
+
+    def test_no_visible_or_duplicate_results_stop_before_file_dialog(self):
+        app = self.make_app(with_dxf=False)
+        duplicate = MemberExportPlan(
+            "W1",
+            "waler",
+            (ExportPiece("steel", 3000),),
+            result_id="W1-plan",
+        )
+        for plans in ((), (duplicate, duplicate)):
+            with self.subTest(plan_count=len(plans)):
+                app._visible_dxf_export_plans = lambda plans=plans: plans
+                with (
+                    patch("main.messagebox.showinfo") as show_info,
+                    patch("main.messagebox.showwarning") as show_warning,
+                    patch("main.filedialog.asksaveasfilename") as save_dialog,
+                    patch("main.export_results_to_dxf") as export_results,
+                ):
+                    app._export_visible_results_to_dxf()
+
+                show_warning.assert_called_once()
+                show_info.assert_not_called()
+                save_dialog.assert_not_called()
+                export_results.assert_not_called()
 
     def test_translated_same_length_strut_is_incompatible(self):
         app = self.make_app()
@@ -627,6 +770,57 @@ class MainProjectEditingTests(unittest.TestCase):
 
         self.assertEqual(detail_app.struts[0]["BeamPositions"], "100, 250.5")
         self.assertEqual(inline_app.struts[0]["BeamPositions"], "100, 250.5")
+
+    def test_tree_preview_and_detail_reads_do_not_modify_strut_rows(self):
+        app = self.make_app(with_dxf=False)
+        row = app.struts[0]
+        row.update(Beam1=100, Beam2=200, Column1=300, Column2=400)
+        before = copy.deepcopy(row)
+        app.strut_detail_empty_var = FakeVariable()
+        app.strut_length_var = FakeVariable()
+        app._set_strut_detail_enabled = lambda _enabled: None
+
+        SupportInputApp._refresh_tree(app, "struts")
+        SupportInputApp._refresh_tree(app, "struts")
+
+        app._material_spec_options = lambda _usage: ()
+        app.strut_detail_widgets = {
+            name: FakeLabel()
+            for name in ("material_spec", "FromWaler", "ToWaler")
+        }
+        app.strut_detail_vars = {
+            "BeamPositions": FakeVariable(),
+            "ColumnPositions": FakeVariable(),
+        }
+        app.strut_detail_empty_var = FakeVariable()
+        app.strut_detail_status_var = FakeVariable()
+        app.strut_detail_status_label = FakeLabel()
+        app._set_strut_detail_enabled = lambda _enabled: None
+        app._update_strut_detail_length = lambda _row=None: None
+        SupportInputApp._load_strut_detail(app, 0)
+        SupportInputApp._load_strut_detail(app, 0)
+        self.assertEqual(row, before)
+
+        app.project_data.replace_table("walers", [])
+        row["StartX"] = ""
+        before_preview = copy.deepcopy(row)
+        app.ax = Mock()
+        app.ax.get_xlim.return_value = (0, 1)
+        app.ax.get_ylim.return_value = (0, 1)
+        app.ax.get_legend_handles_labels.return_value = ([], [])
+        app.canvas = Mock()
+        app.result_items = {}
+        app._cancel_preview_scroll_redraw = lambda: None
+        app._end_preview_interaction = lambda **_kwargs: None
+        app._draw_result_overlays = lambda: None
+        app._draw_preview_selection_highlight = lambda: None
+        SupportInputApp.update_preview(app)
+        SupportInputApp.update_preview(app)
+
+        self.assertEqual(row, before_preview)
+        self.assertEqual(app.events["dirty"], 0)
+        self.assertEqual(app.strut_detail_vars["BeamPositions"].get(), "")
+        self.assertEqual(app.strut_detail_vars["ColumnPositions"].get(), "")
 
     def test_blank_row_can_still_be_completed_one_field_at_a_time(self):
         app = self.make_app(with_dxf=False)

@@ -7,7 +7,10 @@ from unittest.mock import Mock, patch
 
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.project_results import ProjectResultModel
-from bracing_optimizer.infrastructure.project_persistence import DxfWorkflowStatus
+from bracing_optimizer.infrastructure.project_persistence import (
+    DxfWorkflowStatus,
+    ProjectPersistenceError,
+)
 from bracing_optimizer.presentation.project_navigation import (
     NavigationGuardOutcome,
     ProjectSaveOutcome,
@@ -289,6 +292,28 @@ class ProjectLifecycleCharacterizationTests(ProjectNavigationFixture):
         with self.assertRaisesRegex(RuntimeError, "invalid project"):
             SupportInputApp.load_project_case(app, "target", silent=True)
 
+        self.assert_snapshot_unchanged(before, app)
+
+    def test_schema_compatibility_failure_preserves_current_project_state(self):
+        app = self.build_app()
+        project_path = self.project_cases_dir / "target" / "project.json"
+        project_path.parent.mkdir()
+        project_path.write_text("{}", encoding="utf-8")
+        error = ProjectPersistenceError(
+            "專案版本不相容",
+            "檔案版本高於目前支援版本，請使用較新程式開啟。",
+        )
+        app._ensure_project_service = Mock(
+            return_value=SimpleNamespace(
+                load_project=Mock(side_effect=error),
+            )
+        )
+        before = self.snapshot(app)
+
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            SupportInputApp.load_project_case(app, "target", silent=True)
+
+        self.assertIs(raised.exception, error)
         self.assert_snapshot_unchanged(before, app)
 
     def test_open_adopts_only_the_hydrated_application_result(self):

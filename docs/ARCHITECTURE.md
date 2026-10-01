@@ -234,6 +234,7 @@ Recognition core 不依賴 Dialog、Preview 或 Review Workflow。
 | `ProjectDataModel` | 正式可變 Project input model | Walers、Struts、Braces、Inventory、Material Specs | Solver result、DXF provenance、UI widgets |
 | `ProjectResultModel` | 正式 Solver result state 與 persistence projection | Result items、visibility、calculated time、material usage | Solver 搜尋、Project input、UI selection |
 | `ProjectService` | Project use cases 與 persistence coordination | DXF apply transition、payload、hydration、save/load/relink workflow | Tkinter interaction、Preview refresh |
+| `MaterialSpecEditing` | 材料規格 definition 的 rename、Usage／delete 驗證、引用同步及 staged invalidation | Material Specs／Inventory／Waler／Strut 的單次編輯 transaction 與 structured outcome | MessageBox、Treeview、UI refresh、session cache storage |
 | `SupportPlanEditing` | 人工支撐方案修改與重新評估 | Edit context、piece validation、staged solution | Editor widgets、結果 Treeview |
 | `WalerPlanEditing` | 人工圍令方案修改、合法性與重算 | Waler edit validation 與 staged plan | Editor widgets、結果顯示 |
 | `SupportInputBuilder` | Project geometry → Support Solver input | Input transformation 與 builder validation | Support optimization |
@@ -307,6 +308,8 @@ DXF Dialog 透過 immutable `DXFReviewSnapshot` 取得 Workflow projection。Wor
 Live Review session 存在時，authoritative state 始終屬於 `DXFReviewWorkflow`。Review 暫停且 Dialog 關閉後，Main／Application session 接手 serialized resume state；專案儲存後，durable state 位於 Project payload 與 persistence boundary。再次繼續 Review 時，新的 `DXFReviewWorkflow` 驗證並恢復該狀態，重新成為 live state owner。
 
 Project load 時，`ProjectService` 先建立完整 `HydratedProject`，Main 再一次採用 Project input、result、DXF state 與 workflow status。
+
+Material Spec definition 編輯時，`MaterialSpecEditing` 以完整 deep copy 建立短期 staged `ProjectDataModel`，包含不進入 Project JSON 的 runtime-only attributes；它不透過 persistence projection 重建 model。成功 outcome 同時提供 staged `ProjectResultModel` 與 cache／refresh effects，Main 只進行一次採用及 UI projection。staged models 在採用前不是第二份 authoritative truth，失敗或取消後即丟棄。
 
 ## 7. Major Data Flows
 

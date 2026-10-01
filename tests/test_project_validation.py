@@ -75,6 +75,50 @@ class ProjectDataValidatorTests(unittest.TestCase):
             for issue in (*report.errors, *report.warnings)
         ))
 
+    def test_shared_layout_group_requires_the_same_ordered_waler_ids(self):
+        walers = [
+            {"WalerID": "W1", "StartX": 0, "StartY": -10000,
+             "EndX": 0, "EndY": 10000},
+            {"WalerID": "W2", "StartX": 10000, "StartY": -10000,
+             "EndX": 10000, "EndY": 10000},
+        ]
+        same_direction = ProjectDataModel(
+            walers=walers,
+            struts=[
+                {"StrutID": "S1", "FromWaler": "W1", "ToWaler": "W2",
+                 "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0,
+                 "Zoning": "Z1", "SharedLayoutGroup": "G1"},
+                {"StrutID": "S2", "FromWaler": "W1", "ToWaler": "W2",
+                 "StartX": 0, "StartY": 1000, "EndX": 10000, "EndY": 1000,
+                 "Zoning": "Z1", "SharedLayoutGroup": "G1"},
+            ],
+        )
+        reversed_direction = ProjectDataModel(
+            walers=walers,
+            struts=[
+                {"StrutID": "S1", "FromWaler": "W1", "ToWaler": "W2",
+                 "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0,
+                 "Zoning": "Z1", "SharedLayoutGroup": "G1"},
+                {"StrutID": "S2", "FromWaler": "W2", "ToWaler": "W1",
+                 "StartX": 10000, "StartY": 1000, "EndX": 0, "EndY": 1000,
+                 "Zoning": "Z1", "SharedLayoutGroup": "G1"},
+            ],
+        )
+
+        same_report = ProjectDataValidator().validate(same_direction)
+        reversed_report = ProjectDataValidator().validate(reversed_direction)
+
+        self.assertTrue(
+            same_report.valid,
+            [issue.message for issue in same_report.errors],
+        )
+        self.assertFalse(reversed_report.valid)
+        self.assertTrue(any(
+            issue.field == "SharedLayoutGroup"
+            and "相同圍令方向" in issue.message
+            for issue in reversed_report.errors
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -89,6 +89,7 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
             "bracing_optimizer/application/optimize_waler.py",
             "bracing_optimizer/application/optimize_waler_global.py",
             "bracing_optimizer/application/plan_editing.py",
+            "bracing_optimizer/application/material_spec_editing.py",
             "bracing_optimizer/application/project_data.py",
             "bracing_optimizer/application/project_mapper.py",
             "bracing_optimizer/application/project_results.py",

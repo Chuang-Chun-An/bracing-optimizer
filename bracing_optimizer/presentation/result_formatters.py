@@ -144,20 +144,25 @@ def format_waler_score_breakdown(
         score_text(joint_score),
     ])
     steel_length = count_value(plan.get("steel_length"), sum(segments))
-    tail_adjustment = count_value(plan.get("tail_adjustment"), 0)
     tail_gap = count_value(plan.get("gap"), 0)
     required_length = count_value(
         plan.get("required_length"),
-        steel_length + tail_adjustment + tail_gap,
+        steel_length + tail_gap,
     )
     tail_lines = [
         f"需求長度：{required_length} mm",
         f"標準鋼材總長：{steel_length} mm",
-        f"尾端調整塊：{tail_adjustment} mm",
         f"現場處理餘量：{tail_gap} mm（允許 0～{wales.WALER_MAX_GAP} mm）",
     ]
 
     option_title = f"方案 {option_index}" if option_index is not None else "方案"
+    if "score" in plan and plan.get("score") is None:
+        return "\n".join([
+            option_title,
+            *tail_lines,
+            "總分：無法計算（材料配置未完成）",
+            f"分段長度：{segments}",
+        ])
     return "\n".join([
         option_title,
         *tail_lines,

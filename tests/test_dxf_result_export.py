@@ -17,6 +17,7 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     PROJECT_WALER_LAYER,
     RESULT_SUPPORT_LAYER,
     RESULT_WALER_LAYER,
+    DXFExportMode,
     DXFResultExportError,
     ExportCoordinateSystem,
     ExportPiece,
@@ -25,6 +26,7 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     build_project_member_bindings,
     export_coordinate_system_from_import_state,
     export_results_to_dxf,
+    resolve_dxf_export_context,
 )
 from main import SupportInputApp
 
@@ -251,6 +253,7 @@ def export_basic(output_path, plans=None, state=None):
         struts,
         braces,
         basic_coordinate(),
+        export_mode=DXFExportMode.SOURCE_BACKED,
         background_state=state or clean_import_state(),
     )
 
@@ -272,6 +275,8 @@ class DXFResultExportTests(unittest.TestCase):
         self.assertEqual(CLEAN_DXF_ACAD_VERSION, ezdxf.readfile(output_path).dxfversion)
         self.assertEqual("mm", report.coordinate_units)
         self.assertEqual("local", report.coordinate_mode)
+        self.assertEqual(DXFExportMode.SOURCE_BACKED, report.export_mode)
+        self.assertIn("使用原始世界座標建立", report.merge_guidance)
         self.assertEqual(8, report.dimension_count)
         self.assertEqual(1, report.jack_count)
         self.assertEqual(0, report.final_audit.error_count)
@@ -391,6 +396,7 @@ class DXFResultExportTests(unittest.TestCase):
             struts,
             [],
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -495,6 +501,7 @@ class DXFResultExportTests(unittest.TestCase):
             struts,
             [],
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -615,6 +622,7 @@ class DXFResultExportTests(unittest.TestCase):
             struts,
             braces,
             basic_coordinate(),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -709,6 +717,7 @@ class DXFResultExportTests(unittest.TestCase):
             struts,
             braces,
             basic_coordinate(),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -740,11 +749,11 @@ class DXFResultExportTests(unittest.TestCase):
         self.assertEqual(2, report.member_count)
         self.assertEqual(0, report.final_audit.error_count)
 
-    def test_explicit_world_context_exports_without_dxf_background_state(self):
+    def test_result_only_waler_uses_identity_and_omits_unused_layers(self):
         walers = [
             {"WalerID": "W1", "StartX": 0, "StartY": 0, "EndX": 3000, "EndY": 0}
         ]
-        output_path = self.temp_path / "project-only.dxf"
+        output_path = self.temp_path / "waler-result-only.dxf"
 
         report = export_results_to_dxf(
             output_path,
@@ -753,11 +762,82 @@ class DXFResultExportTests(unittest.TestCase):
             [],
             [],
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.RESULT_ONLY,
         )
 
         self.assertTrue(output_path.is_file())
+        self.assertEqual(DXFExportMode.RESULT_ONLY, report.export_mode)
+        self.assertEqual("world", report.coordinate_mode)
         self.assertEqual(0, report.background_segment_count)
-        self.assertEqual(1, report.project_geometry_count)
+        self.assertEqual(0, report.project_geometry_count)
+        document = ezdxf.readfile(output_path)
+        self.assertIn(RESULT_WALER_LAYER, document.layers)
+        self.assertNotIn(RESULT_SUPPORT_LAYER, document.layers)
+        self.assertNotIn(PROJECT_WALER_LAYER, document.layers)
+        self.assertNotIn(PROJECT_STRUT_LAYER, document.layers)
+        self.assertNotIn(PROJECT_BRACE_LAYER, document.layers)
+        dimensions = list(document.modelspace().query("DIMENSION"))
+        self.assertEqual((0.0, 0.0), tuple(dimensions[0].dxf.defpoint2)[:2])
+        self.assertNotIn(JACK_BLOCK_NAME, document.blocks)
+        self.assertIn("使用目前 Project 座標直接輸出", report.merge_guidance)
+        self.assertIn("未對齊任何來源圖面", report.merge_guidance)
+        self.assertIn("需由使用者自行定位", report.merge_guidance)
+
+    def test_result_only_support_creates_only_support_layer_and_required_jack(self):
+        struts = [
+            {
+                "StrutID": "S1",
+                "StartX": 1000,
+                "StartY": 2000,
+                "EndX": 4000,
+                "EndY": 2000,
+            }
+        ]
+        plan = MemberExportPlan(
+            "S1",
+            "strut",
+            (ExportPiece("steel", 2400), ExportPiece("jack", 600)),
+        )
+        output_path = self.temp_path / "support-result-only.dxf"
+
+        report = export_results_to_dxf(
+            output_path,
+            (plan,),
+            [],
+            struts,
+            [],
+            ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.RESULT_ONLY,
+        )
+
+        document = ezdxf.readfile(output_path)
+        self.assertEqual(DXFExportMode.RESULT_ONLY, report.export_mode)
+        self.assertNotIn(RESULT_WALER_LAYER, document.layers)
+        self.assertIn(RESULT_SUPPORT_LAYER, document.layers)
+        self.assertIn(JACK_BLOCK_NAME, document.blocks)
+        inserts = [
+            entity
+            for entity in document.modelspace().query("INSERT")
+            if entity.dxf.name == JACK_BLOCK_NAME
+        ]
+        self.assertEqual(1, len(inserts))
+        self.assertEqual(RESULT_SUPPORT_LAYER, inserts[0].dxf.layer)
+
+    def test_export_context_uses_only_import_state_presence(self):
+        mode, coordinate = resolve_dxf_export_context(None)
+        self.assertEqual(DXFExportMode.RESULT_ONLY, mode)
+        self.assertEqual(ExportCoordinateSystem("world"), coordinate)
+
+        review_state = clean_import_state()
+        review_state["dxf_workflow_status"] = "REVIEW"
+        mode, coordinate = resolve_dxf_export_context(review_state)
+        self.assertEqual(DXFExportMode.SOURCE_BACKED, mode)
+        self.assertEqual("local", coordinate.mode)
+
+        for state in ({}, {"dxf_workflow_status": "REVIEW"}):
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(DXFResultExportError, "Project → World"):
+                    resolve_dxf_export_context(state)
 
     def test_missing_coordinate_metadata_has_clear_error(self):
         for state in (None, {}, {"coordinate_system": {}}):

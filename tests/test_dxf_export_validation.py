@@ -16,6 +16,7 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     JACK_BLOCK_NAME,
     RESULT_SUPPORT_LAYER,
     RESULT_WALER_LAYER,
+    DXFExportMode,
     DXFAuditIssue,
     DXFAuditSummary,
     DXFExportValidationError,
@@ -144,7 +145,20 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             struts,
             braces,
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=validation_state(),
+        )
+
+    def _export_result_only(self, output_path: Path):
+        walers, _struts, _braces = validation_project_rows()
+        return export_results_to_dxf(
+            output_path,
+            (MemberExportPlan("W1", "waler", (ExportPiece("steel", 3000),)),),
+            walers,
+            [],
+            [],
+            ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.RESULT_ONLY,
         )
 
     def _assert_old_output_preserved(self, output_path: Path, original: bytes):
@@ -209,6 +223,7 @@ class DXFCleanExportValidationTests(unittest.TestCase):
                 struts,
                 braces,
                 ExportCoordinateSystem("world"),
+                export_mode=DXFExportMode.SOURCE_BACKED,
                 background_state=state,
             )
 
@@ -230,6 +245,7 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             struts,
             braces,
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=validation_state(source_path=str(missing)),
         )
 
@@ -266,6 +282,7 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             struts,
             braces,
             ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -340,6 +357,7 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             input_data["struts"],
             input_data["braces"],
             coordinate_system,
+            export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
         )
 
@@ -414,6 +432,30 @@ class DXFCleanExportValidationTests(unittest.TestCase):
 
         self._assert_old_output_preserved(output_path, original)
         self.assertIn("成果座標不符", str(raised.exception))
+        self.assertTrue(raised.exception.temporary_path.is_file())
+
+    def test_result_only_forbidden_layer_does_not_overwrite_final(self):
+        output_path = self.temp_path / "result-only-layer-failure.dxf"
+        original = b"existing-final"
+        output_path.write_bytes(original)
+        real_save = exporter._save_clean_document
+
+        def inject_forbidden_layer(document, path):
+            document.layers.add(exporter.PROJECT_WALER_LAYER)
+            return real_save(document, path)
+
+        with mock.patch.object(
+            exporter,
+            "_save_clean_document",
+            side_effect=inject_forbidden_layer,
+        ):
+            with self.assertRaisesRegex(
+                DXFExportValidationError,
+                "禁止的 Project 圖層",
+            ) as raised:
+                self._export_result_only(output_path)
+
+        self._assert_old_output_preserved(output_path, original)
         self.assertTrue(raised.exception.temporary_path.is_file())
 
     def test_atomic_replace_failure_preserves_existing_final(self):

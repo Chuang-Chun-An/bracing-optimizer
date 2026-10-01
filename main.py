@@ -7,7 +7,7 @@ import shutil
 import sys
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -33,6 +33,14 @@ from bracing_optimizer.application.project_data import (
     GEOMETRY_TABLES,
     REQUIRED_RC_SPEC,
     ProjectDataModel,
+)
+from bracing_optimizer.application.material_spec_editing import (
+    MaterialSpecEditError,
+    MaterialSpecEditOperation,
+    MaterialSpecEditRequest,
+    MaterialSpecEditStatus,
+    MaterialSpecEditing,
+    material_spec_key,
 )
 from bracing_optimizer.application.project_data import (
     TABLE_COLUMNS as PROJECT_TABLE_COLUMNS,
@@ -67,11 +75,12 @@ from bracing_optimizer.presentation.project_navigation import (
     ProjectSaveStatus,
 )
 from bracing_optimizer.infrastructure.dxf_result_export import (
+    DXFExportMode,
     DXFResultExportError,
     ExportPiece,
     MemberExportPlan,
-    export_coordinate_system_from_import_state,
     export_results_to_dxf,
+    resolve_dxf_export_context,
 )
 from bracing_optimizer.infrastructure.excel_result_export import (
     ExcelResultExportError,
@@ -1426,7 +1435,6 @@ class SupportInputApp:
         if not (0 <= index < len(self.struts)):
             return
         row = self.struts[index]
-        self._migrate_strut_position_fields(row)
         self.selected_strut_index = index
         self._loading_strut_detail = True
         try:
@@ -3308,9 +3316,7 @@ class SupportInputApp:
     def _export_visible_results_to_dxf(self):
         dxf_state = getattr(self, "dxf_last_import_debug", None)
         try:
-            coordinate_system = export_coordinate_system_from_import_state(
-                dxf_state
-            )
+            export_mode, coordinate_system = resolve_dxf_export_context(dxf_state)
         except DXFResultExportError as exc:
             messagebox.showwarning(
                 "缺少 Project → World 座標資訊",
@@ -3332,6 +3338,7 @@ class SupportInputApp:
                 parent=self.root,
             )
             return
+
         if not plans:
             messagebox.showwarning(
                 "匯出 DXF",
@@ -3358,6 +3365,27 @@ class SupportInputApp:
                 parent=self.root,
             )
             return
+
+        if export_mode is DXFExportMode.RESULT_ONLY:
+            messagebox.showinfo(
+                "DXF 匯出模式：Result-only",
+                (
+                    "本次將建立 result-only DXF。\n"
+                    "檔案只包含目前可見的 Solver 結果，不包含來源背景或 "
+                    "Project geometry。\n"
+                    "Project 座標會直接作為圖面座標。"
+                ),
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "DXF 匯出模式：Source-backed",
+                (
+                    "本次將建立 source-backed DXF，沿用已保存的 Project → WCS "
+                    "座標資訊與既有來源支援輸出內容。"
+                ),
+                parent=self.root,
+            )
 
         source_text = (
             str(dxf_state.get("source_path", "") or "").strip()
@@ -3406,6 +3434,7 @@ class SupportInputApp:
                 self.struts,
                 self.braces,
                 coordinate_system,
+                export_mode=export_mode,
                 background_state=(
                     dxf_state if isinstance(dxf_state, Mapping) else None
                 ),
@@ -3438,11 +3467,15 @@ class SupportInputApp:
                 f"- {item.original_name or '<空白>'} → {item.output_name}"
                 for item in report.layer_name_fallbacks
             )
-        messagebox.showinfo(
-            "支撐配置成果DXF已建立",
-            (
-                "已建立乾淨DXF成果檔；原始DXF未被重新儲存或修改。\n"
-                f"DXF版本：{report.dxf_version}\n"
+        if report.export_mode is DXFExportMode.RESULT_ONLY:
+            context_summary = (
+                "模式：Result-only\n"
+                "座標：使用 Project 座標直接輸出；未對齊任何來源圖面。\n"
+                "合併至其他圖面時需自行定位。\n"
+            )
+        else:
+            context_summary = (
+                "模式：Source-backed\n"
                 f"座標：原始世界座標；單位：{report.coordinate_units}\n"
                 f"背景：{report.background_layer_count}個圖層、"
                 f"{report.background_segment_count}條線段\n"
@@ -3450,7 +3483,20 @@ class SupportInputApp:
                 f"目前 Project 工程線：{report.project_geometry_count} 條\n"
                 "Project 圖層：SD_PROJECT_WALER、SD_PROJECT_STRUT、"
                 "SD_PROJECT_BRACE\n"
-                f"成果圖層：SD_RESULT_WALER、SD_RESULT_SUPPORT\n"
+            )
+        result_layers = []
+        if report.result_waler_count:
+            result_layers.append("SD_RESULT_WALER")
+        if report.result_support_count:
+            result_layers.append("SD_RESULT_SUPPORT")
+        result_layer_summary = "、".join(result_layers)
+        messagebox.showinfo(
+            "支撐配置成果DXF已建立",
+            (
+                "已建立乾淨DXF成果檔；原始DXF未被重新儲存或修改。\n"
+                f"DXF版本：{report.dxf_version}\n"
+                f"{context_summary}"
+                f"成果圖層：{result_layer_summary}\n"
                 f"最終結構檢查：{report.final_audit.error_count}項錯誤、"
                 f"{report.final_audit.fix_count}項修復\n"
                 f"Dimension：{report.actual_dimension_count}／"
@@ -5935,7 +5981,19 @@ class SupportInputApp:
         table_name=None,
         field_name=None,
         dxf_binding_changed=None,
+        staged_change=None,
+        had_result=False,
     ):
+        if staged_change is not None:
+            if staged_change.clear_solver_memory:
+                self._refresh_results_tree()
+                if had_result and hasattr(self, "result_text"):
+                    self.show_result("結果已失效，請重新計算")
+            if staged_change.update_material_summary:
+                self._update_material_summary()
+            self._mark_project_dirty(staged_change.dirty_reason)
+            self.update_preview(preserve_view=preserve_view)
+            return
         change_plan = self._ensure_project_service().plan_input_change(
             table_name=table_name,
             field_name=field_name,
@@ -6415,8 +6473,6 @@ class SupportInputApp:
         display_columns = tuple(tree["columns"])
         row_columns = tuple(column for column in display_columns if column != "No")
         for index, row in enumerate(data):
-            if table_name == "struts":
-                self._migrate_strut_position_fields(row)
             values = [index + 1] + [
                 self._format_display_value(row.get(col, ""))
                 for col in row_columns
@@ -6439,50 +6495,6 @@ class SupportInputApp:
         if value is None:
             return ""
         return str(value)
-
-    @staticmethod
-    def _format_position_value(value):
-        try:
-            number = float(value)
-        except (TypeError, ValueError):
-            return str(value).strip()
-        if number.is_integer():
-            return str(int(number))
-        return str(number)
-
-    def _format_position_list(self, values):
-        return ",".join(
-            self._format_position_value(value)
-            for value in values
-            if value not in (None, "")
-        )
-
-    def _migrate_strut_position_fields(self, row):
-        if not isinstance(row, dict):
-            return row
-
-        if str(row.get("BeamPositions", "") or "").strip() == "":
-            beam_values = [
-                row.get("Beam1"),
-                row.get("Beam2"),
-            ]
-            migrated = self._format_position_list(beam_values)
-            if migrated:
-                row["BeamPositions"] = migrated
-
-        if str(row.get("ColumnPositions", "") or "").strip() == "":
-            column_values = [
-                row.get("Column1"),
-                row.get("Column2"),
-            ]
-            migrated = self._format_position_list(column_values)
-            if migrated:
-                row["ColumnPositions"] = migrated
-
-        for old_key in ("Beam1", "Beam2", "Column1", "Column2"):
-            row.pop(old_key, None)
-
-        return row
 
     def _parse_position_list(self, value):
         if value is None:
@@ -6529,93 +6541,150 @@ class SupportInputApp:
         return options
 
     @staticmethod
-    def _material_spec_key(usage, spec):
-        return (
-            str(usage or "").strip().casefold(),
-            str(spec or "").strip().casefold(),
-        )
-
-    def _material_spec_key_exists(self, usage, spec, *, exclude_index=None):
-        target = self._material_spec_key(usage, spec)
-        if not target[1]:
-            return False
-        return any(
-            index != exclude_index
-            and self._material_spec_key(row.get("Usage"), row.get("Spec"))
-            == target
-            for index, row in enumerate(self.material_specs)
-        )
-
-    def _material_spec_references(self, usage, spec):
-        """Return every current string reference to one (Usage, Spec) key."""
-
-        target = self._material_spec_key(usage, spec)
-        references = {
-            "inventory": [],
-            "walers": [],
-            "struts": [],
-        }
-        if not target[1]:
-            return references
-        references["inventory"] = [
-            index
-            for index, row in enumerate(self.inventory)
-            if self._material_spec_key(row.get("Usage"), row.get("Spec"))
-            == target
-        ]
-        if target[0] == "圍令".casefold():
-            references["walers"] = [
-                index
-                for index, row in enumerate(self.walers)
-                if self._material_spec_key("圍令", row.get("material_spec"))
-                == target
-            ]
-        if target[0] == "支撐".casefold():
-            references["struts"] = [
-                index
-                for index, row in enumerate(self.struts)
-                if self._material_spec_key("支撐", row.get("material_spec"))
-                == target
-            ]
-        return references
-
-    @staticmethod
-    def _material_spec_reference_count(references):
-        return sum(len(indices) for indices in references.values())
-
-    @staticmethod
     def _material_spec_reference_text(references):
-        return (
-            f"庫存：{len(references.get('inventory', ()))} 筆\n"
-            f"圍令：{len(references.get('walers', ()))} 筆\n"
-            f"支撐：{len(references.get('struts', ()))} 筆"
-        )
+        def values(name):
+            if isinstance(references, Mapping):
+                return references.get(name, ())
+            return getattr(references, name, ())
 
-    def _rename_material_spec_references(
-        self,
-        usage,
-        old_spec,
-        new_spec,
-        *,
-        references=None,
-    ):
-        references = references or self._material_spec_references(
-            usage,
-            old_spec,
+        return (
+            f"庫存：{len(values('inventory'))} 筆\n"
+            f"圍令：{len(values('walers'))} 筆\n"
+            f"支撐：{len(values('struts'))} 筆"
         )
-        for index in references["inventory"]:
-            self.inventory[index]["Spec"] = new_spec
-        for index in references["walers"]:
-            self.walers[index]["material_spec"] = new_spec
-        for index in references["struts"]:
-            self.struts[index]["material_spec"] = new_spec
-        return references
 
     @staticmethod
     def _is_required_rc_spec(row):
         return (
             str(row.get("Usage", "") or "").strip() == REQUIRED_RC_SPEC["Usage"]
             and str(row.get("Spec", "") or "").strip().upper() == "RC"
+        )
+
+    def _ensure_material_spec_editing(self):
+        service = self.__dict__.get("_material_spec_editing")
+        if service is None:
+            service = MaterialSpecEditing(
+                self._ensure_project_service().plan_input_change
+            )
+            self._material_spec_editing = service
+        return service
+
+    def _show_material_spec_edit_error(self, outcome):
+        code = outcome.error_code
+        values = dict(outcome.display_args)
+        usage = str(values.get("usage", "") or "")
+        spec = str(values.get("spec", "") or "")
+        if code in {
+            MaterialSpecEditError.INVALID_ROW,
+            MaterialSpecEditError.STALE_REQUEST,
+            MaterialSpecEditError.INVALID_FIELD,
+        }:
+            messagebox.showwarning(
+                "輸入錯誤",
+                "材料規格資料已變更或無法識別，請重新操作。 已保留原值。",
+                parent=self.root,
+            )
+            return
+        if code == MaterialSpecEditError.REQUIRED_SPEC_LOCKED:
+            if values.get("operation") == MaterialSpecEditOperation.DELETE.value:
+                messagebox.showwarning(
+                    "不可刪除",
+                    "圍令規格 RC 為必要施工規格，不可刪除。",
+                    parent=self.root,
+                )
+            else:
+                messagebox.showinfo(
+                    "必要規格",
+                    "圍令規格 RC 為必要施工規格，不可修改或刪除。",
+                    parent=self.root,
+                )
+            return
+        if code == MaterialSpecEditError.BLANK_SPEC:
+            messagebox.showwarning(
+                "材料規格不可空白",
+                "既有材料規格不可改為空白。",
+                parent=self.root,
+            )
+            return
+        if code == MaterialSpecEditError.DUPLICATE_SPEC:
+            messagebox.showwarning(
+                "規格重複",
+                f"{usage}的材料規格「{spec}」已存在。",
+                parent=self.root,
+            )
+            return
+        if code == MaterialSpecEditError.REFERENCED_USAGE_LOCKED:
+            messagebox.showwarning(
+                "用途不可變更",
+                (
+                    f"材料規格「{spec}」仍被使用，不可直接變更用途。\n\n"
+                    f"{self._material_spec_reference_text(outcome.references)}\n\n"
+                    "請先移除或更換引用。"
+                ),
+                parent=self.root,
+            )
+            return
+        if code == MaterialSpecEditError.REFERENCED_DELETE_BLOCKED:
+            messagebox.showwarning(
+                "材料規格仍被使用",
+                (
+                    f"材料規格「{spec}」仍被使用。\n\n"
+                    f"{self._material_spec_reference_text(outcome.references)}\n\n"
+                    "請先移除或更換引用後再刪除。"
+                ),
+                parent=self.root,
+            )
+            return
+        messagebox.showwarning(
+            "輸入錯誤",
+            "材料規格無法更新，已保留原值。",
+            parent=self.root,
+        )
+
+    def _adopt_material_spec_edit(
+        self,
+        outcome,
+        *,
+        field_name=None,
+        preserve_view=True,
+        refresh_material_specs=True,
+    ):
+        previous_project_data = self._ensure_project_data()
+        previous_results = self._ensure_project_results()
+        previous_solver_memory = copy.deepcopy(self.solver_memory)
+        previous_support_cache = copy.deepcopy(self.support_candidate_cache)
+        had_result = (
+            bool(previous_results.result_items)
+            or previous_results.persisted_payload is not None
+        )
+        try:
+            self.project_data = outcome.project_data
+            self._project_results = outcome.project_results
+            if outcome.clear_solver_memory:
+                self.solver_memory.clear()
+            if outcome.clear_support_candidate_cache:
+                self.support_candidate_cache.clear()
+        except Exception:
+            self.project_data = previous_project_data
+            self._project_results = previous_results
+            self.solver_memory = previous_solver_memory
+            self.support_candidate_cache = previous_support_cache
+            raise
+
+        for changed_table in outcome.changed_tables:
+            if changed_table == "material_specs" and not refresh_material_specs:
+                continue
+            self._refresh_tree(changed_table)
+        self._handle_input_data_changed(
+            preserve_view=preserve_view,
+            table_name=(
+                None if outcome.clear_solver_memory else "material_specs"
+            ),
+            field_name=(
+                "material_spec" if outcome.clear_solver_memory else field_name
+            ),
+            staged_change=outcome,
+            had_result=had_result,
         )
 
     def _cell_editor_options(self, table_name, column, index):
@@ -6754,80 +6823,55 @@ class SupportInputApp:
             row = self.material_specs[index]
             old_usage = str(row.get("Usage", "") or "").strip()
             old_spec = str(row.get("Spec", "") or "").strip()
-            proposed_usage = value if column == "Usage" else old_usage
-            proposed_spec = value if column == "Spec" else old_spec
-            if proposed_spec and self._material_spec_key_exists(
-                proposed_usage,
-                proposed_spec,
-                exclude_index=index,
-            ):
-                messagebox.showwarning(
-                    "規格重複",
-                    f"{proposed_usage}的材料規格「{proposed_spec}」已存在。",
-                    parent=self.root,
-                )
-                return
-
-            references = self._material_spec_references(old_usage, old_spec)
-            reference_count = self._material_spec_reference_count(references)
-            if column == "Usage" and reference_count:
-                messagebox.showwarning(
-                    "用途不可變更",
-                    (
-                        f"材料規格「{old_spec}」仍被使用，不可直接變更用途。\n\n"
-                        f"{self._material_spec_reference_text(references)}\n\n"
-                        "請先移除或更換引用。"
-                    ),
-                    parent=self.root,
-                )
-                return
-            if column == "Spec" and old_spec and not proposed_spec:
-                messagebox.showwarning(
-                    "材料規格不可空白",
-                    "既有材料規格不可改為空白。",
-                    parent=self.root,
-                )
-                return
-            references_changed = False
-            if column == "Spec" and reference_count:
+            request = MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.EDIT,
+                row_index=index,
+                expected_usage=old_usage,
+                expected_spec=old_spec,
+                field_name=column,
+                proposed_value=value,
+            )
+            outcome = self._ensure_material_spec_editing().stage(
+                self._ensure_project_data(),
+                self._ensure_project_results(),
+                request,
+            )
+            if outcome.status == MaterialSpecEditStatus.CONFIRMATION_REQUIRED:
                 confirmed = messagebox.askyesno(
                     "同步更新材料規格",
                     (
                         f"材料規格「{old_spec}」目前正在被引用。\n\n"
-                        f"{self._material_spec_reference_text(references)}\n\n"
-                        f"是否同步更新為「{proposed_spec}」？"
+                        f"{self._material_spec_reference_text(outcome.references)}\n\n"
+                        f"是否同步更新為「{value}」？"
                     ),
                     parent=self.root,
                 )
                 if not confirmed:
                     return
-                self._rename_material_spec_references(
-                    old_usage,
-                    old_spec,
-                    proposed_spec,
-                    references=references,
+                outcome = self._ensure_material_spec_editing().stage(
+                    self._ensure_project_data(),
+                    self._ensure_project_results(),
+                    replace(
+                        request,
+                        allow_reference_sync=True,
+                        expected_references=outcome.references,
+                    ),
                 )
-                references_changed = True
-
-            row[column] = value
+            if outcome.status == MaterialSpecEditStatus.REJECTED:
+                self._show_material_spec_edit_error(outcome)
+                return
+            if outcome.status == MaterialSpecEditStatus.NO_OP:
+                return
+            if outcome.status != MaterialSpecEditStatus.STAGED:
+                self._show_material_spec_edit_error(outcome)
+                return
+            self._adopt_material_spec_edit(
+                outcome,
+                field_name=column,
+                preserve_view=True,
+                refresh_material_specs=False,
+            )
             tree.set(row_id, column, self._format_display_value(value))
-            if references_changed:
-                for changed_table in ("inventory", "walers", "struts"):
-                    if references[changed_table]:
-                        self._refresh_tree(changed_table)
-                if references["inventory"]:
-                    self._update_material_summary()
-                self._handle_input_data_changed(
-                    preserve_view=True,
-                    table_name=None,
-                    field_name="material_spec",
-                )
-            else:
-                self._handle_input_data_changed(
-                    preserve_view=True,
-                    table_name="material_specs",
-                    field_name=column,
-                )
             return
 
         if not project_field_committed:
@@ -6850,8 +6894,8 @@ class SupportInputApp:
                 if (
                     current_spec
                     and not any(
-                        self._material_spec_key(value, option)
-                        == self._material_spec_key(value, current_spec)
+                        material_spec_key(value, option)
+                        == material_spec_key(value, current_spec)
                         for option in self._material_spec_options(value)
                     )
                 ):
@@ -6943,33 +6987,34 @@ class SupportInputApp:
         if index is None:
             return
 
-        if (
-            table_name == "material_specs"
-            and self._is_required_rc_spec(self.material_specs[index])
-        ):
-            messagebox.showwarning(
-                "不可刪除",
-                "圍令規格 RC 為必要施工規格，不可刪除。",
-                parent=self.root,
+        if table_name == "material_specs":
+            if 0 <= index < len(self.material_specs):
+                row = self.material_specs[index]
+                usage = str(row.get("Usage", "") or "").strip()
+                spec = str(row.get("Spec", "") or "").strip()
+            else:
+                usage = ""
+                spec = ""
+            outcome = self._ensure_material_spec_editing().stage(
+                self._ensure_project_data(),
+                self._ensure_project_results(),
+                MaterialSpecEditRequest(
+                    operation=MaterialSpecEditOperation.DELETE,
+                    row_index=index,
+                    expected_usage=usage,
+                    expected_spec=spec,
+                ),
+            )
+            if outcome.status == MaterialSpecEditStatus.REJECTED:
+                self._show_material_spec_edit_error(outcome)
+                return
+            if outcome.status != MaterialSpecEditStatus.STAGED:
+                return
+            self._adopt_material_spec_edit(
+                outcome,
+                preserve_view=True,
             )
             return
-
-        if table_name == "material_specs":
-            row = self.material_specs[index]
-            usage = str(row.get("Usage", "") or "").strip()
-            spec = str(row.get("Spec", "") or "").strip()
-            references = self._material_spec_references(usage, spec)
-            if self._material_spec_reference_count(references):
-                messagebox.showwarning(
-                    "材料規格仍被使用",
-                    (
-                        f"材料規格「{spec}」仍被使用。\n\n"
-                        f"{self._material_spec_reference_text(references)}\n\n"
-                        "請先移除或更換引用後再刪除。"
-                    ),
-                    parent=self.root,
-                )
-                return
 
         getattr(self, table_name).pop(index)
         self._refresh_tree(table_name)
@@ -7276,7 +7321,6 @@ class SupportInputApp:
         column_x = []
         column_y = []
         for row_index, row in enumerate(self.struts):
-            self._migrate_strut_position_fields(row)
             x1 = self._to_number(row.get("StartX"))
             y1 = self._to_number(row.get("StartY"))
             x2 = self._to_number(row.get("EndX"))

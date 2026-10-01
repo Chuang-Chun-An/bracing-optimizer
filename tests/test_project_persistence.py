@@ -11,7 +11,7 @@ from bracing_optimizer.algorithms import support
 
 from main import SupportInputApp
 from bracing_optimizer.algorithms.solver_search import SolverDiagnostics
-from bracing_optimizer.application.project_data import ProjectDataModel
+from bracing_optimizer.application.project_data import ProjectDataModel, TABLE_COLUMNS
 from bracing_optimizer.application.project_service import PausedReviewRelinkRequest
 from bracing_optimizer.infrastructure.project_persistence import (
     DxfAssetManager,
@@ -20,7 +20,10 @@ from bracing_optimizer.infrastructure.project_persistence import (
     DxfWorkflowStatus,
     MANAGED_DXF_RELATIVE_PATH,
     PROJECT_SCHEMA_VERSION,
+    PROJECT_ROW_SCHEMA_ERROR_STAGE,
+    PROJECT_SCHEMA_UNREADABLE_STAGE,
     ProjectPersistenceError,
+    ProjectSerializer,
 )
 
 
@@ -69,24 +72,144 @@ def import_state(source: Path, *, handle="10", layer="STRUCTURE", offset=0.0):
 
 
 def payload(state=None, *, result=None):
+    input_data = ProjectDataModel(
+        walers=[{
+            "WalerID": "W1",
+            "StartX": 0,
+            "StartY": 0,
+            "EndX": 3000,
+            "EndY": 0,
+        }],
+    ).to_case_data()
     return {
         "schema_version": 3,
         "project_information": {"project_name": "測試專案"},
-        "input_data": {
-            "walers": [{
-                "WalerID": "W1",
-                "StartX": 0,
-                "StartY": 0,
-                "EndX": 3000,
-                "EndY": 0,
-            }],
-            "struts": [],
-            "braces": [],
-        },
+        "input_data": input_data,
         "dxf_import_state": copy.deepcopy(state),
         "dxf_asset": None,
         "result": result,
     }
+
+
+class ProjectSchemaCompatibilityTests(unittest.TestCase):
+    def test_current_table_contract_accepts_exact_rows_and_optional_tables(self):
+        project_payload = payload()
+
+        ProjectSerializer.validate_for_load(project_payload)
+
+        for table_name, rows in project_payload["input_data"].items():
+            for row in rows:
+                self.assertEqual(set(row), set(TABLE_COLUMNS[table_name]))
+
+        project_payload["input_data"].pop("inventory")
+        project_payload["input_data"].pop("material_specs")
+        ProjectSerializer.validate_for_load(project_payload)
+
+    def test_direct_validation_rejects_missing_and_unsupported_row_fields(self):
+        cases = (
+            ("missing", lambda row: row.pop("Remark"), "缺少欄位", "Remark"),
+            (
+                "unsupported",
+                lambda row: row.__setitem__("Unexpected", True),
+                "不支援欄位",
+                "Unexpected",
+            ),
+        )
+        for name, mutate, reason, field_name in cases:
+            with self.subTest(name=name):
+                project_payload = payload()
+                mutate(project_payload["input_data"]["walers"][0])
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    ProjectSerializer.validate(project_payload)
+
+                self.assertEqual(
+                    raised.exception.stage,
+                    PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                )
+                self.assertIn("input_data.walers[1]", raised.exception.detail)
+                self.assertIn(reason, raised.exception.detail)
+                self.assertIn(field_name, raised.exception.detail)
+
+    def test_direct_validation_rejects_unsupported_input_table(self):
+        project_payload = payload()
+        project_payload["input_data"]["legacy_table"] = []
+
+        with self.assertRaises(ProjectPersistenceError) as raised:
+            ProjectSerializer.validate(project_payload)
+
+        self.assertEqual(raised.exception.stage, PROJECT_ROW_SCHEMA_ERROR_STAGE)
+        self.assertIn("不支援資料表", raised.exception.detail)
+        self.assertIn("legacy_table", raised.exception.detail)
+
+    def test_row_schema_mismatch_uses_same_load_error_for_compatible_versions(self):
+        for version in (None, PROJECT_SCHEMA_VERSION - 1, PROJECT_SCHEMA_VERSION):
+            with self.subTest(version=version):
+                project_payload = payload()
+                if version is None:
+                    project_payload.pop("schema_version")
+                else:
+                    project_payload["schema_version"] = version
+                project_payload["input_data"]["walers"][0].pop("Remark")
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    ProjectSerializer.validate_for_load(project_payload)
+
+                self.assertEqual(
+                    raised.exception.stage,
+                    PROJECT_SCHEMA_UNREADABLE_STAGE,
+                )
+                self.assertIn("底層驗證錯誤", raised.exception.detail)
+                self.assertIn("input_data.walers[1]", raised.exception.detail)
+                self.assertIn("Remark", raised.exception.detail)
+
+    def test_load_validation_rejects_non_integer_and_out_of_range_versions(self):
+        invalid_versions = ("3", 3.0, True, False, None, 0, -1)
+
+        for index, version in enumerate(invalid_versions):
+            with self.subTest(version=version, value_type=type(version).__name__):
+                project_payload = payload()
+                project_payload["schema_version"] = version
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    ProjectSerializer.validate_for_load(project_payload)
+
+                self.assertIn("schema_version", raised.exception.stage)
+
+    def test_load_validation_classifies_version_before_current_structure(self):
+        future_payload = payload()
+        future_payload["schema_version"] = PROJECT_SCHEMA_VERSION + 1
+        future_payload.pop("dxf_asset")
+
+        with self.assertRaises(ProjectPersistenceError) as future_error:
+            ProjectSerializer.validate_for_load(future_payload)
+
+        self.assertIn("版本不相容", future_error.exception.stage)
+        self.assertIn("高於目前支援版本", future_error.exception.detail)
+
+    def test_load_validation_reuses_current_structure_validation(self):
+        for version in (None, PROJECT_SCHEMA_VERSION - 1):
+            with self.subTest(version=version):
+                project_payload = payload()
+                if version is None:
+                    project_payload.pop("schema_version")
+                else:
+                    project_payload["schema_version"] = version
+                project_payload.pop("dxf_asset")
+
+                with self.assertRaises(ProjectPersistenceError) as raised:
+                    ProjectSerializer.validate_for_load(project_payload)
+
+                self.assertIn("無法以現行格式讀取", raised.exception.stage)
+                self.assertIn("dxf_asset", raised.exception.detail)
+
+        current_payload = payload()
+        current_payload.pop("dxf_asset")
+        with self.assertRaises(ProjectPersistenceError) as current_error:
+            ProjectSerializer.validate_for_load(current_payload)
+
+        self.assertEqual(current_error.exception.stage, "JSON 驗證失敗")
+        self.assertIn("dxf_asset", current_error.exception.detail)
 
 
 class ProjectPersistenceTests(unittest.TestCase):
@@ -121,13 +244,13 @@ class ProjectPersistenceTests(unittest.TestCase):
 
     def test_geometry_invalid_shared_zoning_round_trips_as_project_data(self):
         project_payload = payload()
-        project_payload["input_data"]["walers"] = [
+        walers = [
             {"WalerID": "W1", "StartX": 0, "StartY": -10000,
              "EndX": 0, "EndY": 10000},
             {"WalerID": "W2", "StartX": 10000, "StartY": -10000,
              "EndX": 10000, "EndY": 10000},
         ]
-        project_payload["input_data"]["struts"] = [
+        struts = [
             {"StrutID": "S1", "SharedLayoutGroup": "G1",
              "FromWaler": "W1", "ToWaler": "W2",
              "StartX": 0, "StartY": 0, "EndX": 10000, "EndY": 0,
@@ -137,6 +260,10 @@ class ProjectPersistenceTests(unittest.TestCase):
              "StartX": 0, "StartY": 1000, "EndX": 10000, "EndY": 2000,
              "Zoning": "USER-ZONE"},
         ]
+        project_payload["input_data"] = ProjectDataModel(
+            walers=walers,
+            struts=struts,
+        ).to_case_data()
 
         self.manager.save_project(
             self.project_path,

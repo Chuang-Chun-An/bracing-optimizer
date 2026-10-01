@@ -464,6 +464,7 @@ class ProjectService:
             existing_asset=request.existing_asset,
         )
         saved_payload = copy.deepcopy(dict(request.payload))
+        saved_payload["schema_version"] = PROJECT_SCHEMA_VERSION
         saved_payload["dxf_asset"] = copy.deepcopy(persistence_result.dxf_asset)
         status = self.dxf_asset_manager.inspect(
             persistence_result.project_path,
@@ -512,7 +513,7 @@ class ProjectService:
             "dxf_asset" not in payload
             and not isinstance(payload.get("dxf_import_state"), dict)
         )
-        ProjectSerializer.validate(payload)
+        ProjectSerializer.validate_for_load(payload)
         status = self.dxf_asset_manager.inspect(
             path,
             payload.get("dxf_asset"),

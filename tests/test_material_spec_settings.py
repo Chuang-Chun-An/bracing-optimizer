@@ -2,12 +2,23 @@ import unittest
 from unittest.mock import patch
 
 from main import SupportInputApp
+from bracing_optimizer.application.material_spec_editing import (
+    MaterialSpecEditError,
+    MaterialSpecEditOperation,
+    MaterialSpecEditOutcome,
+    MaterialSpecEditRequest,
+    MaterialSpecEditStatus,
+    MaterialSpecEditing,
+    ReferenceSummary,
+)
 from bracing_optimizer.application.project_data import (
     DEFAULT_MATERIAL_SPECS,
     ProjectDataModel,
     TABLE_COLUMNS,
 )
 from bracing_optimizer.application.solver_input_builder import SupportInputBuilder
+from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.project_service import ProjectService
 
 
 class MaterialSpecSettingsTests(unittest.TestCase):
@@ -66,11 +77,20 @@ class MaterialSpecSettingsTests(unittest.TestCase):
             ],
         )
         app.root = object()
+        app._project_results = ProjectResultModel()
+        app.solver_memory = {}
+        app.support_candidate_cache = {}
+        app._material_spec_editing = MaterialSpecEditing(
+            ProjectService.plan_input_change
+        )
         app.numeric_columns = {}
         app.editing_entry = None
         app.treeviews = {}
         app._refresh_tree = lambda _table_name: None
         app._update_material_summary = lambda: None
+        app._refresh_results_tree = lambda: None
+        app._mark_project_dirty = lambda _reason: None
+        app.update_preview = lambda **_kwargs: None
         app._handle_input_data_changed = lambda **_kwargs: None
         return app
 
@@ -83,26 +103,52 @@ class MaterialSpecSettingsTests(unittest.TestCase):
     def test_material_references_are_scoped_by_usage(self):
         app = self.editable_app()
 
-        references = app._material_spec_references("支撐", "h350X350")
+        references = app._ensure_material_spec_editing()._references(
+            app.project_data,
+            "支撐",
+            "h350X350",
+        )
 
-        self.assertEqual(references["inventory"], [0])
-        self.assertEqual(references["struts"], [0])
-        self.assertEqual(references["walers"], [])
+        self.assertEqual(references.inventory, (0,))
+        self.assertEqual(references.struts, (0,))
+        self.assertEqual(references.walers, ())
 
     def test_material_rename_updates_same_usage_references_only(self):
         app = self.editable_app()
 
-        references = app._rename_material_spec_references(
-            "支撐",
-            "H350x350",
-            "H350x350A",
+        confirmation = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.EDIT,
+                row_index=1,
+                expected_usage="支撐",
+                expected_spec="H350x350",
+                field_name="Spec",
+                proposed_value="H350x350A",
+            ),
         )
+        outcome = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.EDIT,
+                row_index=1,
+                expected_usage="支撐",
+                expected_spec="H350x350",
+                field_name="Spec",
+                proposed_value="H350x350A",
+                allow_reference_sync=True,
+                expected_references=confirmation.references,
+            ),
+        )
+        staged = outcome.project_data
 
-        self.assertEqual(app.inventory[0]["Spec"], "H350x350A")
-        self.assertEqual(app.struts[0]["material_spec"], "H350x350A")
-        self.assertEqual(app.inventory[1]["Spec"], "H350x350")
-        self.assertEqual(app.walers[0]["material_spec"], "H350x350")
-        self.assertEqual(app._material_spec_reference_count(references), 2)
+        self.assertEqual(staged.inventory[0]["Spec"], "H350x350A")
+        self.assertEqual(staged.struts[0]["material_spec"], "H350x350A")
+        self.assertEqual(staged.inventory[1]["Spec"], "H350x350")
+        self.assertEqual(staged.walers[0]["material_spec"], "H350x350")
+        self.assertEqual(outcome.references.count, 2)
 
     def test_confirmed_material_rename_invalidates_solver_and_updates_rows(self):
         app = self.editable_app()
@@ -134,7 +180,10 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         tree = self.FakeTree()
         app.treeviews = {"material_specs": tree}
 
-        with patch("main.messagebox.askyesno", return_value=False):
+        changes = []
+        app._handle_input_data_changed = lambda **kwargs: changes.append(kwargs)
+
+        with patch("main.messagebox.askyesno", return_value=False) as confirm:
             app._finish_edit(
                 tree,
                 "material_specs_1",
@@ -145,9 +194,23 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         self.assertEqual(app.material_specs[1]["Spec"], "H350x350")
         self.assertEqual(app.inventory[0]["Spec"], "H350x350")
         self.assertEqual(app.struts[0]["material_spec"], "H350x350")
+        confirm.assert_called_once_with(
+            "同步更新材料規格",
+            (
+                "材料規格「H350x350」目前正在被引用。\n\n"
+                "庫存：1 筆\n圍令：0 筆\n支撐：1 筆\n\n"
+                "是否同步更新為「H350x350A」？"
+            ),
+            parent=app.root,
+        )
+        self.assertEqual(changes, [])
 
     def test_referenced_material_usage_cannot_be_changed(self):
         app = self.editable_app()
+        app.material_specs = [
+            {"Usage": "圍令", "Spec": "RC"},
+            {"Usage": "支撐", "Spec": "H350x350"},
+        ]
         tree = self.FakeTree()
         app.treeviews = {"material_specs": tree}
 
@@ -160,7 +223,56 @@ class MaterialSpecSettingsTests(unittest.TestCase):
             )
 
         self.assertEqual(app.material_specs[1]["Usage"], "支撐")
-        warning.assert_called_once()
+        warning.assert_called_once_with(
+            "用途不可變更",
+            (
+                "材料規格「H350x350」仍被使用，不可直接變更用途。\n\n"
+                "庫存：1 筆\n圍令：0 筆\n支撐：1 筆\n\n"
+                "請先移除或更換引用。"
+            ),
+            parent=app.root,
+        )
+
+    def test_duplicate_material_spec_warning_is_characterized(self):
+        app = self.editable_app()
+        app.material_specs.append({"Usage": "支撐", "Spec": "H400x400"})
+        tree = self.FakeTree()
+        app.treeviews = {"material_specs": tree}
+
+        with patch("main.messagebox.showwarning") as warning:
+            app._finish_edit(
+                tree,
+                "material_specs_1",
+                "Spec",
+                self.FakeEditor("H400x400"),
+            )
+
+        warning.assert_called_once_with(
+            "規格重複",
+            "支撐的材料規格「H400x400」已存在。",
+            parent=app.root,
+        )
+        self.assertEqual(app.material_specs[1]["Spec"], "H350x350")
+
+    def test_blank_material_spec_warning_is_characterized(self):
+        app = self.editable_app()
+        tree = self.FakeTree()
+        app.treeviews = {"material_specs": tree}
+
+        with patch("main.messagebox.showwarning") as warning:
+            app._finish_edit(
+                tree,
+                "material_specs_1",
+                "Spec",
+                self.FakeEditor(""),
+            )
+
+        warning.assert_called_once_with(
+            "材料規格不可空白",
+            "既有材料規格不可改為空白。",
+            parent=app.root,
+        )
+        self.assertEqual(app.material_specs[1]["Spec"], "H350x350")
 
     def test_inventory_usage_change_clears_incompatible_spec(self):
         app = self.editable_app()
@@ -202,7 +314,15 @@ class MaterialSpecSettingsTests(unittest.TestCase):
             app.delete_row()
 
         self.assertEqual(len(app.material_specs), 3)  # required RC + two test rows
-        warning.assert_called_once()
+        warning.assert_called_once_with(
+            "材料規格仍被使用",
+            (
+                "材料規格「H350x350」仍被使用。\n\n"
+                "庫存：1 筆\n圍令：0 筆\n支撐：1 筆\n\n"
+                "請先移除或更換引用後再刪除。"
+            ),
+            parent=app.root,
+        )
 
     def test_unreferenced_material_spec_can_be_deleted(self):
         app = self.editable_app()
@@ -216,6 +336,201 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         self.assertFalse(
             any(row["Spec"] == "H500x500" for row in app.material_specs)
         )
+
+    def test_every_material_spec_error_code_has_a_main_display_mapping(self):
+        app = self.editable_app()
+        references = ReferenceSummary(inventory=(0,), struts=(0,))
+
+        with (
+            patch("main.messagebox.showwarning") as warning,
+            patch("main.messagebox.showinfo") as info,
+            patch("main.messagebox.askyesno") as confirmation,
+        ):
+            for code in MaterialSpecEditError:
+                with self.subTest(code=code.value):
+                    app._show_material_spec_edit_error(
+                        MaterialSpecEditOutcome(
+                            status=MaterialSpecEditStatus.REJECTED,
+                            error_code=code,
+                            references=references,
+                            display_args={
+                                "usage": "支撐",
+                                "spec": "H350x350",
+                                "operation": "edit",
+                            },
+                        )
+                    )
+
+        self.assertEqual(
+            warning.call_count + info.call_count,
+            len(MaterialSpecEditError),
+        )
+        confirmation.assert_not_called()
+        defensive_titles = [
+            call.args[0]
+            for call in warning.call_args_list[:3]
+        ]
+        self.assertEqual(defensive_titles, ["輸入錯誤"] * 3)
+
+    def test_material_spec_adoption_applies_result_and_cache_effects(self):
+        app = self.editable_app()
+        app._project_results = ProjectResultModel(
+            result_items={"old": {"type": "waler", "result": {}}},
+            persisted_payload={"best_solution": {}},
+        )
+        app.solver_memory = {"old": object()}
+        app.support_candidate_cache = {"old": object()}
+        dirty = []
+        previews = []
+        app._mark_project_dirty = lambda reason: dirty.append(reason)
+        app.update_preview = lambda **kwargs: previews.append(kwargs)
+        app._handle_input_data_changed = (
+            SupportInputApp._handle_input_data_changed.__get__(
+                app,
+                SupportInputApp,
+            )
+        )
+
+        request = MaterialSpecEditRequest(
+            operation=MaterialSpecEditOperation.EDIT,
+            row_index=1,
+            expected_usage="支撐",
+            expected_spec="H350x350",
+            field_name="Spec",
+            proposed_value="H350x350A",
+        )
+        first = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            request,
+        )
+        outcome = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                **{
+                    **request.__dict__,
+                    "allow_reference_sync": True,
+                    "expected_references": first.references,
+                }
+            ),
+        )
+
+        app._adopt_material_spec_edit(outcome)
+
+        self.assertEqual(app._project_results.result_items, {})
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
+        self.assertEqual(dirty, ["輸入資料已變更"])
+        self.assertEqual(previews, [{"preserve_view": True}])
+
+    def test_unreferenced_material_spec_adoption_preserves_results_and_marks_dirty(self):
+        app = self.editable_app()
+        original_results = ProjectResultModel(
+            result_items={"old": {"type": "waler", "result": {}}},
+            persisted_payload={"best_solution": {}},
+        )
+        app._project_results = original_results
+        dirty = []
+        app._mark_project_dirty = lambda reason: dirty.append(reason)
+        app._handle_input_data_changed = (
+            SupportInputApp._handle_input_data_changed.__get__(
+                app,
+                SupportInputApp,
+            )
+        )
+        app.project_data.material_specs.append(
+            {"Usage": "支撐", "Spec": "H500x500"}
+        )
+        outcome = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            original_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.DELETE,
+                row_index=3,
+                expected_usage="支撐",
+                expected_spec="H500x500",
+            ),
+        )
+
+        app._adopt_material_spec_edit(outcome)
+
+        self.assertEqual(app._project_results, original_results)
+        self.assertIsNot(app._project_results, original_results)
+        self.assertEqual(dirty, ["輸入資料已變更"])
+
+    def test_material_spec_adoption_rolls_back_state_failure_but_not_ui_failure(self):
+        class FailingClearDict(dict):
+            def clear(self):
+                super().clear()
+                raise RuntimeError("clear failed")
+
+        app = self.editable_app()
+        app._project_results = ProjectResultModel(
+            result_items={"old": {"type": "waler", "result": {}}}
+        )
+        first = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.EDIT,
+                row_index=1,
+                expected_usage="支撐",
+                expected_spec="H350x350",
+                field_name="Spec",
+                proposed_value="H350x350A",
+            ),
+        )
+        invalidating = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.EDIT,
+                row_index=1,
+                expected_usage="支撐",
+                expected_spec="H350x350",
+                field_name="Spec",
+                proposed_value="H350x350A",
+                allow_reference_sync=True,
+                expected_references=first.references,
+            ),
+        )
+        original_data = app.project_data
+        original_results = app._project_results
+        app.solver_memory = FailingClearDict(old=1)
+        app.support_candidate_cache = {"old": 1}
+
+        with self.assertRaisesRegex(RuntimeError, "clear failed"):
+            app._adopt_material_spec_edit(invalidating)
+
+        self.assertIs(app.project_data, original_data)
+        self.assertIs(app._project_results, original_results)
+        self.assertEqual(app.solver_memory, {"old": 1})
+        self.assertEqual(app.support_candidate_cache, {"old": 1})
+
+        app = self.editable_app()
+        app.project_data.material_specs.append(
+            {"Usage": "支撐", "Spec": "H500x500"}
+        )
+        staged = app._ensure_material_spec_editing().stage(
+            app.project_data,
+            app._project_results,
+            MaterialSpecEditRequest(
+                operation=MaterialSpecEditOperation.DELETE,
+                row_index=3,
+                expected_usage="支撐",
+                expected_spec="H500x500",
+            ),
+        )
+        app._refresh_tree = lambda _table: (_ for _ in ()).throw(
+            RuntimeError("refresh failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+            app._adopt_material_spec_edit(staged)
+
+        self.assertIs(app.project_data, staged.project_data)
+        self.assertIs(app._project_results, staged.project_results)
 
     def test_material_spec_table_has_no_length_and_is_persisted_separately(self):
         model = ProjectDataModel(

@@ -8,6 +8,7 @@ import re
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -59,6 +60,11 @@ _CONVERTED_BACKGROUND_ROLE_KEYS = (
 
 class DXFResultExportError(ValueError):
     """Raised when a clean result DXF cannot be built safely."""
+
+
+class DXFExportMode(str, Enum):
+    SOURCE_BACKED = "source-backed"
+    RESULT_ONLY = "result-only"
 
 
 class DXFExportValidationError(DXFResultExportError):
@@ -189,6 +195,7 @@ class DXFExportReport:
     dxf_version: str
     coordinate_units: str
     coordinate_mode: str
+    export_mode: DXFExportMode
     background_layer_count: int
     background_segment_count: int
     background_counts: tuple[tuple[str, int], ...]
@@ -204,6 +211,11 @@ class DXFExportReport:
 
     @property
     def merge_guidance(self) -> str:
+        if self.export_mode is DXFExportMode.RESULT_ONLY:
+            return (
+                "本檔使用目前 Project 座標直接輸出，未對齊任何來源圖面。"
+                "合併至其他圖面時需由使用者自行定位。"
+            )
         return (
             "本檔為乾淨的支撐配置成果DXF，使用原始世界座標建立。"
             "可由AutoCAD或progeCAD以Insert、Xref或貼到原始座標方式合併回原始DWG。"
@@ -312,6 +324,26 @@ def export_coordinate_system_from_import_state(
         _number(coordinate.get("origin_x", 0.0), "Project origin_x"),
         _number(coordinate.get("origin_y", 0.0), "Project origin_y"),
     )
+
+
+def resolve_dxf_export_context(
+    dxf_import_state: Mapping[str, Any] | None,
+) -> tuple[DXFExportMode, ExportCoordinateSystem]:
+    """Resolve export mode without consulting the DXF workflow status."""
+
+    if dxf_import_state is None:
+        return DXFExportMode.RESULT_ONLY, ExportCoordinateSystem("world")
+    return (
+        DXFExportMode.SOURCE_BACKED,
+        export_coordinate_system_from_import_state(dxf_import_state),
+    )
+
+
+def _coerce_export_mode(value: DXFExportMode | str) -> DXFExportMode:
+    try:
+        return DXFExportMode(value)
+    except (TypeError, ValueError) as exc:
+        raise DXFResultExportError(f"不支援的 DXF 匯出模式：{value!r}") from exc
 
 
 def _local_to_world(
@@ -954,32 +986,47 @@ def _draw_project_geometry(
         _set_project_geometry_xdata(entity, segment)
 
 
-def _new_clean_document(options: DXFExportOptions):
+def _new_clean_document(
+    options: DXFExportOptions,
+    export_mode: DXFExportMode,
+    plans: Sequence[MemberExportPlan],
+):
     document = ezdxf.new(CLEAN_DXF_VERSION, setup=True)
     document.header["$INSUNITS"] = INSUNITS_MILLIMETERS
     document.header["$MEASUREMENT"] = 1
     _ensure_appid(document)
     _ensure_dimstyle(document, options)
-    document.layers.add(
-        RESULT_WALER_LAYER,
-        dxfattribs={"color": 1, "linetype": "Continuous"},
+    include_waler_results = (
+        export_mode is DXFExportMode.SOURCE_BACKED
+        or any(plan.role == "waler" for plan in plans)
     )
-    document.layers.add(
-        RESULT_SUPPORT_LAYER,
-        dxfattribs={"color": 3, "linetype": "Continuous"},
+    include_support_results = (
+        export_mode is DXFExportMode.SOURCE_BACKED
+        or any(plan.role != "waler" for plan in plans)
     )
-    document.layers.add(
-        PROJECT_WALER_LAYER,
-        dxfattribs={"color": 1, "linetype": "Continuous"},
-    )
-    document.layers.add(
-        PROJECT_STRUT_LAYER,
-        dxfattribs={"color": 3, "linetype": "Continuous"},
-    )
-    document.layers.add(
-        PROJECT_BRACE_LAYER,
-        dxfattribs={"color": 5, "linetype": "Continuous"},
-    )
+    if include_waler_results:
+        document.layers.add(
+            RESULT_WALER_LAYER,
+            dxfattribs={"color": 1, "linetype": "Continuous"},
+        )
+    if include_support_results:
+        document.layers.add(
+            RESULT_SUPPORT_LAYER,
+            dxfattribs={"color": 3, "linetype": "Continuous"},
+        )
+    if export_mode is DXFExportMode.SOURCE_BACKED:
+        document.layers.add(
+            PROJECT_WALER_LAYER,
+            dxfattribs={"color": 1, "linetype": "Continuous"},
+        )
+        document.layers.add(
+            PROJECT_STRUT_LAYER,
+            dxfattribs={"color": 3, "linetype": "Continuous"},
+        )
+        document.layers.add(
+            PROJECT_BRACE_LAYER,
+            dxfattribs={"color": 5, "linetype": "Continuous"},
+        )
     return document
 
 
@@ -1305,6 +1352,41 @@ def _validate_results(
     return dimension_count, jack_count
 
 
+def _validate_export_mode_structure(
+    document,
+    export_mode: DXFExportMode,
+    expected_results: Sequence[_ExpectedResultEntity],
+) -> None:
+    if export_mode is not DXFExportMode.RESULT_ONLY:
+        return
+    forbidden_layers = (
+        PROJECT_WALER_LAYER,
+        PROJECT_STRUT_LAYER,
+        PROJECT_BRACE_LAYER,
+    )
+    present_forbidden = [name for name in forbidden_layers if name in document.layers]
+    if present_forbidden:
+        raise DXFExportValidationError(
+            "Result-only DXF 含禁止的 Project 圖層："
+            + "、".join(present_forbidden)
+        )
+    expected_layers = {item.output_layer for item in expected_results}
+    for layer_name in (RESULT_WALER_LAYER, RESULT_SUPPORT_LAYER):
+        if (layer_name in document.layers) != (layer_name in expected_layers):
+            raise DXFExportValidationError(
+                f"Result-only DXF 成果圖層與實際結果不一致：{layer_name}"
+            )
+    for entity in document.modelspace():
+        values = _xdata_values(entity)
+        if len(values) >= 2 and values[:2] in {
+            (CLEAN_EXPORT_MARKER, "background"),
+            (CLEAN_EXPORT_MARKER, "project_geometry"),
+        }:
+            raise DXFExportValidationError(
+                "Result-only DXF 不得包含背景或 Project geometry"
+            )
+
+
 def _audit_issue_type(code: int) -> str:
     try:
         return AuditError(code).name
@@ -1493,6 +1575,7 @@ def _write_clean_export(
     background: Sequence[_PreparedBackgroundSegment],
     project_geometry: Sequence[_ProjectGeometrySegment],
     expected_results: Sequence[_ExpectedResultEntity],
+    export_mode: DXFExportMode,
 ) -> _CleanValidationResult:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = _unique_sibling_temp_path(output_path)
@@ -1518,6 +1601,7 @@ def _write_clean_export(
         _validate_clean_structure(temporary_path, reread)
         _validate_background(reread, background)
         _validate_project_geometry(reread, project_geometry)
+        _validate_export_mode_structure(reread, export_mode, expected_results)
         dimension_count, jack_count = _validate_results(
             reread,
             expected_results,
@@ -1553,6 +1637,7 @@ def export_results_to_dxf(
     braces: Sequence[Mapping[str, Any]],
     coordinate_system: ExportCoordinateSystem,
     *,
+    export_mode: DXFExportMode | str,
     background_state: Mapping[str, Any] | None = None,
     options: DXFExportOptions | None = None,
 ) -> DXFExportReport:
@@ -1560,16 +1645,21 @@ def export_results_to_dxf(
 
     if not isinstance(coordinate_system, ExportCoordinateSystem):
         raise DXFResultExportError("缺少明確的 Project → World 座標資訊")
+    export_mode = _coerce_export_mode(export_mode)
     options = options or DXFExportOptions()
     output_path = Path(output_path).resolve()
     normalized_plans = _normalize_plans(plans)
     if not normalized_plans:
         raise DXFResultExportError("尚未產生或選取可見的Solver配置結果")
-    project_geometry = build_project_geometry_segments(
-        walers,
-        struts,
-        braces,
-        coordinate_system,
+    project_geometry = (
+        build_project_geometry_segments(
+            walers,
+            struts,
+            braces,
+            coordinate_system,
+        )
+        if export_mode is DXFExportMode.SOURCE_BACKED
+        else ()
     )
     bindings = build_project_member_bindings(
         walers,
@@ -1599,11 +1689,14 @@ def export_results_to_dxf(
                 f"工程線長 {drawing_length:g} mm 不一致，無法正確放置標註"
             )
 
-    background_segments, background_warnings = _extract_background_segments(
-        background_state,
-        coordinate_system,
-    )
-    document = _new_clean_document(options)
+    if export_mode is DXFExportMode.SOURCE_BACKED:
+        background_segments, background_warnings = _extract_background_segments(
+            background_state,
+            coordinate_system,
+        )
+    else:
+        background_segments, background_warnings = (), ()
+    document = _new_clean_document(options, export_mode, normalized_plans)
     prepared_background, fallbacks = _prepare_background_layers(
         document,
         background_segments,
@@ -1622,6 +1715,7 @@ def export_results_to_dxf(
         prepared_background,
         project_geometry,
         expected_results,
+        export_mode,
     )
     background_counts = tuple(
         sorted(Counter(item.role for item in prepared_background).items())
@@ -1646,6 +1740,7 @@ def export_results_to_dxf(
         dxf_version=f"{CLEAN_DXF_VERSION} ({CLEAN_DXF_ACAD_VERSION})",
         coordinate_units=DRAWING_UNITS,
         coordinate_mode=coordinate_system.mode,
+        export_mode=export_mode,
         background_layer_count=len(background_layers),
         background_segment_count=len(prepared_background),
         background_counts=background_counts,
@@ -1671,6 +1766,7 @@ __all__ = [
     "DXFAuditIssue",
     "DXFAuditSummary",
     "DXFExportOptions",
+    "DXFExportMode",
     "DXFExportReport",
     "DXFExportValidationError",
     "DXFResultExportError",
@@ -1690,4 +1786,5 @@ __all__ = [
     "build_project_member_bindings",
     "export_coordinate_system_from_import_state",
     "export_results_to_dxf",
+    "resolve_dxf_export_context",
 ]

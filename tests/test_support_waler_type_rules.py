@@ -147,6 +147,395 @@ class WalerTypeScoringIsolationTests(unittest.TestCase):
         self.assertNotIn("waler", repr(single_score_section).lower())
 
 
+class SupportShimValidationCharacterizationTests(unittest.TestCase):
+    @staticmethod
+    def _case_config(
+        support_id,
+        total_length,
+        *,
+        from_type="Steel",
+        to_type="Steel",
+        steel_lengths=(5000,),
+        pile_centers=(),
+        waler_centers=(),
+    ):
+        return support.SupportConfig(
+            support_id=support_id,
+            total_length=total_length,
+            pile_centers=list(pile_centers),
+            waler_centers=list(waler_centers),
+            target_jack_region=1,
+            from_waler_type=from_type,
+            to_waler_type=to_type,
+            steel_lengths=list(steel_lengths),
+        )
+
+    def test_existing_invalid_candidate_scores_are_exact_characterization(self):
+        cases = [
+            (
+                "jack_count",
+                self._case_config("J", 10100),
+                [("steel", 5000), ("steel", 5000)],
+                1006600.0,
+                {
+                    "short_penalty": 0.0,
+                    "joint_penalty": 1200.0,
+                    "gap_penalty": 400.0,
+                    "jack_edge_penalty": 5000.0,
+                    "invalid_penalty": 1000000.0,
+                },
+            ),
+            (
+                "multi_shim",
+                self._case_config(
+                    "M",
+                    10880,
+                    from_type="RC",
+                    to_type="RC",
+                ),
+                [
+                    ("shim", 100),
+                    ("steel", 5000),
+                    ("jack", 600),
+                    ("steel", 5000),
+                    ("shim", 100),
+                ],
+                4800.0,
+                {
+                    "short_penalty": 0.0,
+                    "joint_penalty": 4800.0,
+                    "gap_penalty": 0.0,
+                    "jack_edge_penalty": 0.0,
+                    "invalid_penalty": 0.0,
+                },
+            ),
+            (
+                "forbidden_joint",
+                self._case_config(
+                    "F",
+                    6680,
+                    steel_lengths=(1000, 5000),
+                ),
+                [("steel", 1000), ("jack", 600), ("steel", 5000)],
+                1215400.0,
+                {
+                    "short_penalty": 8000.0,
+                    "joint_penalty": 2400.0,
+                    "gap_penalty": 0.0,
+                    "jack_edge_penalty": 5000.0,
+                    "invalid_penalty": 1200000.0,
+                },
+            ),
+            (
+                "steel_length",
+                self._case_config(
+                    "S",
+                    10180,
+                    steel_lengths=(4000, 5000),
+                ),
+                [("steel", 4500), ("jack", 600), ("steel", 5000)],
+                1002400.0,
+                {
+                    "short_penalty": 0.0,
+                    "joint_penalty": 2400.0,
+                    "gap_penalty": 0.0,
+                    "jack_edge_penalty": 0.0,
+                    "invalid_penalty": 1000000.0,
+                },
+            ),
+        ]
+
+        plans = []
+        for name, cfg, pieces, expected_score, expected_breakdown in cases:
+            with self.subTest(name=name):
+                plan = support.evaluate_single_support(cfg, pieces)
+                self.assertEqual(plan.score, expected_score)
+                self.assertEqual(plan.breakdown, expected_breakdown)
+                plans.append(plan)
+
+        self.assertEqual(
+            [plan.support_id for plan in sorted(plans, key=lambda item: item.score)],
+            ["M", "S", "J", "F"],
+        )
+
+    def test_shim_count_and_placement_matrix(self):
+        cases = [
+            (
+                "no_shim",
+                self._case_config("none", 9680, steel_lengths=(4000, 5000)),
+                [("steel", 4000), ("jack", 600), ("steel", 5000)],
+                True,
+                "",
+            ),
+            (
+                "steel_adjacent",
+                self._case_config("steel-ok", 9780, steel_lengths=(4000, 5000)),
+                [
+                    ("steel", 4000),
+                    ("shim", 100),
+                    ("jack", 600),
+                    ("steel", 5000),
+                ],
+                True,
+                "",
+            ),
+            (
+                "steel_separated",
+                self._case_config("steel-bad", 9780, steel_lengths=(4000, 5000)),
+                [
+                    ("shim", 100),
+                    ("steel", 4000),
+                    ("jack", 600),
+                    ("steel", 5000),
+                ],
+                False,
+                "Shim 位置",
+            ),
+            (
+                "from_rc",
+                self._case_config(
+                    "from-rc",
+                    9780,
+                    from_type="RC",
+                    steel_lengths=(4000, 5000),
+                ),
+                [
+                    ("shim", 100),
+                    ("steel", 4000),
+                    ("jack", 600),
+                    ("steel", 5000),
+                ],
+                True,
+                "",
+            ),
+            (
+                "to_rc",
+                self._case_config(
+                    "to-rc",
+                    9780,
+                    to_type="RC",
+                    steel_lengths=(4000, 5000),
+                ),
+                [
+                    ("steel", 4000),
+                    ("jack", 600),
+                    ("steel", 5000),
+                    ("shim", 100),
+                ],
+                True,
+                "",
+            ),
+            (
+                "both_rc",
+                self._case_config(
+                    "both-rc",
+                    9780,
+                    from_type="RC",
+                    to_type="RC",
+                    steel_lengths=(4000, 5000),
+                ),
+                [
+                    ("steel", 4000),
+                    ("jack", 600),
+                    ("steel", 5000),
+                    ("shim", 100),
+                ],
+                True,
+                "",
+            ),
+        ]
+
+        for name, cfg, pieces, expected_valid, reason_part in cases:
+            with self.subTest(name=name):
+                plan = support.evaluate_single_support(cfg, pieces)
+                self.assertEqual(plan.valid, expected_valid, plan.reason)
+                if reason_part:
+                    self.assertIn(reason_part, plan.reason)
+
+    def test_multiple_nonzero_shims_report_only_count_without_score_change(self):
+        cfg = self._case_config(
+            "M",
+            10880,
+            from_type="RC",
+            to_type="RC",
+        )
+        pieces = [
+            ("shim", 100),
+            ("steel", 5000),
+            ("jack", 600),
+            ("steel", 5000),
+            ("shim", 100),
+        ]
+
+        plan = support.evaluate_single_support(cfg, pieces)
+
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.reason, "非零 Shim 數量超過 1")
+        self.assertEqual(plan.score, 4800.0)
+        self.assertEqual(plan.breakdown["invalid_penalty"], 0.0)
+
+    def test_missing_blank_and_unknown_waler_types_use_steel_rules(self):
+        pieces = [
+            ("shim", 100),
+            ("steel", 4000),
+            ("jack", 600),
+            ("steel", 5000),
+        ]
+
+        for raw_type in (None, "", "mystery"):
+            with self.subTest(raw_type=raw_type):
+                cfg = self._case_config(
+                    "missing-type",
+                    9780,
+                    from_type=raw_type,
+                    steel_lengths=(4000, 5000),
+                )
+                plan = support.evaluate_single_support(cfg, pieces)
+
+                self.assertFalse(plan.valid)
+                self.assertIn("Shim 位置", plan.reason)
+                self.assertIn("接頭落入禁止區", plan.reason)
+
+    def test_reason_gates_do_not_change_existing_penalties(self):
+        cfg = self._case_config(
+            "gate",
+            100,
+            steel_lengths=(5000,),
+            pile_centers=(5000,),
+        )
+        pieces = [("steel", 5000), ("steel", 4500)]
+
+        plan = support.evaluate_single_support(cfg, pieces)
+
+        self.assertEqual(plan.reason, "千斤頂數量不是 1")
+        self.assertEqual(plan.breakdown["invalid_penalty"], 10500000.0)
+        self.assertGreater(
+            support.count_forbidden_piece_joints(pieces, cfg),
+            0,
+        )
+
+    def test_remaining_issue_reason_order_is_stable_across_piece_order(self):
+        cfg = self._case_config(
+            "stable",
+            20000,
+            steel_lengths=(5000,),
+            waler_centers=(8100,),
+        )
+        first = support.evaluate_single_support(
+            cfg,
+            [
+                ("steel", 4500),
+                ("shim", 100),
+                ("steel", 3500),
+                ("jack", 600),
+            ],
+        )
+        second = support.evaluate_single_support(
+            cfg,
+            [
+                ("steel", 3500),
+                ("shim", 100),
+                ("steel", 4500),
+                ("jack", 600),
+            ],
+        )
+
+        self.assertEqual(first.reason, second.reason)
+        self.assertEqual(first.score, second.score)
+        self.assertEqual(first.breakdown, second.breakdown)
+        issue_markers = (
+            "Shim 位置",
+            "餘長(mm)",
+            "接頭落入禁止區",
+            "鋼材長度不合法: 3500",
+            "鋼材長度不合法: 4500",
+        )
+        offsets = [first.reason.index(marker) for marker in issue_markers]
+        self.assertEqual(offsets, sorted(offsets))
+
+
+class TypedSupportBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def _config(
+        total_length,
+        *,
+        from_type="Steel",
+        to_type="Steel",
+        piles=(),
+        walers=(),
+        steel_lengths=(1000, 1600, 4000, 5000),
+    ):
+        return support.SupportConfig(
+            support_id="boundary",
+            total_length=total_length,
+            pile_centers=list(piles),
+            waler_centers=list(walers),
+            from_waler_type=from_type,
+            to_waler_type=to_type,
+            steel_lengths=list(steel_lengths),
+        )
+
+    def test_terminal_shim_to_jack_is_not_an_rc_exception(self):
+        cfg = self._config(7180, from_type="RC")
+        pieces = [("shim", 100), ("jack", 2000), ("steel", 5000)]
+
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, cfg), 1)
+        plan = support.evaluate_single_support(cfg, pieces)
+        self.assertFalse(plan.valid)
+        self.assertEqual(plan.score, 7400.0)
+        self.assertEqual(
+            plan.breakdown,
+            {
+                "short_penalty": 0.0,
+                "joint_penalty": 2400.0,
+                "gap_penalty": 0.0,
+                "jack_edge_penalty": 5000.0,
+                "invalid_penalty": 0.0,
+            },
+        )
+
+    def test_only_terminal_shim_first_steel_boundary_is_exempt(self):
+        cfg = self._config(6780, from_type="RC")
+        pieces = [
+            ("shim", 100),
+            ("steel", 1000),
+            ("jack", 600),
+            ("steel", 5000),
+        ]
+
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, cfg), 1)
+
+    def test_exact_1600_boundary_is_forbidden(self):
+        cfg = self._config(7280)
+        pieces = [("steel", 1600), ("jack", 600), ("steel", 5000)]
+
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, cfg), 1)
+
+    def test_rc_exception_does_not_override_column_or_beam_zones(self):
+        pieces = [
+            ("shim", 100),
+            ("steel", 4000),
+            ("jack", 600),
+            ("steel", 5000),
+        ]
+        column = self._config(9780, from_type="RC", piles=(100,))
+        beam = self._config(9780, from_type="RC", walers=(100,))
+
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, column), 1)
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, beam), 1)
+
+    def test_missing_type_does_not_receive_rc_exception(self):
+        cfg = self._config(9780, from_type=None)
+        pieces = [
+            ("shim", 100),
+            ("steel", 4000),
+            ("jack", 600),
+            ("steel", 5000),
+        ]
+
+        self.assertEqual(support.count_forbidden_piece_joints(pieces, cfg), 1)
+
+
 class RCWalerEndClearanceTests(unittest.TestCase):
     def test_from_rc_terminal_shim_ignores_only_left_end_clearance(self):
         pieces = [

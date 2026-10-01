@@ -3,20 +3,16 @@ import unittest
 from bracing_optimizer.algorithms import wales
 
 
-class WalerTailAdjustmentTests(unittest.TestCase):
-    def test_every_500_mm_residue_is_resolved_with_one_block_and_199_gap(self):
+class WalerLengthCoverageTests(unittest.TestCase):
+    def test_every_500_mm_residue_uses_no_adjustment_block(self):
         for residue in range(500):
             required_length = 95_500 + residue
-            steel, adjustment, gap = wales.resolve_tail_adjustment(
-                required_length
-            )
+            steel, gap = wales.resolve_waler_steel_target(required_length)
             self.assertEqual(steel % 500, 0)
-            self.assertIn(adjustment, wales.WALER_ADJUSTMENT_LENGTHS)
-            self.assertGreaterEqual(gap, 0)
-            self.assertLessEqual(gap, 199)
-            self.assertEqual(steel + adjustment + gap, required_length)
+            self.assertEqual(gap, residue)
+            self.assertEqual(steel + gap, required_length)
 
-    def test_non_standard_length_solver_uses_standard_steel_and_tail_data(self):
+    def test_adjustment_only_length_is_reported_invalid_deterministically(self):
         cfg = wales.Config(
             total_length=95_736,
             support_points=[],
@@ -28,8 +24,8 @@ class WalerTailAdjustmentTests(unittest.TestCase):
             top_n=2,
         )
         self.assertEqual(cfg.steel_target_length, 95_500)
-        self.assertEqual(cfg.tail_adjustment, 200)
-        self.assertEqual(cfg.tail_gap, 36)
+        self.assertEqual(cfg.tail_adjustment, 0)
+        self.assertEqual(cfg.tail_gap, 236)
 
         previous_logger = wales.logger
         diagnostics = {}
@@ -48,8 +44,14 @@ class WalerTailAdjustmentTests(unittest.TestCase):
 
         self.assertTrue(results)
         self.assertEqual(
-            [(item["segments"], item["score"]) for item in results],
-            [(item["segments"], item["score"]) for item in repeated],
+            [
+                (item["segments"], item["score"], item["valid"])
+                for item in results
+            ],
+            [
+                (item["segments"], item["score"], item["valid"])
+                for item in repeated
+            ],
         )
         self.assertEqual(
             diagnostics["best_score_history"],
@@ -57,10 +59,11 @@ class WalerTailAdjustmentTests(unittest.TestCase):
         )
         self.assertEqual(diagnostics["generations"], 2)
         for result in results:
-            self.assertTrue(result["valid"])
+            self.assertFalse(result["valid"])
             self.assertEqual(sum(result["segments"]), 95_500)
-            self.assertEqual(result["tail_adjustment"], 200)
-            self.assertEqual(result["gap"], 36)
+            self.assertEqual(result["tail_adjustment"], 0)
+            self.assertEqual(result["gap"], 236)
+            self.assertNotIn("shim", [piece_type for piece_type, _ in result["pieces"]])
             self.assertEqual(
                 sum(result["segments"])
                 + result["tail_adjustment"]

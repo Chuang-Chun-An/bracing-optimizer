@@ -149,39 +149,6 @@ DEFAULT_MATERIAL_SPECS = (
 REQUIRED_RC_SPEC = {"Usage": "圍令", "Spec": "RC"}
 
 
-def _legacy_position_list(values: Sequence[Any]) -> str:
-    cleaned = [value for value in values if value not in (None, "")]
-    if cleaned:
-        try:
-            if all(float(value) == 0 for value in cleaned):
-                return ""
-        except (TypeError, ValueError):
-            pass
-    return ",".join(str(value).strip() for value in cleaned)
-
-
-def normalize_legacy_fields(
-    table_name: str,
-    source: Mapping[str, Any],
-) -> dict[str, Any]:
-    values = copy.deepcopy(dict(source))
-    if table_name == "struts":
-        if "BeamPositions" not in values:
-            values["BeamPositions"] = _legacy_position_list(
-                [values.get("Beam1"), values.get("Beam2")]
-            )
-        if "ColumnPositions" not in values:
-            values["ColumnPositions"] = _legacy_position_list(
-                [values.get("Column1"), values.get("Column2")]
-            )
-        values.setdefault("TargetJackRegion", 2)
-        for old_key in ("Beam1", "Beam2", "Column1", "Column2"):
-            values.pop(old_key, None)
-    elif table_name == "braces":
-        values.pop("Type", None)
-    return values
-
-
 def next_identifier(
     rows: Sequence[Mapping[str, Any]],
     id_field: str,
@@ -202,7 +169,6 @@ def build_input_row(
     existing_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     spec = TABLE_SPECS[table_name]
-    normalized_values = normalize_legacy_fields(table_name, values)
     row = copy.deepcopy(spec["defaults"])
     id_field = spec["id_field"]
     if id_field is not None:
@@ -212,8 +178,8 @@ def build_input_row(
             spec["id_prefix"],
         )
     for column in spec["columns"]:
-        if column != id_field and column in normalized_values:
-            row[column] = normalized_values[column]
+        if column != id_field and column in values:
+            row[column] = copy.deepcopy(values[column])
     return {column: row.get(column, "") for column in spec["columns"]}
 
 
@@ -225,9 +191,8 @@ def normalize_project_row(
         raise ValueError(f"不支援的資料表：{table_name}")
     if not isinstance(source, Mapping):
         raise ValueError(f"{table_name} 的資料列必須是物件。")
-    values = normalize_legacy_fields(table_name, source)
     spec = TABLE_SPECS[table_name]
-    normalized = copy.deepcopy(values)
+    normalized = copy.deepcopy(dict(source))
     for column in spec["columns"]:
         normalized.setdefault(column, copy.deepcopy(spec["defaults"].get(column, "")))
     return {
@@ -358,7 +323,6 @@ __all__ = [
     "ProjectDataModel",
     "build_input_row",
     "next_identifier",
-    "normalize_legacy_fields",
     "normalize_project_row",
     "ensure_required_material_specs",
 ]

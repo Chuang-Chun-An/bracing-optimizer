@@ -67,11 +67,9 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         forbidden_points = self.forbidden_points
         purchasable_lengths = self.purchasable_lengths
         rounded_length = self.length
-        (
-            preview_steel_length,
-            preview_tail_adjustment,
-            preview_tail_gap,
-        ) = wales.resolve_tail_adjustment(rounded_length)
+        preview_steel_length, preview_tail_gap = (
+            wales.resolve_waler_steel_target(rounded_length)
+        )
         candidate_joint_count = len(wales.generate_candidate_joint_points(
             preview_steel_length,
             self.min_piece_length,
@@ -110,7 +108,12 @@ class WalerSolverDialog(SolverDialogThreadBridge):
 
         info_items = [
             ("圍令編號", waler_id, "總長度", f"{format_number(rounded_length)} mm"),
-            ("標準鋼材總長", f"{format_number(preview_steel_length)} mm", "調整塊／餘量", f"{format_number(preview_tail_adjustment)} / {format_number(preview_tail_gap)} mm"),
+            (
+                "標準鋼材總長",
+                f"{format_number(preview_steel_length)} mm",
+                "短少量（允許 0～200 mm）",
+                f"{format_number(preview_tail_gap)} mm",
+            ),
             ("起點座標", format_point(start_point), "終點座標", format_point(end_point)),
             ("禁止點數量", str(len(forbidden_points)), "候選接頭點數", str(candidate_joint_count)),
             ("接頭安全距離", f"{format_number(self.joint_clearance)} mm", "最小段長", f"{format_number(self.min_piece_length)} mm"),
@@ -558,7 +561,6 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             "joint_clearance": self.joint_clearance,
             "min_piece_length": self.min_piece_length,
             "max_piece_length": self.max_piece_length,
-            "adjustment_lengths": list(wales.WALER_ADJUSTMENT_LENGTHS),
             "max_gap": wales.WALER_MAX_GAP,
             "search_diagnostics": (
                 diagnostics.to_dict()

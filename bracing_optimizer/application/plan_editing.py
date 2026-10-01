@@ -241,12 +241,16 @@ class SupportPlanEditing:
         config,
         normalized: Sequence[tuple[str, int]],
     ) -> SupportPieceValidation:
-        jack_count = sum(1 for kind, _length in normalized if kind == "jack")
-        if jack_count != 1:
+        layout_validation = support.validate_support_layout(
+            config,
+            list(normalized),
+        )
+        if layout_validation.reason_issues:
+            issue = layout_validation.reason_issues[0]
             return SupportPieceValidation(
                 valid=False,
-                issue_code="invalid_jack_count",
-                message="❌ 千斤頂數量不是 1",
+                issue_code=issue.code,
+                message=f"❌ {issue.message}",
             )
 
         allowed_steel_lengths = support.configured_steel_lengths(config)
@@ -583,10 +587,12 @@ class SupportPlanEditing:
 
     @staticmethod
     def find_forbidden_zone_hit(plan, config):
-        for joint in getattr(plan, "joints", []) or []:
-            for zone_start, zone_end, zone_type in support.forbidden_zones(config):
-                if zone_start <= joint <= zone_end:
-                    return joint, zone_start, zone_end, zone_type
+        hits = support.forbidden_piece_joint_hits(
+            list(getattr(plan, "pieces", []) or []),
+            config,
+        )
+        if hits:
+            return hits[0]
         return None
 
     @staticmethod
@@ -843,111 +849,98 @@ class WalerPlanEditing:
                 round(float(base_plan.get("required_length", steel_length)))
             )
 
-        completion_error = ""
-        try:
-            _resolved_steel, tail_adjustment, tail_gap = (
-                wales.resolve_tail_adjustment(
-                    required_length,
-                    steel_length=steel_length,
-                )
-            )
-        except ValueError as exc:
-            tail_adjustment = 0
-            tail_gap = required_length - steel_length
-            completion_error = str(exc)
-
         config = wales.Config(
-            total_length=steel_length,
-            support_points=[],
+            total_length=required_length,
+            support_points=[
+                int(round(point))
+                for point in (result_context.get("forbidden_points") or [])
+            ],
+            candidate_joint_points=list(joints),
+            min_piece_length=int(round(float(
+                result_context.get("min_piece_length", 1000) or 1000
+            ))),
+            max_piece_length=int(round(float(
+                result_context.get("max_piece_length", 10000) or 10000
+            ))),
+            joint_clearance_to_support=int(round(float(
+                result_context.get("joint_clearance", 300) or 300
+            ))),
             purchasable_lengths=purchasable_lengths,
             short_segment_ratio_target=targets["short"],
             mid_segment_ratio_target=targets["mid"],
             long_segment_ratio_target=targets["long"],
         )
-        segment_counts, segment_ratios = wales.segment_ratio_summary(
+        evaluation = wales.evaluate_waler_plan(
             segments,
+            joints,
             config,
-        )
-        ratio_penalty, segment_ratios = wales.calculate_ratio_penalty(
-            segments,
-            config,
-        )
-        allocation = wales.allocate_stock_best_fit(
-            segments,
             self.inventory.stock_items(material_spec, "圍令"),
-            purchasable_lengths,
+            required_length=required_length,
         )
+        issue_codes = {issue.code for issue in evaluation.issues}
+        errors = []
+        if wales.ISSUE_SEGMENT_NOT_PURCHASABLE in issue_codes:
+            errors.append("部分料長不在庫存可購買長度內，材料配置未完成。")
+        elif wales.ISSUE_ALLOCATION_UNAVAILABLE in issue_codes:
+            errors.append("無法配料，可能無合適庫存或可購買長度")
 
-        if allocation is None:
-            assignments = []
-            buy_count = len(segments)
-            distinct_groups = len(set(segments))
-            length_variation = max(segments) - min(segments) if segments else 0
-            under_4000_count = sum(1 for segment in segments if segment < 4000)
-            total_waste = 0
-            errors = ["部分料長不在庫存可購買長度內，材料配置未完成。"]
-        else:
-            assignments = allocation["assignments"]
-            buy_count = allocation["total_bought"]
-            distinct_groups = allocation["distinct_groups"]
-            length_variation = allocation["length_variation"]
-            under_4000_count = allocation["under_4000_segment_count"]
-            total_waste = allocation["total_waste"]
-            errors = []
-        if completion_error:
-            errors.append(completion_error)
-
-        joint_count = len(joints)
-        score = (
-            buy_count * 100_000
-            + ratio_penalty
-            + under_4000_count * 100_000
-            + distinct_groups * 5_000
-            + length_variation
-            + joint_count * 1_000
-        )
         plan = copy.deepcopy(base_plan)
         plan.update({
             "joints": joints,
             "segments": segments,
-            "assignments": assignments,
-            "total_waste": total_waste,
-            "buy_count": buy_count,
-            "distinct_groups": distinct_groups,
-            "length_variation": length_variation,
-            "under_4000_segment_count": under_4000_count,
-            "segment_counts": segment_counts,
-            "segment_ratios": segment_ratios,
+            "assignments": (
+                None
+                if evaluation.assignments is None
+                else list(evaluation.assignments)
+            ),
+            "total_waste": evaluation.total_waste,
+            "buy_count": evaluation.buy_count,
+            "distinct_groups": evaluation.distinct_groups,
+            "length_variation": evaluation.length_variation,
+            "under_4000_segment_count": (
+                evaluation.under_4000_segment_count
+            ),
+            "segment_counts": evaluation.segment_counts,
+            "segment_ratios": evaluation.segment_ratios,
             "ratio_targets": targets,
-            "ratio_penalty": ratio_penalty,
-            "joint_count": joint_count,
-            "score": score,
-            "valid": not errors,
+            "ratio_penalty": evaluation.ratio_penalty,
+            "joint_count": evaluation.joint_count,
+            "score": evaluation.local_score,
+            "valid": evaluation.valid,
             "errors": errors,
             "required_length": required_length,
             "steel_length": steel_length,
-            "tail_adjustment": tail_adjustment,
-            "gap": tail_gap,
-            "pieces": [
-                *[("steel", length) for length in segments],
-                *([("shim", tail_adjustment)] if tail_adjustment > 0 else []),
-            ],
+            "tail_adjustment": 0,
+            "gap": required_length - steel_length,
+            "pieces": [("steel", length) for length in segments],
         })
         if waler_id:
-            legality = self.validate(
-                waler_id=waler_id,
+            legality = self._project_legality(
+                evaluation,
+                required_length=required_length,
                 segments=segments,
-                joints=joints,
-                result=result_context,
+                material_spec=material_spec,
             )
             plan["legality"] = legality
-            plan["valid"] = bool(legality.get("valid")) and not errors
+            plan["valid"] = bool(legality.get("valid"))
         return plan
 
     def validate(self, *, waler_id, segments, joints, result=None) -> dict:
         result = result or {}
         required_length = self.required_length(waler_id, result)
         current_length = sum(segments)
+        if required_length is None:
+            return {
+                "valid": False,
+                "summary": "❌ 無法取得需求長度",
+                "violations": ["無法取得需求長度"],
+                "details": ["❌ 無法取得需求長度"],
+                "warnings": [],
+                "required_length": None,
+                "current_length": current_length,
+                "tail_adjustment": 0,
+                "gap": None,
+            }
         forbidden_points = [
             int(round(point)) for point in (result.get("forbidden_points") or [])
         ]
@@ -965,85 +958,105 @@ class WalerPlanEditing:
             material_spec,
             "圍令",
         )
-
-        tail_adjustment = 0
-        tail_gap = None
-        completion_error = ""
-        if required_length is not None:
-            try:
-                _resolved_steel, tail_adjustment, tail_gap = (
-                    wales.resolve_tail_adjustment(
-                        required_length,
-                        steel_length=current_length,
-                    )
-                )
-            except ValueError as exc:
-                completion_error = str(exc)
-
         config = wales.Config(
-            total_length=current_length,
+            total_length=required_length,
             support_points=forbidden_points,
+            candidate_joint_points=list(joints),
             min_piece_length=min_piece_length,
             max_piece_length=max_piece_length,
             joint_clearance_to_support=joint_clearance,
             purchasable_lengths=purchasable_lengths,
         )
-        solver_valid, solver_errors = wales.validate_segments(
-            joints,
-            segments,
+        evaluation = wales.evaluate_waler_plan(
+            list(segments),
+            list(joints),
             config,
+            self.inventory.stock_items(material_spec, "圍令"),
+            required_length=required_length,
+        )
+        return self._project_legality(
+            evaluation,
+            required_length=required_length,
+            segments=list(segments),
+            material_spec=material_spec,
         )
 
+    def _project_legality(
+        self,
+        evaluation: wales.WalerPlanEvaluation,
+        *,
+        required_length: int,
+        segments: list[int],
+        material_spec: str,
+    ) -> dict:
+        current_length = sum(segments)
         violations = []
         details = []
-        if completion_error:
-            violations.append("尾端調整量不合法")
-            details.extend([
-                "❌ 無法以一塊調整塊及 0～199 mm 餘量完成圍令",
-                f"需求長度：{required_length} mm",
-                f"標準鋼材總長：{current_length} mm",
-            ])
 
-        forbidden_joint = None
-        forbidden_center = None
-        for joint in joints:
-            for center in forbidden_points:
-                if abs(joint - center) < joint_clearance:
-                    forbidden_joint = joint
-                    forbidden_center = center
-                    break
-            if forbidden_joint is not None:
-                break
-        if forbidden_joint is not None:
-            violations.append("接頭落入禁止區")
-            details.extend([
-                "❌ 接頭落入禁止區",
-                f"接頭位置：{forbidden_joint} mm",
-                (
-                    f"禁止區：{forbidden_center - joint_clearance} ~ "
-                    f"{forbidden_center + joint_clearance} mm"
-                ),
-            ])
+        for issue in evaluation.issues:
+            if issue.code == wales.ISSUE_STEEL_TOTAL_SHORT:
+                violations.append("鋼材總長不足")
+                details.extend([
+                    "❌ 鋼材總長不足",
+                    f"需求長度：{issue.fact('required_length')} mm",
+                    (
+                        "允許最短鋼材總長："
+                        f"{issue.fact('minimum_steel_length')} mm"
+                    ),
+                    f"實際鋼材總長：{issue.fact('actual_steel_length')} mm",
+                ])
+            elif issue.code == wales.ISSUE_STEEL_TOTAL_LONG:
+                violations.append("鋼材總長太長")
+                details.extend([
+                    "❌ 鋼材總長太長",
+                    f"需求長度：{issue.fact('required_length')} mm",
+                    f"實際鋼材總長：{issue.fact('actual_steel_length')} mm",
+                ])
+            elif issue.code == wales.ISSUE_JOINT_CLEARANCE:
+                joint = issue.fact("joint_position")
+                center = issue.fact("forbidden_point")
+                clearance = issue.fact("clearance")
+                violations.append("接頭落入禁止區")
+                details.extend([
+                    "❌ 接頭落入禁止區",
+                    f"接頭位置：{joint} mm",
+                    (
+                        f"禁止區：{center - clearance} ~ "
+                        f"{center + clearance} mm"
+                    ),
+                ])
+            elif issue.code == wales.ISSUE_SEGMENT_BELOW_MINIMUM:
+                message = (
+                    f"段長 {issue.fact('segment_length')} 小於最短限制 "
+                    f"{issue.fact('minimum_length')}"
+                )
+                violations.append(message)
+                details.append(f"❌ {message}")
+            elif issue.code == wales.ISSUE_SEGMENT_ABOVE_MAXIMUM:
+                message = (
+                    f"段長 {issue.fact('segment_length')} 大於最長限制 "
+                    f"{issue.fact('maximum_length')}"
+                )
+                violations.append(message)
+                details.append(f"❌ {message}")
+            elif issue.code == wales.ISSUE_SEGMENT_NOT_PURCHASABLE:
+                violations.append("無此料長")
+                details.extend([
+                    "❌ 無此料長",
+                    f"段次：{issue.fact('segment_index') + 1}",
+                    f"料長：{issue.fact('segment_length')} mm",
+                ])
+            elif issue.code == wales.ISSUE_ALLOCATION_UNAVAILABLE:
+                violations.append("無法配料")
+                details.append("❌ 無法配料，可能無合適庫存或可購買長度")
 
-        allowed_lengths = set(purchasable_lengths)
-        missing_length = next(
-            (segment for segment in segments if segment not in allowed_lengths),
-            None,
-        )
-        if missing_length is not None:
-            violations.append("無此料長")
-            details.extend(["❌ 無此料長", f"料長：{missing_length} mm"])
-
-        other_errors = [
-            error
-            for error in solver_errors
-            if "距支撐過近" not in error
-            and "不在可用材料長度清單" not in error
-        ]
-        for error in other_errors:
-            violations.append(error)
-            details.append(f"❌ {error}")
-
+        allowed_lengths = {
+            int(length)
+            for length in self.inventory.purchasable_lengths(
+                material_spec,
+                "圍令",
+            )
+        }
         warnings = []
         for length, required_quantity in sorted(Counter(segments).items()):
             inventory_quantity = self.inventory.quantity(
@@ -1061,20 +1074,15 @@ class WalerPlanEditing:
                     ),
                 ])
 
-        valid = (
-            required_length is not None
-            and not completion_error
-            and solver_valid
-            and not violations
-        )
+        valid = evaluation.valid
+        gap = required_length - current_length
         if valid:
             summary = "✅ 合法"
             details = [
                 "✅ 合法",
                 f"需求長度：{required_length} mm",
                 f"標準鋼材總長：{current_length} mm",
-                f"尾端調整塊：{tail_adjustment} mm",
-                f"現場處理餘量：{tail_gap} mm",
+                f"現場處理餘量：{gap} mm",
                 "✅ 所有接頭均符合規範",
             ]
         elif len(violations) == 1:
@@ -1093,8 +1101,8 @@ class WalerPlanEditing:
             "warnings": warnings,
             "required_length": required_length,
             "current_length": current_length,
-            "tail_adjustment": tail_adjustment,
-            "gap": tail_gap,
+            "tail_adjustment": 0,
+            "gap": gap,
         }
 
 

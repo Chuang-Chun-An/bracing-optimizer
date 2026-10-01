@@ -78,7 +78,7 @@ CAD Builder 沒有獨立正式 GUI。`main.py` 是唯一工程資料 GUI。
 - 匯出高解析度 PNG/JPEG 完整配置圖。
 - 依專案已保存的工程幾何，建立目前可見圍令與支撐配置的乾淨 DXF 成果檔。
 
-DXF 匯出不再重新儲存原始 DXF。程式以 `ezdxf.new("R2018")` 新建毫米圖檔，從 `dxf_import_state` 的世界座標重建必要工程背景；鋼材、調整塊與餘量使用對齊尺寸標註，千斤頂插入 `SUPPORT_JACK` 專用圖塊且不另標尺寸。DWG 與 PDF 尚未提供原生輸出。
+DXF 匯出不再重新儲存原始 DXF。程式以 `ezdxf.new("R2018")` 新建毫米圖檔：有 `dxf_import_state` 時使用 source-backed 世界座標與必要工程背景，沒有 state 的手動 Project 則使用 identity 座標輸出 result-only 成果；鋼材、調整塊與餘量使用對齊尺寸標註，千斤頂插入 `SUPPORT_JACK` 專用圖塊且不另標尺寸。DWG 與 PDF 尚未提供原生輸出。
 
 ---
 
@@ -244,8 +244,7 @@ support_distribution_uv\
 ├─ cad_builder.lsp
 ├─ cad_bridge_event_examples.json
 ├─ tools\
-│  ├─ inventory_conversion.py
-│  └─ upgrade_project_schema.py
+│  └─ inventory_conversion.py
 ├─ dxf_import\
 │  ├─ models.py
 │  ├─ geometry.py
@@ -723,9 +722,10 @@ Matplotlib 自訂工具列，只保留：
 | 函數 | 輸入 | 輸出 | 用途 |
 |---|---|---|---|
 | `export_coordinate_system_from_import_state()` | import state 的 coordinate metadata | `ExportCoordinateSystem` | 在 Main orchestration boundary 建立窄的 Project → WCS 契約 |
+| `resolve_dxf_export_context()` | `dxf_import_state` 或 `None` | 必填 export mode 與座標契約 | 只依 import state 是否存在選擇 source-backed／result-only；不讀 workflow status |
 | `build_project_member_bindings()` | Current Project 圍令／支撐列、座標契約 | world-coordinate bindings | 直接從目前 Project geometry 建立 Solver placement line，不讀 converted |
 | `build_project_geometry_segments()` | Current Project 圍令／支撐／斜撐列、座標契約 | formal WCS lines | 建立 `SD_PROJECT_WALER/STRUT/BRACE` 正式工程線 |
-| `export_results_to_dxf()` | 輸出路徑、可見方案、Current Project rows、座標契約、optional background | `DXFExportReport` | 新建 R2018 clean document、加入目前工程線、背景與成果，暫存驗證後交易式交付 |
+| `export_results_to_dxf()` | 輸出路徑、可見方案、Current Project rows、座標契約、必填 export mode、optional background | `DXFExportReport` | 依 source-backed／result-only contract 新建 R2018 clean document，暫存驗證後交易式交付 |
 
 正式輸出只在新文件上執行一次 `saveas()` 到同資料夾唯一暫存檔，重新讀取後要求 Audit 為 0 errors／0 fixes，並驗證背景及成果世界座標、圖層、Dimension、Jack Block、重複 Layer、XRecord 與懸空 Handle。全部通過後才以 `os.replace()` 取代正式檔。
 
@@ -1692,13 +1692,17 @@ Inventory 不儲存在案例 `data` 中，也不會因載入案例而被替換�
 
 純手動專案的 `dxf_asset` 與 `dxf_import_state` 均可為 `null`。JSON 不保存 Base64 DXF，也不保存 `ezdxf` 的 Document、Entity、Layout 或 Block 執行階段物件。
 
-Application 只接受 schema 3，不在載入時自動轉換舊格式。受版本控制的舊專案可一次執行：
+Application 目前寫入 `schema_version: 3`，載入相容政策如下：
 
-```powershell
-.\.venv\Scripts\python.exe tools\upgrade_project_schema.py --no-backup project_cases\舊專案.json
-```
+- `schema_version` 欄位不存在時視為 missing；只有內容完整通過現行 schema 3 結構與 Domain 驗證才允許開啟。
+- 欄位存在時必須是大於等於 `1` 的真正 JSON 整數；字串、浮點數、`null`、`true`、`false`、`0` 與負數均以格式錯誤拒絕，且 `null` 不視為 missing。
+- 版本小於或等於 `3` 時仍執行完整的現行結構驗證；版本標籤較舊不等於資料結構需要轉換。
+- 版本高於 `3` 時拒絕開啟，並提示使用支援該版本的較新程式。
+- `input_data` 必須包含 `walers`、`struts`、`braces`，可省略 `inventory`、`material_specs`，不得包含其他 table；每筆 row 的欄位集合必須與現行 table contract 完全相同。
+- missing／較舊版本若無法通過現行結構驗證，或 missing／較舊／現行版本發生 row／table schema mismatch，回報「無法以現行格式讀取；請建立新專案，並重新匯入 DXF 或重新輸入資料」及可辨識 table、row、field 的底層驗證錯誤。
+- 載入流程不偵測舊格式特徵、不猜測或轉換欄位，也不提供舊檔轉換入口。
 
-工具會從既有 `dxf_import_state` 提取可確認的 Column／Beam 幾何；無法恢復幾何時只建立 `Source: legacy` 的未連結障礙，不猜測或捏造構件。
+相容檔案只有在使用者實際儲存時才改寫為 schema 3；僅開啟或關閉不會改寫來源檔。正式儲存輸出的 `input_data` 必須能以同一套現行 table／row contract 原樣重新驗證。
 
 交易式儲存順序：
 
@@ -1926,17 +1930,18 @@ Beam 與 Column 點先收集，再各自呼叫一次 `scatter()` 批次繪製。
 
 結果頁的「匯出支撐配置成果DXF」會：
 
-1. Main 從 `dxf_import_state.coordinate_system` 只提取 Project → WCS 座標 metadata；不開啟原始 DXF，也不使用 converted Waler／Strut／Brace 配對成果。
-2. 新建 R2018／毫米的 clean document，將目前 `ProjectDataModel` 的圍令、支撐、斜撐畫在 `SD_PROJECT_WALER`、`SD_PROJECT_STRUT`、`SD_PROJECT_BRACE`。原圖連續壁、角撐、中間柱、托梁與輔助線是 optional background；合法來源圖層會沿用，非法、空白或與正式層衝突時改用 `SD_BASE_*` fallback。
-3. 直接以目前 Project world line 放置 Solver 結果。圍令標註位於 `SD_RESULT_WALER`；支撐標註與千斤頂位於 `SD_RESULT_SUPPORT`。鋼材用一般對齊尺寸、調整塊用「調整塊」尺寸、尾端現場處理長度用「餘量」尺寸。
-4. 千斤頂只從 `assets/dxf/jack_symbol.dxf` 複製允許的 `LINE`／`CIRCLE` 幾何建立 `SUPPORT_JACK`，Block 內圖元位於 `0` 層，INSERT 位於支撐成果層，且不另加尺寸標註。
-5. 先寫入輸出資料夾內唯一暫存檔，再從磁碟重新讀取，執行 Audit、世界座標、成果數量、圖層、Block definition、重複 Layer、XRecord 與裸 Handle reference 驗證；只有全部通過才交易式替換正式檔。
+1. Main 只依 `dxf_import_state` 是否存在選擇模式，不依 `dxf_workflow_status`：欄位不存在或值為 `None` 時使用 result-only；存在時使用 source-backed 並嚴格解析 `coordinate_system`。空 Mapping `{}` 或其他不完整 state 會回報座標錯誤，不 fallback。
+2. Source-backed 新建 R2018／毫米的 clean document，將目前 `ProjectDataModel` 的圍令、支撐、斜撐畫在 `SD_PROJECT_WALER`、`SD_PROJECT_STRUT`、`SD_PROJECT_BRACE`。原圖連續壁、角撐、中間柱、托梁與輔助線是 optional background；合法來源圖層會沿用，非法、空白或與正式層衝突時改用 `SD_BASE_*` fallback。既有圖層建立與座標轉換行為不變。
+3. Result-only 把 Project 座標直接視為 WCS，使用 identity transform；不輸出背景或 `SD_PROJECT_*` 圖層，只建立實際有結果的 `SD_RESULT_WALER`／`SD_RESULT_SUPPORT`。完成摘要不顯示背景或 Project geometry 計數，並提醒檔案未對齊來源圖面，合併時需自行定位。
+4. 兩種模式都以目前 Project line 放置 Solver 結果。圍令標註位於 `SD_RESULT_WALER`；支撐標註與千斤頂位於 `SD_RESULT_SUPPORT`。鋼材用一般對齊尺寸、調整塊用「調整塊」尺寸、尾端現場處理長度用「餘量」尺寸。
+5. 千斤頂只從 `assets/dxf/jack_symbol.dxf` 複製允許的 `LINE`／`CIRCLE` 幾何建立 `SUPPORT_JACK`，Block 內圖元位於 `0` 層，INSERT 位於支撐成果層，且不另加尺寸標註。
+6. 先寫入輸出資料夾內唯一暫存檔，再從磁碟重新讀取，執行 Audit、世界座標、模式內容、成果數量、圖層、Block definition、重複 Layer、XRecord 與裸 Handle reference 驗證；只有全部通過才交易式替換正式檔。
 
 Dimension 不直接在大世界座標下 render。每支構件先以自身起點建立 Local Support Geometry，在局部座標完成 Dimension geometry 與匿名 Block render，再以純平移矩陣將 Dimension 定義點及 Block 內 `LINE`、`MTEXT`、`SOLID`、`INSERT` 等實體統一轉回世界座標。最終驗證也會比對匿名 Block 的實際顯示文字，避免 Dimension 量測值正確但畫面文字受浮點誤差影響。
 
 只匯出結果樹目前勾選為可見的方案。同一構件若同時勾選兩個方案，匯出會停止並要求只保留一個可見方案。
 
-原始 DXF 或專案管理副本遺失、converted binding stale、或舊 DXF Review 留有 error／critical 訊息，都不會否定合法的 Current Project + Solver Result。背景不完整時只略過有問題的背景項目並在報告列出 warning。schema 3 若完全缺少可證明的 Project → World 座標資訊，Main 會明確停止；底層 exporter 則可由呼叫端明確傳入 world context，在沒有任何 background state 時輸出 Project + Solver。成果檔採世界座標與毫米單位；合併回原始 DWG 時，先確認目標單位為毫米，再使用 Insert、Xref 或貼到原始座標，避免額外縮放、旋轉或位移。
+原始 DXF 或專案管理副本遺失、converted binding stale、或舊 DXF Review 留有 error／critical 訊息，都不會否定合法的 Current Project + Solver Result。背景不完整時只略過有問題的背景項目並在報告列出 warning。有 import state 的 Project 必須提供合法 Project → WCS metadata；沒有 import state 的手動 Project 則明確走 result-only。成果檔採毫米單位；source-backed 合併回原始 DWG 時避免額外縮放、旋轉或位移，result-only 合併至其他圖面時由使用者自行定位。
 
 ---
 

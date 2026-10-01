@@ -7,6 +7,76 @@
 
 <!-- codex-archive-log:start -->
 
+<!-- codex-archive-log:entry-start key="2026-10-01-recognize-skew-cut-brace-outlines" -->
+### 2026-10-01｜`recognize-skew-cut-brace-outlines`
+
+- Archive：[openspec/changes/archive/2026-10-01-recognize-skew-cut-brace-outlines](../openspec/changes/archive/2026-10-01-recognize-skew-cut-brace-outlines)
+- 完成內容：修改一般及 component-like Brace closed-outline eligibility：完整、無分支且只有一個可靠 body interpretation 的封閉外框，可由 topology 證明完整 extent，不要求兩條 rail 各自達到共用 `0.8` coverage。；定義斜切 terminal cuts 的資格：必須各自有限連接兩側 outer rails，並與唯一 body midline 形成合法有限交點。；將 closed skew-cut outline 的 source-supported axis 端點定義為 body midline 與兩個 terminal cuts 的交點；不得以 bounding projection extrema 或為碰觸 Waler 而任意外插。
+- Capabilities：`bim-block-brace-recognition`
+- 驗證：All artifacts complete; all 18 tasks complete; 232 related unittest cases passed
+- Specs：Synced 3 added requirements to bim-block-brace-recognition; openspec validate --specs passed (28 specs); strict change validation passed
+<!-- codex-archive-log:entry-end key="2026-10-01-recognize-skew-cut-brace-outlines" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-unify-waler-plan-evaluation" -->
+### 2026-10-01｜`unify-waler-plan-evaluation`
+
+- Archive：[openspec/changes/archive/2026-10-01-unify-waler-plan-evaluation](../openspec/changes/archive/2026-10-01-unify-waler-plan-evaluation)
+- 完成內容：新增可由自動 Solver 與人工編輯共同呼叫的 Waler plan evaluation 契約。；將 segment legality、joint clearance、purchasable length、exact-length allocation、材料比例與 local score 收斂到同一評估結果。；為評估問題定義穩定、具名的 issue code，並讓分類／去重依 code 與結構化內容進行。
+- Capabilities：`waler-plan-evaluation`
+- 驗證：All 23 artifacts/tasks complete; openspec verify-change checks passed; 247 related tests passed; strict validation passed
+- Specs：Synced new waler-plan-evaluation main spec; openspec validate --specs passed
+<!-- codex-archive-log:entry-end key="2026-10-01-unify-waler-plan-evaluation" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-remove-legacy-strut-position-normalization" -->
+### 2026-10-01｜`remove-legacy-strut-position-normalization`
+
+- Archive：[openspec/changes/archive/2026-10-01-remove-legacy-strut-position-normalization](../openspec/changes/archive/2026-10-01-remove-legacy-strut-position-normalization)
+- 完成內容：新增 Project input row 的通用現行欄位驗證，依 table contract 回報缺少及不支援欄位，不針對特定 legacy key 寫特例。；**BREAKING**：移除 `Beam1`／`Beam2`、`Column1`／`Column2` 等 legacy Strut position 的 Application normalization、Brace row legacy `Type` cleanup 與 Main lazy migration；不符合現行 row schema 的 persisted Project 不再可藉由載入或顯示流程轉換，runtime row builders也不再包含legacy-specific cleanup。；移除 `tools/upgrade_project_schema.py` 及其 legacy upgrade tests／文件入口；試行期不掃描或轉換既有 Project 檔，舊檔由使用者自行刪除。
+- Capabilities：`project-input-row-schema`、`project-schema-compatibility`
+- 驗證：19/19 tasks complete; strict validation passed; full test suite 1468 passed with 1 skipped
+- Specs：Synced project-input-row-schema and project-schema-compatibility; openspec validate --specs passed
+<!-- codex-archive-log:entry-end key="2026-10-01-remove-legacy-strut-position-normalization" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-align-support-shim-joint-validation" -->
+### 2026-10-01｜`align-support-shim-joint-validation`
+
+- Archive：[openspec/changes/archive/2026-10-01-align-support-shim-joint-validation](../openspec/changes/archive/2026-10-01-align-support-shim-joint-validation)
+- 完成內容：將零塊或一塊非零 Shim 定義為唯一合法數量；`shim = 0` 表示沒有 Shim piece。；將 Steel／Steel、RC／Steel、Steel／RC、RC／RC 的 Shim placement 規則集中在共用 validator。；將缺失、空白或無法辨識的 Waler 類型一律視為 Steel。
+- Capabilities：`support-shim-joint-validation`
+- 驗證：All 18/18 tasks complete; strict change validation passed; implementation verification passed (9 requirements, 32 scenarios).
+- Specs：Synced new capability support-shim-joint-validation to main specs; openspec validate --specs passed (26 specs).
+<!-- codex-archive-log:entry-end key="2026-10-01-align-support-shim-joint-validation" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-export-result-only-dxf-for-manual-projects" -->
+### 2026-10-01｜`export-result-only-dxf-for-manual-projects`
+
+- Archive：[openspec/changes/archive/2026-10-01-export-result-only-dxf-for-manual-projects](../openspec/changes/archive/2026-10-01-export-result-only-dxf-for-manual-projects)
+- 完成內容：在 DXF 匯出前只依 `dxf_import_state` 是否存在判定模式：欄位不存在或 `None` 為 `result-only`；存在（含 `{}`）則必須以 source-backed 規則解析，資訊不完整即失敗。`dxf_workflow_status` 不參與模式判定。；手動 Project 走 result-only 模式時，將 Project 座標直接視為 WCS，採 identity transform。；Result-only DXF 只建立實際有結果的 Solver 成果圖層與必要結果符號，不輸出背景 DXF 或 `SD_PROJECT_*` geometry 圖層。
+- Capabilities：`dxf-result-export`
+- 驗證：16/16 tasks complete; strict validation passed; focused and full test suites passed
+- Specs：synced: created openspec/specs/dxf-result-export/spec.md; openspec validate --specs passed
+<!-- codex-archive-log:entry-end key="2026-10-01-export-result-only-dxf-for-manual-projects" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-move-material-spec-editing-to-application" -->
+### 2026-10-01｜`move-material-spec-editing-to-application`
+
+- Archive：[openspec/changes/archive/2026-10-01-move-material-spec-editing-to-application](../openspec/changes/archive/2026-10-01-move-material-spec-editing-to-application)
+- 完成內容：新增 Application material-spec editing use case，涵蓋 rename、Usage 修改限制、引用查找、刪除保護、跨表同步及 input-change effect planning。；定義明確 request、成功 staged result 與結構化失敗結果；失敗不得改動傳入的 live Project state。；將 Main 縮減為收集 UI 輸入／確認、呼叫 use case、顯示既有錯誤及採用 staged result。
+- Capabilities：無 spec-level capability
+- 驗證：All artifacts complete; all 18 tasks complete; strict validation passed
+- Specs：No delta specs
+<!-- codex-archive-log:entry-end key="2026-10-01-move-material-spec-editing-to-application" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-01-define-project-schema-compatibility-policy" -->
+### 2026-10-01｜`define-project-schema-compatibility-policy`
+
+- Archive：[openspec/changes/archive/2026-10-01-define-project-schema-compatibility-policy](../openspec/changes/archive/2026-10-01-define-project-schema-compatibility-policy)
+- 完成內容：定義 Project 載入的版本分類與結構驗證順序。；`schema_version` 存在時只接受排除 bool、且大於等於 `1` 的真正整數；字串、浮點數、`null`、布林值、`0` 與負數均以格式錯誤拒絕。；允許版本號缺少或低於 3、但資料結構完整符合現行 schema 3 的檔案開啟。
+- Capabilities：`project-schema-compatibility`
+- 驗證：10/10 tasks complete; openspec validate --strict passed; focused project regression 109 tests passed; presentation boundary 32 tests passed
+- Specs：project-schema-compatibility synced to openspec/specs/project-schema-compatibility/spec.md
+<!-- codex-archive-log:entry-end key="2026-10-01-define-project-schema-compatibility-policy" -->
+
 <!-- codex-archive-log:entry-start key="2026-09-30-decouple-waler-side-evidence-from-terminal-identity" -->
 ### 2026-09-30｜`decouple-waler-side-evidence-from-terminal-identity`
 

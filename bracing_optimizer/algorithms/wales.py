@@ -4,7 +4,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from math import inf
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from bracing_optimizer.domain.material_rules import (
     MaterialLengthRules,
@@ -22,65 +22,37 @@ allocate_total_time = 0.0
 DEBUG = False
 logger = print
 
-WALER_ADJUSTMENT_LENGTHS = (0, 100, 150, 200, 300)
-WALER_MAX_GAP = 199
+WALER_MAX_GAP = 200
+
+ISSUE_STEEL_TOTAL_SHORT = "steel-total-short"
+ISSUE_STEEL_TOTAL_LONG = "steel-total-long"
+ISSUE_JOINT_CLEARANCE = "joint-clearance"
+ISSUE_SEGMENT_BELOW_MINIMUM = "segment-below-minimum"
+ISSUE_SEGMENT_ABOVE_MAXIMUM = "segment-above-maximum"
+ISSUE_SEGMENT_NOT_PURCHASABLE = "segment-not-purchasable"
+ISSUE_ALLOCATION_UNAVAILABLE = "allocation-unavailable"
 
 
-def resolve_tail_adjustment(
+def resolve_waler_steel_target(
     required_length: int,
     *,
-    steel_length: Optional[int] = None,
-    adjustment_lengths: Tuple[int, ...] = WALER_ADJUSTMENT_LENGTHS,
-    max_gap: int = WALER_MAX_GAP,
     steel_step: int = 500,
-) -> Tuple[int, int, int]:
-    """Return ``(steel_length, adjustment, gap)`` for a Waler tail.
+) -> Tuple[int, int]:
+    """Return the unchanged GA endpoint and its uncovered Waler shortfall.
 
-    Formal Waler steel remains on the standard material grid.  One adjustment
-    block is placed after the final steel member and the remaining 0..max_gap
-    millimetres are left for field treatment.
+    Waler has no adjustment block.  Candidate generation retains its existing
+    fixed-step endpoint so search policy and candidate counts do not change;
+    the plan evaluator decides whether the resulting shortfall is within the
+    inclusive 0..200 mm engineering range.
     """
 
-    required_length = int(round(required_length))
-    if required_length < 0:
+    normalized_required = int(round(required_length))
+    if normalized_required < 0:
         raise ValueError("required_length must not be negative")
-    if required_length == 0:
-        return 0, 0, 0
-    if max_gap < 0:
-        raise ValueError("max_gap must not be negative")
     if steel_step <= 0:
         raise ValueError("steel_step must be positive")
-
-    normalized_adjustments = tuple(
-        sorted({int(round(value)) for value in adjustment_lengths if value >= 0})
-    )
-    if not normalized_adjustments:
-        raise ValueError("at least one adjustment length is required")
-
-    options: List[Tuple[int, int, int]] = []
-    if steel_length is None:
-        for adjustment in normalized_adjustments:
-            for gap in range(max_gap + 1):
-                target = required_length - adjustment - gap
-                if target >= 0 and target % steel_step == 0:
-                    options.append((target, adjustment, gap))
-    else:
-        target = int(round(steel_length))
-        for adjustment in normalized_adjustments:
-            gap = required_length - target - adjustment
-            if 0 <= gap <= max_gap:
-                options.append((target, adjustment, gap))
-
-    if not options:
-        raise ValueError(
-            "Waler length cannot be completed by one adjustment block "
-            f"with a 0..{max_gap} mm field remainder"
-        )
-
-    # Prefer the smallest field remainder; when it is equal, use the smaller
-    # adjustment block.  With the standard list and max_gap=199 every 500 mm
-    # residue has at least one legal option.
-    return min(options, key=lambda item: (item[2], item[1], -item[0]))
+    steel_length = (normalized_required // steel_step) * steel_step
+    return steel_length, normalized_required - steel_length
 
 
 def debug_print(*args) -> None:
@@ -121,7 +93,6 @@ class Config:
     joint_clearance_to_support: int = 300
     candidate_joint_step: int = 500
     purchasable_lengths: List[int] = field(default_factory=list)
-    adjustment_lengths: Tuple[int, ...] = WALER_ADJUSTMENT_LENGTHS
     max_gap: int = WALER_MAX_GAP
     steel_target_length: int = field(init=False)
     tail_adjustment: int = field(init=False)
@@ -152,16 +123,11 @@ class Config:
     tournament_k: int = 4
 
     def __post_init__(self) -> None:
-        (
-            self.steel_target_length,
-            self.tail_adjustment,
-            self.tail_gap,
-        ) = resolve_tail_adjustment(
+        self.steel_target_length, self.tail_gap = resolve_waler_steel_target(
             self.total_length,
-            adjustment_lengths=self.adjustment_lengths,
-            max_gap=self.max_gap,
             steel_step=self.candidate_joint_step,
         )
+        self.tail_adjustment = 0
 
         if not self.candidate_joint_points:
             self.candidate_joint_points = generate_candidate_joint_points(
@@ -179,6 +145,38 @@ class Config:
 
     # 輸出
     top_n: int = 5
+
+
+@dataclass(frozen=True)
+class WalerPlanIssue:
+    """Runtime-only issue identity and normalized facts."""
+
+    code: str
+    facts: Tuple[Tuple[str, int], ...] = ()
+
+    def fact(self, name: str) -> Optional[int]:
+        return next((value for key, value in self.facts if key == name), None)
+
+
+@dataclass(frozen=True)
+class WalerPlanEvaluation:
+    """Typed core result shared by automatic and manual Waler workflows."""
+
+    valid: bool
+    segments: Tuple[int, ...]
+    joints: Tuple[int, ...]
+    issues: Tuple[WalerPlanIssue, ...]
+    assignments: Optional[Tuple[Dict, ...]]
+    total_waste: Optional[int]
+    buy_count: Optional[int]
+    distinct_groups: Optional[int]
+    length_variation: Optional[int]
+    under_4000_segment_count: Optional[int]
+    segment_counts: Optional[Dict[str, int]]
+    segment_ratios: Optional[Dict[str, float]]
+    ratio_penalty: Optional[float]
+    joint_count: int
+    local_score: Optional[float]
 
 # =========================
 # 2. 基本工具函式
@@ -214,6 +212,183 @@ def is_joint_allowed(point: int, cfg: Config) -> bool:
         if abs(point - support) < cfg.joint_clearance_to_support:
             return False
     return True
+
+
+def _waler_issue(code: str, **facts: int) -> WalerPlanIssue:
+    return WalerPlanIssue(
+        code=code,
+        facts=tuple((name, int(value)) for name, value in facts.items()),
+    )
+
+
+def _scan_waler_plan_issues(
+    joints: List[int],
+    segments: List[int],
+    cfg: Config,
+    *,
+    required_length: int,
+    issue_sink: Optional[Callable[[WalerPlanIssue], None]],
+) -> bool:
+    """Scan hard constraints once, optionally emitting every issue in order."""
+
+    normalized_required = int(round(required_length))
+    actual_steel_length = sum(segments)
+    minimum_steel_length = max(0, normalized_required - 200)
+    has_issue = False
+
+    if actual_steel_length < minimum_steel_length:
+        has_issue = True
+        if issue_sink is None:
+            return True
+        issue_sink(
+            _waler_issue(
+                ISSUE_STEEL_TOTAL_SHORT,
+                required_length=normalized_required,
+                minimum_steel_length=minimum_steel_length,
+                actual_steel_length=actual_steel_length,
+            )
+        )
+    elif actual_steel_length > normalized_required:
+        has_issue = True
+        if issue_sink is None:
+            return True
+        issue_sink(
+            _waler_issue(
+                ISSUE_STEEL_TOTAL_LONG,
+                required_length=normalized_required,
+                actual_steel_length=actual_steel_length,
+            )
+        )
+
+    for joint_index, joint in enumerate(joints):
+        for forbidden_index, forbidden_point in enumerate(cfg.support_points):
+            if abs(joint - forbidden_point) < cfg.joint_clearance_to_support:
+                has_issue = True
+                if issue_sink is None:
+                    return True
+                issue_sink(
+                    _waler_issue(
+                        ISSUE_JOINT_CLEARANCE,
+                        joint_index=joint_index,
+                        joint_position=joint,
+                        forbidden_index=forbidden_index,
+                        forbidden_point=forbidden_point,
+                        clearance=cfg.joint_clearance_to_support,
+                    )
+                )
+                # Preserve the historical automatic penalty cardinality: one
+                # clearance issue per joint even if forbidden ranges overlap.
+                break
+
+    allowed_lengths = set(cfg.purchasable_lengths)
+    for segment_index, segment in enumerate(segments):
+        if segment < cfg.min_piece_length:
+            has_issue = True
+            if issue_sink is None:
+                return True
+            issue_sink(
+                _waler_issue(
+                    ISSUE_SEGMENT_BELOW_MINIMUM,
+                    segment_index=segment_index,
+                    segment_length=segment,
+                    minimum_length=cfg.min_piece_length,
+                )
+            )
+        if segment > cfg.max_piece_length:
+            has_issue = True
+            if issue_sink is None:
+                return True
+            issue_sink(
+                _waler_issue(
+                    ISSUE_SEGMENT_ABOVE_MAXIMUM,
+                    segment_index=segment_index,
+                    segment_length=segment,
+                    maximum_length=cfg.max_piece_length,
+                )
+            )
+        if segment not in allowed_lengths:
+            has_issue = True
+            if issue_sink is None:
+                return True
+            issue_sink(
+                _waler_issue(
+                    ISSUE_SEGMENT_NOT_PURCHASABLE,
+                    segment_index=segment_index,
+                    segment_length=segment,
+                )
+            )
+
+    return has_issue
+
+
+def _collect_waler_plan_issues(
+    joints: List[int],
+    segments: List[int],
+    cfg: Config,
+    *,
+    required_length: int,
+) -> List[WalerPlanIssue]:
+    """Collect every hard issue for plan evaluation and diagnostics."""
+
+    issues: List[WalerPlanIssue] = []
+    _scan_waler_plan_issues(
+        joints,
+        segments,
+        cfg,
+        required_length=required_length,
+        issue_sink=issues.append,
+    )
+    return issues
+
+
+def _has_waler_plan_issue(
+    joints: List[int],
+    segments: List[int],
+    cfg: Config,
+    *,
+    required_length: int,
+) -> bool:
+    """Return whether a repair probe has any hard issue, without projection."""
+
+    return _scan_waler_plan_issues(
+        joints,
+        segments,
+        cfg,
+        required_length=required_length,
+        issue_sink=None,
+    )
+
+
+def format_automatic_waler_issue(issue: WalerPlanIssue) -> str:
+    """Project one structured issue to the established Solver error style."""
+
+    if issue.code == ISSUE_STEEL_TOTAL_SHORT:
+        return (
+            f"鋼材總長 {issue.fact('actual_steel_length')} 小於允許下限 "
+            f"{issue.fact('minimum_steel_length')}"
+        )
+    if issue.code == ISSUE_STEEL_TOTAL_LONG:
+        return (
+            f"鋼材總長 {issue.fact('actual_steel_length')} 大於需求長度 "
+            f"{issue.fact('required_length')}"
+        )
+    if issue.code == ISSUE_JOINT_CLEARANCE:
+        return f"接頭 {issue.fact('joint_position')} 距支撐過近"
+    if issue.code == ISSUE_SEGMENT_BELOW_MINIMUM:
+        return (
+            f"段長 {issue.fact('segment_length')} 小於最短限制 "
+            f"{issue.fact('minimum_length')}"
+        )
+    if issue.code == ISSUE_SEGMENT_ABOVE_MAXIMUM:
+        return (
+            f"段長 {issue.fact('segment_length')} 大於最長限制 "
+            f"{issue.fact('maximum_length')}"
+        )
+    if issue.code == ISSUE_SEGMENT_NOT_PURCHASABLE:
+        return f"段長 {issue.fact('segment_length')} 不在可用材料長度清單中"
+    if issue.code == ISSUE_ALLOCATION_UNAVAILABLE:
+        return "無法配料，可能無合適庫存或可購買長度"
+    return issue.code
 
 
 def expand_stock_items(stock_items: List[Dict]) -> List[Dict]:
@@ -277,31 +452,14 @@ def validate_segments(joints: List[int], segments: List[int], cfg: Config) -> Tu
     - 是否有效
     - 錯誤訊息清單
     """
-    errors = []
-
-    # 本工程不允許裁切材料，因此每段長度必須剛好等於可用材料長度。
-    allowed_lengths = set(cfg.purchasable_lengths)
-
-    if sum(segments) != cfg.steel_target_length:
-        errors.append(
-            "steel segment total does not match the resolved Waler steel length"
-        )
-
-    # 接頭距支撐限制
-    for joint in joints:
-        if not is_joint_allowed(joint, cfg):
-            errors.append(f"接頭 {joint} 距支撐過近")
-
-    # 每段長度限制
-    for seg in segments:
-        if seg < cfg.min_piece_length:
-            errors.append(f"段長 {seg} 小於最短限制 {cfg.min_piece_length}")
-        if seg > cfg.max_piece_length:
-            errors.append(f"段長 {seg} 大於最長限制 {cfg.max_piece_length}")
-        if seg not in allowed_lengths:
-            errors.append(f"段長 {seg} 不在可用材料長度清單中")
-
-    return len(errors) == 0, errors
+    issues = _collect_waler_plan_issues(
+        joints,
+        segments,
+        cfg,
+        required_length=cfg.total_length,
+    )
+    errors = [format_automatic_waler_issue(issue) for issue in issues]
+    return not issues, errors
 
 
 # =========================
@@ -434,6 +592,123 @@ def allocate_stock_best_fit(
     }
 
 
+def evaluate_waler_plan(
+    segments: List[int],
+    joints: List[int],
+    cfg: Config,
+    stock_items: List[Dict],
+    *,
+    required_length: Optional[int] = None,
+) -> WalerPlanEvaluation:
+    """Evaluate one already-decoded Waler plan without search behavior."""
+
+    normalized_segments = [int(round(value)) for value in segments]
+    normalized_joints = [int(round(value)) for value in joints]
+    resolved_required_length = (
+        cfg.total_length
+        if required_length is None
+        else int(round(required_length))
+    )
+    issues = _collect_waler_plan_issues(
+        normalized_joints,
+        normalized_segments,
+        cfg,
+        required_length=resolved_required_length,
+    )
+    joint_count = len(normalized_joints)
+
+    # Every issue collected above is a hard legality issue.  Preserve the full
+    # issue list, but do not fabricate allocation or score diagnostics for a
+    # plan that cannot proceed to material allocation.
+    if issues:
+        return WalerPlanEvaluation(
+            valid=False,
+            segments=tuple(normalized_segments),
+            joints=tuple(normalized_joints),
+            issues=tuple(issues),
+            assignments=None,
+            total_waste=None,
+            buy_count=None,
+            distinct_groups=None,
+            length_variation=None,
+            under_4000_segment_count=None,
+            segment_counts=None,
+            segment_ratios=None,
+            ratio_penalty=None,
+            joint_count=joint_count,
+            local_score=None,
+        )
+
+    allocation = allocate_stock_best_fit(
+        normalized_segments,
+        stock_items,
+        cfg.purchasable_lengths,
+    )
+    if allocation is None:
+        issues.append(_waler_issue(ISSUE_ALLOCATION_UNAVAILABLE))
+        return WalerPlanEvaluation(
+            valid=False,
+            segments=tuple(normalized_segments),
+            joints=tuple(normalized_joints),
+            issues=tuple(issues),
+            assignments=None,
+            total_waste=None,
+            buy_count=None,
+            distinct_groups=None,
+            length_variation=None,
+            under_4000_segment_count=None,
+            segment_counts=None,
+            segment_ratios=None,
+            ratio_penalty=None,
+            joint_count=joint_count,
+            local_score=None,
+        )
+
+    buy_count = allocation["total_bought"]
+    distinct_groups = allocation["distinct_groups"]
+    length_variation = allocation["length_variation"]
+    under_4000_segment_count = allocation["under_4000_segment_count"]
+    ratio_analysis = analyze_material_ratios(
+        normalized_segments,
+        MaterialRatioTargets(
+            short=cfg.short_segment_ratio_target,
+            mid=cfg.mid_segment_ratio_target,
+            long=cfg.long_segment_ratio_target,
+        ),
+        weight=cfg.ratio_penalty_weight,
+        rules=_material_length_rules(cfg),
+    )
+    ratio_penalty = ratio_analysis.penalty
+
+    # Preserve the established numeric types and operation order exactly.
+    local_score = (
+        buy_count * 100_000
+        + ratio_penalty
+        + under_4000_segment_count * 100_000
+        + distinct_groups * 5_000
+        + length_variation
+        + joint_count * 1000
+    )
+
+    return WalerPlanEvaluation(
+        valid=not issues,
+        segments=tuple(normalized_segments),
+        joints=tuple(normalized_joints),
+        issues=tuple(issues),
+        assignments=tuple(allocation["assignments"]),
+        total_waste=allocation["total_waste"],
+        buy_count=buy_count,
+        distinct_groups=distinct_groups,
+        length_variation=length_variation,
+        under_4000_segment_count=under_4000_segment_count,
+        segment_counts=ratio_analysis.counts,
+        segment_ratios=ratio_analysis.ratios,
+        ratio_penalty=ratio_penalty,
+        joint_count=joint_count,
+        local_score=local_score,
+    )
+
+
 def evaluate_individual(
     individual: List[int],
     cfg: Config,
@@ -446,15 +721,25 @@ def evaluate_individual(
     score 越低越好。
     """
     joints, segments = decode_individual(individual, cfg)
-    valid, errors = validate_segments(joints, segments, cfg)
+    evaluation = evaluate_waler_plan(
+        segments,
+        joints,
+        cfg,
+        stock_items,
+        required_length=cfg.total_length,
+    )
 
-    # 大懲罰：基本幾何規則不符
-    if not valid:
-        penalty = 1_000_000 + 50_000 * len(errors)
-        evaluate_elapsed = time.perf_counter() - evaluate_start
-        evaluate_count += 1
-        evaluate_total_time += evaluate_elapsed
-        return {
+    non_allocation_issues = [
+        issue
+        for issue in evaluation.issues
+        if issue.code != ISSUE_ALLOCATION_UNAVAILABLE
+    ]
+    if not evaluation.valid and non_allocation_issues:
+        errors = [
+            format_automatic_waler_issue(issue)
+            for issue in non_allocation_issues
+        ]
+        result = {
             "individual": individual[:],
             "joints": joints,
             "segments": segments,
@@ -464,16 +749,10 @@ def evaluate_individual(
             "total_waste": None,
             "ratio_penalty": None,
             "joint_count": len(joints),
-            "score": penalty,
+            "score": 1_000_000 + 50_000 * len(errors),
         }
-
-    # 配料
-    alloc = allocate_stock_best_fit(segments, stock_items, cfg.purchasable_lengths)
-    if alloc is None:
-        evaluate_elapsed = time.perf_counter() - evaluate_start
-        evaluate_count += 1
-        evaluate_total_time += evaluate_elapsed
-        return {
+    elif not evaluation.valid:
+        result = {
             "individual": individual[:],
             "joints": joints,
             "segments": segments,
@@ -487,47 +766,27 @@ def evaluate_individual(
             "joint_count": len(joints),
             "score": 800_000 + len(joints) * 1000,
         }
+    else:
+        result = {
+            "individual": individual[:],
+            "joints": joints,
+            "segments": segments,
+            "valid": True,
+            "errors": [],
+            "assignments": list(evaluation.assignments or ()),
+            "total_waste": evaluation.total_waste,
+            "buy_count": evaluation.buy_count,
+            "distinct_groups": evaluation.distinct_groups,
+            "length_variation": evaluation.length_variation,
+            "under_4000_segment_count": (
+                evaluation.under_4000_segment_count
+            ),
+            "segment_ratios": evaluation.segment_ratios,
+            "ratio_penalty": evaluation.ratio_penalty,
+            "joint_count": evaluation.joint_count,
+            "score": evaluation.local_score,
+        }
 
-    joint_count = len(joints)
-    buy_count = alloc["total_bought"]
-    distinct_groups = alloc["distinct_groups"]
-    length_variation = alloc["length_variation"]
-    under_4000_segment_count = alloc["under_4000_segment_count"]
-    ratio_penalty, segment_ratios = calculate_ratio_penalty(segments, cfg)
-
-    # 綜合評分：
-    # 1) 優先使用庫存；若使用購買料，分數大幅扣除
-    # 2) 儘量符合短/中/長段比例目標
-    # 3) 儘量避免段長 <4000
-    # 4) 儘量減少不同料種
-    # 5) 儘量減少最大/最小料長變化
-    # 6) 保留接頭數量作為次要目標
-    score = (
-        buy_count * 100_000
-        + ratio_penalty
-        + under_4000_segment_count * 100_000
-        + distinct_groups * 5_000
-        + length_variation
-        + joint_count * 1000
-    )
-
-    result = {
-        "individual": individual[:],
-        "joints": joints,
-        "segments": segments,
-        "valid": True,
-        "errors": [],
-        "assignments": alloc["assignments"],
-        "total_waste": alloc["total_waste"],
-        "buy_count": buy_count,
-        "distinct_groups": distinct_groups,
-        "length_variation": length_variation,
-        "under_4000_segment_count": under_4000_segment_count,
-        "segment_ratios": segment_ratios,
-        "ratio_penalty": ratio_penalty,
-        "joint_count": joint_count,
-        "score": score,
-    }
     evaluate_elapsed = time.perf_counter() - evaluate_start
     evaluate_count += 1
     evaluate_total_time += evaluate_elapsed
@@ -567,8 +826,12 @@ def repair_individual(individual: List[int], cfg: Config, max_iters: int = 80) -
     def is_valid_selected(selected_joints: List[int]) -> bool:
         test_ind = to_individual(selected_joints)
         joints, segments = decode_individual(test_ind, cfg)
-        valid, _ = validate_segments(joints, segments, cfg)
-        return valid
+        return not _has_waler_plan_issue(
+            joints,
+            segments,
+            cfg,
+            required_length=cfg.total_length,
+        )
 
     def count_preferred_short(selected_joints: List[int]) -> int:
         return sum(1 for seg in get_segments(selected_joints) if seg < preferred_min)
@@ -1102,8 +1365,8 @@ def _waler_result_signature(item: Dict, cfg: Config) -> Tuple[object, ...]:
     return (
         tuple(item.get("segments", []) or []),
         tuple(item.get("joints", []) or []),
-        int(cfg.tail_adjustment),
-        int(cfg.tail_gap),
+        0,
+        int(cfg.total_length - sum(item.get("segments", []) or [])),
     )
 
 
@@ -1131,13 +1394,12 @@ def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
             ("steel", length)
             for length in item.get("segments", [])
         ]
-        if cfg.tail_adjustment > 0:
-            pieces.append(("shim", cfg.tail_adjustment))
+        steel_length = sum(item.get("segments", []) or [])
         enriched.update(
             required_length=cfg.total_length,
-            steel_length=cfg.steel_target_length,
-            tail_adjustment=cfg.tail_adjustment,
-            gap=cfg.tail_gap,
+            steel_length=steel_length,
+            tail_adjustment=0,
+            gap=cfg.total_length - steel_length,
             pieces=pieces,
         )
         top_results.append(enriched)

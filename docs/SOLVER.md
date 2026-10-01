@@ -232,21 +232,26 @@ Steel order 搜尋使用以下 heuristic：
 
 每個 Steel order 產生 Jack／Shim layouts。
 
-自動候選生成直接依 Waler 類型限制 layout：
+自動候選生成直接依 Waler 類型限制 layout，完整 layout evaluation 與人工 `SupportPlanEditing` 另共用同一 Shim validator：
 
+- 每個 layout 只能有零塊或一塊非零 Shim。
 - Steel／Steel：非零 Shim 必須與 Jack 相鄰。
 - From 端為 RC：Shim 必須位於 From RC 接觸面。
 - To 端為 RC：Shim 必須位於 To RC 接觸面。
 - RC／RC：Shim 可以位於任一 RC 接觸面。
 - Shim 為 0 時不建立實體 Shim piece。
+- Waler 類型缺失、空白或無法辨識時視為 Steel。
 
-這些 placement 是 Engineering Hard Constraint，但目前由自動候選生成空間直接保證，不作為 score。
+這些 placement 是 Engineering Hard Constraint，不作為 score。候選生成先避免建立已知錯誤 layout，共用 validator 則是自動與人工路徑的正式 legality source。
+
+RC 端的 terminal Shim 與第一段相鄰 Steel boundary，是端部 `1600 mm` exclusion 的唯一例外。例外只忽略 matching RC end zone；Column／Beam、另一端及其他 piece boundaries 仍照常檢查。
 
 ### 4.4 Single-support validation
 
 每個完整 layout 會建立 `SupportPlan` 並驗證：
 
 - Jack 數量必須剛好為一支。
+- 非零 Shim 數量最多一塊，且 placement 必須符合兩端 Waler 類型。
 - Steel length 必須存在於該 Material Spec 的可購買集合。
 - Support gap 必須位於 `0～150 mm`。
 - Joint 不得落入端部 exclusion。
@@ -254,6 +259,8 @@ Steel order 搜尋使用以下 heuristic：
 - Joint 不得落入 Beam exclusion。
 
 合法方案再計算正式單支分數。
+
+Reason 使用固定優先順序：Jack count、Shim count、Shim placement、gap、forbidden joint、Steel length。Jack count 或 Shim count gate 只簡化 reason，不會中止完整 evaluation 或既有 scoring inputs；`count_forbidden_piece_joints`、invalid penalty 與 score breakdown 仍依修改前的計算路徑執行，因此合法與不合法 candidates 的既有分數及排序不變。
 
 ### 4.5 TargetJackRegion
 
@@ -566,37 +573,29 @@ Builder 仍忠實建立包含 RC 的正式 Waler input。進入 Single Waler opt
 - segment length `1000～10000 mm`。
 - segment 必須存在於 purchasable length 集合。
 - joint 與 forbidden point 距離至少 300 mm。
-- 最多一塊 adjustment block。
-- tail remainder `0～199 mm`。
+- Waler 不使用 adjustment block 或 Shim。
+- Steel segment total 必須位於 `required_length - 200 mm` 到 `required_length` 的閉區間。
 
 Waler 標準鋼材料長目前以 500 mm 為級距。每個 segment 必須使用合法的 purchasable standard length，因此從 Waler 起點依序累積標準 segment 後，可能的 joint positions 自然形成 500 mm grid。
 
 Solver 使用此材料規格所形成的離散位置建立搜尋空間。這是「由標準材料級距衍生的搜尋離散化」，不是獨立的 joint-position hard constraint，也不是任意搜尋 tuning。
 
-### 8.2 Tail resolution
+### 8.2 Steel target 與總長閉區間
 
-搜尋 Waler segmentation 前，Solver 先解析：
-
-```text
-required length
-= standard Steel target
-+ one adjustment block
-+ tail remainder
-```
-
-Adjustment block 可為：
+搜尋 Waler segmentation 前，Solver 保留既有 500 mm candidate endpoint：
 
 ```text
-0 / 100 / 150 / 200 / 300 mm
+steel target = floor(required length / 500) × 500
+gap = required length - steel target
 ```
 
-解析順序目前偏好：
+Waler 的 `tail_adjustment` 固定為 `0`，pieces 不建立 `shim`。上述 endpoint 計算只保留既有搜尋空間與 candidate count，不單獨保證方案合法；共用 plan evaluator 另以完整 required length 判斷：
 
-1. 較小的 tail remainder。
-2. remainder 相同時使用較小 adjustment block。
-3. 仍相同時使用較大的 Steel target。
+```text
+required length - 200 <= sum(segments) <= required length
+```
 
-這是 tail resolution 的確定性選擇，不是 GA score。
+下界與上界皆可接受。低於下界產生「鋼材總長不足」，高於 required length 產生「鋼材總長太長」；不再有「尾端調整量不合法」issue。若固定 endpoint 的 gap 超過 200 mm，該搜尋結果會 deterministic invalid，而不是加入 adjustment block 補足。這是 Engineering Hard Constraint，不是 GA score。
 
 ### 8.3 Material-derived search discretization and feasible path
 
@@ -643,14 +642,15 @@ segments。解碼本身只轉換表示法，不判斷合法性。
 ```text
 0/1 individual
 → decode joints and segments
-→ validate joint clearance、segment range 與 purchasable lengths
+→ 共用 evaluator 完整掃描 steel total、joint clearance、segment range 與 purchasable lengths
 → exact-length inventory／purchase allocation
 → Short／Mid／Long ratio analysis
 → local score 與 diagnostics payload
 ```
 
-無效 individual 會取得供搜尋排序與診斷使用的 invalid penalty，但不會因此
-成為合法工程方案。正式候選仍必須通過全部 hard constraints。
+只要有任一 hard issue，evaluator 就不執行 allocation、ratio 或 local score；automatic compatibility projector 仍套用既有 invalid penalty，因此對外排序與 payload 相容。沒有 hard issue 時才執行 exact allocation；若 allocation 防禦性失敗，同樣不產生 score components 或 local score。
+
+Hard issues 使用 runtime-only 具名 code 與結構化 facts，並以固定順序完整收集；中文訊息由 automatic／manual projector 各自產生。Issue code 不寫入 Project JSON 或 Solver result persistence。GA repair 只需要可行性布林值，因此呼叫同一 synchronous scanner、第一個 violation 即停止且不建立 issue object；正式 evaluator 則透過 issue sink 收集全部 issues。兩者共用同一組 hard-rule branches。
 
 ### 8.5 No material cutting
 
@@ -760,7 +760,7 @@ DEEP 完成後即停止；即使結果仍未穩定，也不再擴大搜尋。
 所有已執行階段的結果會：
 
 1. 以完整 Waler solution signature 去重；signature 包含 ordered segments、
-   joints、tail adjustment 與 tail remainder。
+   joints，以及為 persistence 相容保留的 `tail_adjustment=0` 與衍生 gap。
 2. 相同 signature 保留較低 score。
 3. 依 score 與 deterministic signature 排序。
 4. 最終最多保留 5 個候選。
@@ -777,7 +777,7 @@ Single Waler 使用 additive weighted score，分數越低越好。
 | --- | --- | --- | --- |
 | Segment legality | Engineering Hard Constraint | 確保標準材料可施工 | `1000～10000 mm` 且在 purchasable set |
 | Forbidden-point clearance | Engineering Hard Constraint | 避開 Strut／Brace connection | 距離 `< 300 mm` invalid |
-| Tail completion | Engineering Hard Constraint | 確保可完成 Waler 總長 | 一塊 adjustment，加 `0～199 mm` remainder |
+| Steel total | Engineering Hard Constraint | 確保 Waler 鋼材總長落在已確認範圍 | `required - 200 <= steel total <= required`，無 adjustment block／Shim |
 | Purchase quantity | Solver Preference；權重為 Current Tuning Parameter | 優先使用現有庫存 | 每支購買料 `100,000` |
 | Material ratio | Temporary Solver Heuristic；權重為 Current Tuning Parameter | 平衡 Short／Mid／Long | L1 deviation × `100,000` |
 | Waler ratio target | Temporary Solver Heuristic | 暫時避免偏向單一料長區間 | 預設 `20% / 50% / 30%`，可調整 |
@@ -945,6 +945,8 @@ shared_inventory_optimized = false
 - Jack length 是否為 600 mm。
 - Steel length 是否在允許集合。
 - Shim length 是否為允許尺寸。
+- 每個 layout 是否只有零塊或一塊非零 Shim。
+- Shim placement 是否符合兩端 normalized Waler 類型；缺失、空白或未知類型視為 Steel。
 
 接著 `evaluate_single_support()` 重新計算：
 
@@ -955,6 +957,8 @@ shared_inventory_optimized = false
 - forbidden-zone violations。
 - single-support score。
 - validity 與 reason。
+
+`evaluate_single_support()` 同時套用 RC terminal Shim／第一段 Steel 的唯一 `1600 mm` 例外，且不豁免 Column／Beam。人工編輯與自動 Solver 共用同一 validator 與 deterministic reason priority；可解析但違規的排列仍沿用 immediate commit，保存為 invalid result 供後續修正。
 
 完成後再重新計算全域：
 
@@ -976,22 +980,21 @@ shared_inventory_optimized = false
 - Steel order 40／20／10／2 heuristic。
 - Candidate rank。
 
-目前人工 Support editing 尚未驗證 RC／Steel Shim placement，列為 Known Solver Gap。
+已保存的舊結果在 Project load 時不自動重新驗證；下一次完整重算或人工 staged recalculation 才使用目前規則。
 
 ### 11.2 WalerPlanEditing
 
 人工修改 Waler segments 後會重新建立 joints，並驗證：
 
-- Required Waler length 是否可由 Steel、最多一塊 adjustment block 與 `0～199 mm` remainder 完成。
+- Steel segment total 是否位於 required length 的 200 mm 閉區間。
 - Segment 是否位於 `1000～10000 mm`。
 - Segment 是否存在於 purchasable length 集合。
 - Joint 是否避開 forbidden point 300 mm。
-- Segment total 是否符合已解析的 Steel target。
-- 庫存是否足夠。
+- exact-length allocation 是否可建立。
 
-庫存不足不使方案 invalid；若 length 可購買，會顯示採購警告並將購買數量納入 score。
+`WalerPlanEditing` 與 automatic Solver 呼叫相同的 Algorithms evaluator，並使用同一份 resolved context 與庫存資料。庫存 Qty 不足不使方案 invalid；若 length 可購買，會顯示採購警告並將購買數量納入 score。空白 Material Spec 仍沿用既有 Usage fallback。
 
-人工 Waler 方案會重新計算與自動 Solver 相同的 local score components。
+合法人工 Waler 方案會取得與自動 Solver 完全相同的 local score components、運算順序與數值型別。人工顯示 projector 依固定順序呈現 core 收集的全部 issues；issue code 僅存在執行期間，不存入 Project JSON 或結果存檔。載入含非零 legacy `tail_adjustment` 的舊結果時不做 migration；下一次人工重算會將 `tail_adjustment` 歸零並移除 Waler `shim`。
 
 下列搜尋資訊不影響人工合法性：
 
@@ -1039,7 +1042,7 @@ shared_inventory_optimized = false
 - SharedLayoutGroup 使用相同 ordered layout。
 - Waler joint clearance 至少 300 mm。
 - Waler segment 屬於 `1000～10000 mm` 且可購買。
-- Waler tail adjustment 與 remainder 規則。
+- Waler 鋼材總長位於 required length 的 200 mm 閉區間，且不使用 adjustment block／Shim。
 
 ### Solver Preference
 
@@ -1151,12 +1154,13 @@ Known Gap 表示已知 Domain 與目前實作之間仍有差異，不代表必�
 
 Waler 的 `20 / 50 / 30` 也屬 current Temporary Solver Heuristic，但不是程式 bug。
 
-### Gap 4 — Manual Support Shim placement validation
+### Resolved — Manual Support Shim placement validation（原 Gap 4）
 
-- Domain：RC／Steel Waler 對 Shim placement 有正式 hard constraint。
-- Automatic Solver：候選生成時已依 Waler 類型限制 placement。
-- Manual Editing：目前 `validate_pieces()` 與 `evaluate_single_support()` 未重新驗證此 placement。
-- Impact：人工排列可能通過其他檢查，但不符合已確認的 Shim placement rule。
+- Domain：零塊或一塊非零 Shim、RC／Steel placement 與 RC terminal Shim／第一段 Steel 唯一例外均為正式 hard constraint。
+- Automatic Solver：候選生成與完整 evaluation 使用相同 Waler normalization／Shim legality contract。
+- Manual Editing：`SupportPlanEditing` 消費 `evaluate_single_support()` 的共用 verdict；可解析的違規排列保存為 invalid。
+- Diagnostics：Jack／Shim count gate 只控制 reason；既有 scoring、penalty、score breakdown 與 candidate ordering 不變。
+- Compatibility：舊結果 load 時不重驗，下次重算才套用新規則。
 
 ---
 

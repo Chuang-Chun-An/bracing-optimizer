@@ -19,6 +19,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import ezdxf
 
+from bracing_optimizer.application.project_data import TABLE_COLUMNS
 from bracing_optimizer.application.project_mapper import (
     ProjectDomainMappingError,
     ProjectRowMapper,
@@ -26,6 +27,12 @@ from bracing_optimizer.application.project_mapper import (
 
 
 PROJECT_SCHEMA_VERSION = 3
+PROJECT_SCHEMA_FORMAT_ERROR_STAGE = "schema_version 格式錯誤"
+PROJECT_SCHEMA_FUTURE_ERROR_STAGE = "專案版本不相容"
+PROJECT_SCHEMA_UNREADABLE_STAGE = (
+    "無法以現行格式讀取；請建立新專案，並重新匯入 DXF 或重新輸入資料"
+)
+PROJECT_ROW_SCHEMA_ERROR_STAGE = "Project row schema mismatch"
 MANAGED_DXF_RELATIVE_PATH = "source/source.dxf"
 DXF_GEOMETRY_TOLERANCE_MM = 5.0
 DXF_AMBIGUITY_TOLERANCE_MM = 0.1
@@ -176,6 +183,89 @@ class ProjectSaveResult:
 class ProjectSerializer:
     """Validate the project structure used by the current application."""
 
+    @classmethod
+    def validate_for_load(cls, payload: Mapping[str, Any]) -> None:
+        """Validate schema-version compatibility before current structure."""
+
+        version_missing = "schema_version" not in payload
+        version = payload.get("schema_version")
+        if not version_missing:
+            if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+                raise ProjectPersistenceError(
+                    PROJECT_SCHEMA_FORMAT_ERROR_STAGE,
+                    "schema_version 必須是大於等於 1 的整數，且不得為布林值；"
+                    f"目前值為 {version!r}",
+                )
+            if version > PROJECT_SCHEMA_VERSION:
+                raise ProjectPersistenceError(
+                    PROJECT_SCHEMA_FUTURE_ERROR_STAGE,
+                    f"檔案版本 {version} 高於目前支援版本 "
+                    f"{PROJECT_SCHEMA_VERSION}，請使用較新程式開啟。",
+                )
+
+        try:
+            cls.validate(payload)
+        except ProjectPersistenceError as exc:
+            if (
+                exc.stage == PROJECT_ROW_SCHEMA_ERROR_STAGE
+                or version_missing
+                or version < PROJECT_SCHEMA_VERSION
+            ):
+                raise ProjectPersistenceError(
+                    PROJECT_SCHEMA_UNREADABLE_STAGE,
+                    f"底層驗證錯誤：{exc}",
+                ) from exc
+            raise
+
+    @staticmethod
+    def _validate_input_table_contract(input_data: Mapping[str, Any]) -> None:
+        required_tables = ("walers", "struts", "braces")
+        missing_tables = [
+            table_name
+            for table_name in required_tables
+            if table_name not in input_data
+        ]
+        if missing_tables:
+            raise ProjectPersistenceError(
+                PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                "input_data 缺少必要資料表：" + ", ".join(missing_tables),
+            )
+
+        unsupported_tables = sorted(set(input_data) - set(TABLE_COLUMNS))
+        if unsupported_tables:
+            raise ProjectPersistenceError(
+                PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                "input_data 含不支援資料表：" + ", ".join(unsupported_tables),
+            )
+
+        for table_name, rows in input_data.items():
+            if not isinstance(rows, list):
+                raise ProjectPersistenceError(
+                    PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                    f"input_data.{table_name} 必須是陣列",
+                )
+            expected_fields = set(TABLE_COLUMNS[table_name])
+            for row_number, row in enumerate(rows, start=1):
+                location = f"input_data.{table_name}[{row_number}]"
+                if not isinstance(row, dict):
+                    raise ProjectPersistenceError(
+                        PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                        f"{location} 必須是物件",
+                    )
+                actual_fields = set(row)
+                missing_fields = sorted(expected_fields - actual_fields)
+                unsupported_fields = sorted(actual_fields - expected_fields)
+                details = []
+                if missing_fields:
+                    details.append("缺少欄位：" + ", ".join(missing_fields))
+                if unsupported_fields:
+                    details.append("不支援欄位：" + ", ".join(unsupported_fields))
+                if details:
+                    raise ProjectPersistenceError(
+                        PROJECT_ROW_SCHEMA_ERROR_STAGE,
+                        f"{location} " + "；".join(details),
+                    )
+
     @staticmethod
     def validate(payload: Mapping[str, Any]) -> None:
         try:
@@ -200,21 +290,7 @@ class ProjectSerializer:
         input_data = decoded.get("input_data")
         if not isinstance(input_data, dict):
             raise ProjectPersistenceError("JSON 驗證失敗", "input_data 必須是物件")
-        required_domain_tables = (
-            "walers",
-            "struts",
-            "braces",
-        )
-        missing_tables = [
-            table_name
-            for table_name in required_domain_tables
-            if not isinstance(input_data.get(table_name), list)
-        ]
-        if missing_tables:
-            raise ProjectPersistenceError(
-                "JSON 驗證失敗",
-                "input_data 缺少 Domain 資料表：" + ", ".join(missing_tables),
-            )
+        ProjectSerializer._validate_input_table_contract(input_data)
         id_fields = {
             "walers": "WalerID",
             "struts": "StrutID",
@@ -1061,6 +1137,10 @@ __all__ = [
     "DxfStatus",
     "DxfWorkflowStatus",
     "MANAGED_DXF_RELATIVE_PATH",
+    "PROJECT_SCHEMA_FORMAT_ERROR_STAGE",
+    "PROJECT_SCHEMA_FUTURE_ERROR_STAGE",
+    "PROJECT_ROW_SCHEMA_ERROR_STAGE",
+    "PROJECT_SCHEMA_UNREADABLE_STAGE",
     "PROJECT_SCHEMA_VERSION",
     "ProjectPersistenceError",
     "ProjectSaveResult",

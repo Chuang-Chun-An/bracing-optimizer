@@ -1548,39 +1548,45 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         restarted_watcher = TempEventWatcher(self.event_path)
         self.assertIsNone(restarted_watcher.check_new_event())
 
-    def test_main_rejects_legacy_case_until_offline_upgrade(self):
+    def test_main_rejects_noncanonical_project_rows_without_conversion(self):
+        input_data = ProjectDataModel(
+            struts=[{
+                "StrutID": "S1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 1000,
+                "EndY": 0,
+            }],
+            braces=[{
+                "BraceID": "B1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 1,
+                "EndY": 1,
+            }],
+        ).to_case_data()
+        input_data["struts"][0].pop("BeamPositions")
+        input_data["struts"][0]["Beam1"] = 250
+        input_data["braces"][0]["Type"] = "KneeBrace"
         payload = {
-            "schema_version": 1,
-            "case_name": "legacy",
-            "data": {
-                "walers": [],
-                "struts": [{
-                    "StrutID": "S1",
-                    "StartX": 0,
-                    "StartY": 0,
-                    "EndX": 1000,
-                    "EndY": 0,
-                    "Beam1": 250,
-                    "Beam2": "",
-                    "Column1": "",
-                    "Column2": "",
-                }],
-                "braces": [{
-                    "BraceID": "B1",
-                    "Type": "KneeBrace",
-                    "StartX": 0,
-                    "StartY": 0,
-                    "EndX": 1,
-                    "EndY": 1,
-                }],
-            },
+            "schema_version": 3,
+            "project_information": {"project_name": "noncanonical"},
+            "input_data": input_data,
+            "dxf_import_state": None,
+            "dxf_asset": None,
+            "result": None,
         }
         (self.temp_path / "legacy.json").write_text(
             json.dumps(payload),
             encoding="utf-8",
         )
-        with self.assertRaises(ProjectPersistenceError):
+        with self.assertRaises(ProjectPersistenceError) as raised:
             self.load_with_solver("legacy")
+
+        self.assertIn("無法以現行格式讀取", raised.exception.stage)
+        self.assertIn("input_data.struts[1]", raised.exception.detail)
+        self.assertIn("BeamPositions", raised.exception.detail)
+        self.assertIn("Beam1", raised.exception.detail)
 
 
 if __name__ == "__main__":

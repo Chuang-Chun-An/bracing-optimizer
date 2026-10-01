@@ -50,6 +50,33 @@ class SupportPlan:
     shared_layout_group: str = ""
 
 
+@dataclass(frozen=True)
+class SupportValidationIssue:
+    """One deterministic engineering issue for an ordered Support layout."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True)
+class SupportLayoutValidation:
+    """Complete legality facts plus the gated issue projection for ``reason``."""
+
+    issues: Tuple[SupportValidationIssue, ...]
+    reason_issues: Tuple[SupportValidationIssue, ...]
+    gap: int
+    forbidden_count: int
+    legacy_scoring_forbidden_count: int
+
+    @property
+    def valid(self) -> bool:
+        return not self.issues
+
+    @property
+    def reason(self) -> str:
+        return "; ".join(issue.message for issue in self.reason_issues)
+
+
 def normalize_waler_type(value: object) -> str:
     """Return the construction-rule waler type; legacy blanks mean Steel."""
 
@@ -1536,11 +1563,64 @@ def count_forbidden_piece_joints(
     pieces: List[Tuple[str, int]],
     config: SupportConfig,
 ) -> int:
-    """Count forbidden boundaries with the RC contact-shim exception.
+    """Count forbidden boundaries with the typed RC contact-shim exception.
 
-    Only the boundary immediately behind a terminal shim at an RC contact
-    ignores the matching end-clearance zone.  Pile/waler zones and every
-    other piece boundary remain active.
+    Only a terminal Shim/first-Steel boundary at an RC contact ignores the
+    matching end-clearance zone. Pile/waler zones and every other piece
+    boundary remain active.
+    """
+
+    return len(forbidden_piece_joint_hits(pieces, config))
+
+
+def forbidden_piece_joint_hits(
+    pieces: List[Tuple[str, int]],
+    config: SupportConfig,
+) -> List[Tuple[int, int, int, str]]:
+    """Return one deterministic forbidden-zone hit per piece boundary."""
+
+    if len(pieces) < 2:
+        return []
+
+    positions = build_positions(pieces)
+    last_boundary_index = len(pieces) - 2
+    hits: List[Tuple[int, int, int, str]] = []
+    for boundary_index, joint in enumerate(positions[1:-1]):
+        ignored_zone_names: Tuple[str, ...] = ()
+        if (
+            boundary_index == 0
+            and str(pieces[0][0]).lower() == "shim"
+            and str(pieces[1][0]).lower() == "steel"
+            and normalize_waler_type(config.from_waler_type) == "RC"
+        ):
+            ignored_zone_names = ("left_end",)
+        elif (
+            boundary_index == last_boundary_index
+            and str(pieces[-1][0]).lower() == "shim"
+            and str(pieces[-2][0]).lower() == "steel"
+            and normalize_waler_type(config.to_waler_type) == "RC"
+        ):
+            ignored_zone_names = ("right_end",)
+
+        ignored = set(ignored_zone_names)
+        for zone_start, zone_end, zone_name in forbidden_zones(config):
+            if zone_name in ignored:
+                continue
+            if zone_start <= joint <= zone_end:
+                hits.append((joint, zone_start, zone_end, zone_name))
+                break
+    return hits
+
+
+def _legacy_scoring_forbidden_piece_joint_count(
+    pieces: List[Tuple[str, int]],
+    config: SupportConfig,
+) -> int:
+    """Preserve the pre-change forbidden-joint input used by scoring.
+
+    The new typed boundary rule changes legality and diagnostics only.  This
+    helper deliberately retains the former terminal-Shim behavior so existing
+    candidate scores and score breakdowns remain byte-for-byte stable.
     """
 
     if len(pieces) < 2:
@@ -1563,7 +1643,6 @@ def count_forbidden_piece_joints(
             and normalize_waler_type(config.to_waler_type) == "RC"
         ):
             ignored_zone_names = ("right_end",)
-
         if check_joint_forbidden(
             joint,
             config,
@@ -1571,6 +1650,161 @@ def count_forbidden_piece_joints(
         ):
             forbidden_count += 1
     return forbidden_count
+
+
+def _shim_placement_issue(
+    config: SupportConfig,
+    pieces: List[Tuple[str, int]],
+    *,
+    jack_count: int,
+    shim_indices: List[int],
+) -> Optional[SupportValidationIssue]:
+    if jack_count != 1 or len(shim_indices) != 1:
+        return None
+
+    shim_index = shim_indices[0]
+    jack_index = next(
+        index
+        for index, (kind, _length) in enumerate(pieces)
+        if str(kind).lower() == "jack"
+    )
+    from_rc = normalize_waler_type(config.from_waler_type) == "RC"
+    to_rc = normalize_waler_type(config.to_waler_type) == "RC"
+
+    if from_rc and to_rc:
+        valid = shim_index in (0, len(pieces) - 1)
+    elif from_rc:
+        valid = shim_index == 0
+    elif to_rc:
+        valid = shim_index == len(pieces) - 1
+    else:
+        valid = abs(shim_index - jack_index) == 1
+
+    if valid:
+        return None
+    return SupportValidationIssue(
+        code="invalid_shim_placement",
+        message="Shim 位置不符合 Waler 類型規則",
+    )
+
+
+def validate_support_layout(
+    config: SupportConfig,
+    pieces: List[Tuple[str, int]],
+) -> SupportLayoutValidation:
+    """Validate one layout and project issues into deterministic ``reason``.
+
+    Jack/Shim count gates affect only ``reason_issues``.  Complete legality
+    facts and legacy scoring inputs are always calculated.
+    """
+
+    total_used = sum(length for _, length in pieces)
+    gap = config.total_length - total_used
+    jack_count = sum(
+        1 for kind, _length in pieces if str(kind).lower() == "jack"
+    )
+    shim_indices = [
+        index
+        for index, (kind, length) in enumerate(pieces)
+        if str(kind).lower() == "shim" and length > 0
+    ]
+    forbidden_count = count_forbidden_piece_joints(pieces, config)
+    legacy_forbidden_count = _legacy_scoring_forbidden_piece_joint_count(
+        pieces,
+        config,
+    )
+
+    jack_issue = (
+        SupportValidationIssue(
+            code="invalid_jack_count",
+            message="千斤頂數量不是 1",
+        )
+        if jack_count != 1
+        else None
+    )
+    shim_count_issue = (
+        SupportValidationIssue(
+            code="invalid_shim_count",
+            message="非零 Shim 數量超過 1",
+        )
+        if len(shim_indices) > 1
+        else None
+    )
+    placement_issue = (
+        None
+        if shim_count_issue is not None
+        else _shim_placement_issue(
+            config,
+            pieces,
+            jack_count=jack_count,
+            shim_indices=shim_indices,
+        )
+    )
+    gap_issue = (
+        SupportValidationIssue(
+            code="invalid_gap",
+            message=f"餘長(mm) 不合法: {gap}",
+        )
+        if not (SUPPORT_MIN_GAP <= gap <= MAX_GAP)
+        else None
+    )
+    forbidden_issue = (
+        SupportValidationIssue(
+            code="forbidden_joint",
+            message=f"{forbidden_count} 個接頭落入禁止區",
+        )
+        if forbidden_count > 0
+        else None
+    )
+    allowed_steel_lengths = configured_steel_lengths(config)
+    invalid_steel_issues = tuple(
+        SupportValidationIssue(
+            code="invalid_steel_length",
+            message=f"鋼材長度不合法: {length}",
+        )
+        for length in sorted(
+            length
+            for kind, length in pieces
+            if str(kind).lower() == "steel"
+            and length not in allowed_steel_lengths
+        )
+    )
+
+    ordered_issues = tuple(
+        issue
+        for issue in (
+            jack_issue,
+            shim_count_issue,
+            placement_issue,
+            gap_issue,
+            forbidden_issue,
+            *invalid_steel_issues,
+        )
+        if issue is not None
+    )
+    if jack_issue is not None:
+        reason_issues = (jack_issue,)
+    elif shim_count_issue is not None:
+        reason_issues = (shim_count_issue,)
+    else:
+        reason_issues = tuple(
+            issue
+            for issue in (
+                placement_issue,
+                gap_issue,
+                forbidden_issue,
+                *invalid_steel_issues,
+            )
+            if issue is not None
+        )
+
+    return SupportLayoutValidation(
+        issues=ordered_issues,
+        reason_issues=reason_issues,
+        gap=gap,
+        forbidden_count=forbidden_count,
+        legacy_scoring_forbidden_count=legacy_forbidden_count,
+    )
 
 
 # =========================================================
@@ -1590,26 +1824,18 @@ def evaluate_single_support(
     jack_center = get_jack_center(pieces)
     jack_region_id = get_jack_region_id(jack_center, config.pile_centers)
 
-    valid = True
-    reasons = []
+    validation = validate_support_layout(config, pieces)
+    forbidden_count = validation.legacy_scoring_forbidden_count
 
-    if jack_count != 1:
-        valid = False
-        reasons.append("千斤頂數量不是 1")
-
-    if not (SUPPORT_MIN_GAP <= gap <= MAX_GAP):
-        valid = False
-        reasons.append(f"餘長(mm) 不合法: {gap}")
-
-    forbidden_count = count_forbidden_piece_joints(pieces, config)
-    if forbidden_count > 0:
-        valid = False
-        reasons.append(f"{forbidden_count} 個接頭落入禁止區")
-
-    for kind, length in pieces:
-        if kind == "steel" and length not in configured_steel_lengths(config):
-            valid = False
-            reasons.append(f"鋼材長度不合法: {length}")
+    legacy_valid_for_scoring = (
+        jack_count == 1
+        and SUPPORT_MIN_GAP <= gap <= MAX_GAP
+        and forbidden_count == 0
+        and all(
+            kind != "steel" or length in configured_steel_lengths(config)
+            for kind, length in pieces
+        )
+    )
 
     # -----------------------------
     # 軟限制評分：分數越小越好
@@ -1634,7 +1860,7 @@ def evaluate_single_support(
         score += jack_edge_penalty
 
     invalid_penalty = 0
-    if not valid:
+    if not legacy_valid_for_scoring:
         invalid_penalty = (
             SUPPORT_INVALID_BASE_PENALTY
             + forbidden_count * SUPPORT_INVALID_FORBIDDEN_JOINT_WEIGHT
@@ -1659,10 +1885,10 @@ def evaluate_single_support(
         jack_center=jack_center,
         jack_region_id=jack_region_id,
         score=score,
-        valid=valid or allow_invalid,
+        valid=validation.valid or allow_invalid,
         pile_centers=list(config.pile_centers),
         waler_centers=list(config.waler_centers),
-        reason="; ".join(reasons),
+        reason=validation.reason,
         breakdown=breakdown,
         material_spec=str(config.material_spec or ""),
         shared_layout_group=str(config.shared_layout_group or ""),
