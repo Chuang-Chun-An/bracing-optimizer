@@ -3,6 +3,11 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from bracing_optimizer.application.solver_operation_registry import (
+    SnapshotState,
+    SolverKind,
+    SolverOperationRegistry,
+)
 from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
 from bracing_optimizer.presentation.dialogs.support_solver_dialog import (
     SupportSolverDialog,
@@ -140,6 +145,30 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
                     ),
                     result_snapshot,
                 )
+
+    def test_running_close_does_not_request_operation_cancellation(self):
+        kinds = (
+            SolverKind.SUPPORT,
+            SolverKind.SINGLE_WALER,
+            SolverKind.GLOBAL_WALER,
+        )
+        for (name, dialog_class, warning_path), kind in zip(
+            self.DIALOG_CASES,
+            kinds,
+        ):
+            with self.subTest(dialog=name):
+                registry = SolverOperationRegistry()
+                handle = registry.register_snapshot(kind)
+                execution = registry.start_execution(handle)
+                dialog = self._make_close_dialog(dialog_class, running=True)
+                dialog.operation_registry = registry
+                dialog.snapshot_handle = handle
+
+                with patch(warning_path):
+                    dialog._on_close()
+
+                self.assertFalse(execution.cancellation_token.is_cancelled)
+                self.assertEqual(registry.status(handle).state, SnapshotState.RUNNING)
 
     def test_non_running_close_uses_existing_destroy_path(self):
         for name, dialog_class, warning_path in self.DIALOG_CASES:
@@ -326,6 +355,8 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         self.assertEqual(dialog.run_button.state, "normal")
 
     def test_support_thread_start_failure_returns_to_non_running(self):
+        registry = SolverOperationRegistry()
+        handle = registry.register_snapshot(SolverKind.SUPPORT)
         dialog = SupportSolverDialog.__new__(SupportSolverDialog)
         dialog.short_ratio_var = _Var("20")
         dialog.mid_ratio_var = _Var("50")
@@ -337,6 +368,9 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         dialog.run_button = _Button()
         dialog.dialog = _Dialog()
         dialog._calculation_running = False
+        dialog._snapshot_stale = False
+        dialog.operation_registry = registry
+        dialog.snapshot_handle = handle
 
         with (
             patch(
@@ -353,6 +387,7 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
 
         self.assertFalse(dialog._calculation_running)
         self.assertEqual(dialog.run_button.state, "normal")
+        self.assertEqual(registry.status(handle).state, SnapshotState.OPEN)
 
     def test_single_waler_thread_start_failure_returns_to_non_running(self):
         lease = _Lease()
@@ -360,6 +395,8 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         guard.try_acquire.return_value = lease
         optimizer = Mock()
         optimizer.build_cache_key.return_value = ("cache-key",)
+        registry = SolverOperationRegistry()
+        handle = registry.register_snapshot(SolverKind.SINGLE_WALER)
         dialog = WalerSolverDialog.__new__(WalerSolverDialog)
         dialog.short_ratio_var = _Var("20")
         dialog.mid_ratio_var = _Var("50")
@@ -379,6 +416,10 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         dialog.run_button = _Button()
         dialog.dialog = _Dialog()
         dialog._calculation_running = False
+        dialog._snapshot_stale = False
+        dialog.operation_registry = registry
+        dialog.snapshot_handle = handle
+        dialog.adoption_guard = Mock()
 
         with (
             patch(
@@ -396,11 +437,14 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         self.assertTrue(lease.released)
         self.assertFalse(dialog._calculation_running)
         self.assertEqual(dialog.run_button.state, "normal")
+        self.assertEqual(registry.status(handle).state, SnapshotState.OPEN)
 
     def test_global_waler_thread_start_failure_returns_to_non_running(self):
         lease = _Lease()
         guard = Mock()
         guard.try_acquire.return_value = lease
+        registry = SolverOperationRegistry()
+        handle = registry.register_snapshot(SolverKind.GLOBAL_WALER)
         dialog = WalerGlobalSolverDialog.__new__(WalerGlobalSolverDialog)
         dialog._targets = Mock(return_value=object())
         dialog.waler_solver_guard = guard
@@ -412,6 +456,10 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         dialog.waler_inputs = ()
         dialog.dialog = _Dialog()
         dialog._calculation_running = False
+        dialog._snapshot_stale = False
+        dialog.operation_registry = registry
+        dialog.snapshot_handle = handle
+        dialog.adoption_guard = Mock()
 
         with (
             patch(
@@ -429,6 +477,7 @@ class SolverDialogClosePolicyTests(unittest.TestCase):
         self.assertTrue(lease.released)
         self.assertFalse(dialog._calculation_running)
         self.assertEqual(dialog.run_button.state, "normal")
+        self.assertEqual(registry.status(handle).state, SnapshotState.OPEN)
 
     def test_single_waler_memory_path_never_enters_running(self):
         optimizer = Mock()

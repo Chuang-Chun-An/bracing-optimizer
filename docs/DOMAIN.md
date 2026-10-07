@@ -54,7 +54,7 @@ Project 以 Waler、Strut 與 Brace 表達正式工程幾何；材料與庫存�
 
 Waler 是沿工程邊界配置的構件，以軸線、識別碼及材料規格表示，也是 Strut／Brace 的正式連接對象。RC Waler 仍完整保留幾何與連接關係，並提供 Support Solver 判定 RC／Steel 接觸面；但 RC 不是鋼圍令材料分段與接頭配置的計算對象。
 
-對參與 Waler 材料配置的 non-RC Waler，接頭必須避開由 Strut 或 Brace 連接位置形成的 forbidden point，且每一段材料必須符合對應材料規格的可購買料長。Waler 不使用 adjustment block 或 Shim；鋼材總長必須落在 `required_length - 200 mm` 到 `required_length` 的閉區間，等於兩個邊界都合法。低於下界是鋼材總長不足，高於 required length 是鋼材總長太長。`not RC` 只是最佳化排除判斷，不取代既有材料規格與資料合法性驗證。
+對參與 Waler 材料配置的 non-RC Waler，接頭必須避開由 Strut 或 Brace 連接位置形成的 forbidden point，且每一段材料必須符合對應材料規格的可購買料長。所有 Steel segments 之後可使用零或一塊 `100／150／200／300 mm` 尾端調整塊，再保留 `0～150 mm` Gap；完成長度必須等於 required length。調整塊不形成 joint，也不參與 Steel allocation、材料分類、ratio 或 scoring。`not RC` 只是最佳化排除判斷，不取代既有材料規格與資料合法性驗證。
 
 ### 3.3 Strut（支撐）
 
@@ -81,6 +81,13 @@ Brace endpoint、`FromWaler`／`ToWaler` 與 forbidden point；`competing` relat
 接觸面或使其 ambiguous。只有在沒有可靠 `unique` evidence 時，才以 `competing` evidence
 判側；同側可完成正式接觸面，兩側衝突則維持 contact-face ambiguous。member verdict 只決定
 Brace 能否成為正式構件，不反向撤銷 Waler 已消費的側向 evidence。
+
+Waler 背填或寬度調整使接觸線平移時，正式 Brace 採 Engineering Hard Constraint：
+兩端必須使用同一個 WCS 平移向量，並分別落在兩端最終 Waler 的有限線段上，因此
+Brace 的向量、長度與角度保持不變，兩端 longitudinal station 可以同時改變。非平行
+Waler 由兩端約束聯立唯一解；平行且相容時採 minimum-norm 平移；平行不相容、有限
+線段外、identity 無效或 baseline drift 均阻止整次 Waler adjustment，不得以旋轉、伸縮、
+clamp 或 nearest snap 取代。
 
 Brace 與 Corner Brace 不應混為同一概念：Brace 是 Project 中的正式構件；DXF 中的 Corner Brace 幾何主要用來推導與 Strut 端部相關的工程限制。
 
@@ -148,7 +155,7 @@ Strut 兩端各 `1600 mm` 內不得配置 Support material joint。`1600 mm` 是
 - 合法範圍為 `0～150 mm`，屬 Engineering Hard Constraint。
 - `80 mm` 是 Solver Preference；合法方案中越接近 `80 mm` 越受偏好。
 
-Support gap 與 Waler 鋼材總長短差是不同概念；Waler 的最大 `200 mm` 短差不適用於 Support。
+Support gap 與 Waler 尾端 Gap 是不同概念；兩者目前雖同為 `0～150 mm`，Support 另有 `80 mm` preference，而 Waler 尾端 Gap 不進 scoring。
 
 ### 4.5 Jack、Jack center 與 Jack region
 
@@ -305,15 +312,19 @@ Waler segment 是相鄰 joint 或端部之間的一段材料。正式材料長�
 
 僅落在數值範圍內，並不代表該長度對所有材料規格都合法。
 
-### 5.4 Waler 鋼材總長容許範圍
+### 5.4 Waler 尾端調整塊與 Gap
 
-Waler 不使用 adjustment block 或 Shim。合法方案的鋼材總長採下列閉區間：
+Waler 的完成長度必須滿足：
 
 ```text
-required length - 200 mm <= steel length <= required length
+steel length + tail adjustment + gap = required length
+tail adjustment ∈ {0, 100, 150, 200, 300} mm
+0 <= gap <= 150 mm
 ```
 
-短差恰為 `200 mm` 與零短差都合法。鋼材總長低於下界時為「總長不足」，高於 required length 時為「總長太長」。這項 Waler 容許範圍不等於 Support gap；Support gap 的合法範圍仍是 `0～150 mm`，且其偏好值為 `80 mm`。
+令短差為 `required length - steel length`。短差在 `0～150 mm` 時能不用調整塊就不用，`tail adjustment = 0` 且 Gap 等於短差；短差大於 `150 mm` 時，選擇能讓 Gap 合法的最小非零調整塊。因此最大可完成短差為 `450 mm`，短差超過 `450 mm`、不存在合法組合或 Steel 超過 required length 時均不合法。
+
+非零調整塊固定在全部 Steel segments 之後、Gap 之前，不得放在 Steel 中間，不形成 Waler joint，也不參與 purchasable-length validation、Steel inventory allocation、Short／Mid／Long／Out 分類、ratio 或 scoring。結果 payload 為相容既有 consumer，仍以 `tail_adjustment` 及尾端 `("shim", length)` 表示；它不是 Support Shim placement。
 
 ---
 
@@ -339,9 +350,10 @@ Material Spec 識別構件使用的材料規格。它決定該 Usage 下可取�
 
 - `Steel Piece`：構成 Support 或 Waler 主要長度的標準鋼材。
 - `Jack`：Support 中可調整長度並形成 Jack center 的構件。
-- `Shim`：依端部 Waler 類型配置的固定尺寸調整材料。
+- `Shim`：Support 中依端部 Waler 類型配置的固定尺寸調整材料。
+- `Waler tail adjustment`：圍令 Steel 尾端的單一固定尺寸調整塊；payload 為相容既有 consumer 使用 `shim` piece kind，但不套用 Support Shim placement。
 
-Shim 與 Jack 只屬於 Support piece sequence；Waler 方案只有 Steel pieces。既有結果中的 Waler `tail_adjustment`／`shim` 是相容載入資料，不代表目前合法材料規則。
+Jack 只屬於 Support piece sequence。Support Shim 與 Waler tail adjustment 是不同工程概念，不得共用 placement、joint 或 scoring 規則。
 
 ### 6.4 Short / Mid / Long / Out
 
@@ -410,7 +422,8 @@ Solver input 會再把 Project 資訊整理成特定求解問題，例如 Strut 
 | Support gap | 支撐餘量 | 合法 `0～150 mm`，偏好接近 `80 mm` | Core Domain / Solver Preference |
 | Jack center | 千斤頂中心 | Jack 在 Strut 軸線上的中心位置 | Core Domain |
 | Forbidden point | 禁止點 | Waler joint 必須避開的連接位置 | Core Domain |
-| Waler steel shortfall | 圍令鋼材短差 | `required length - steel length`，合法 `0～200 mm`（含邊界） | Core Domain |
+| Waler steel shortfall | 圍令鋼材短差 | `required length - steel length`；`0～450 mm` 可由單一合法尾端調整塊與 `0～150 mm` Gap 完成 | Core Domain |
+| Waler tail adjustment | 圍令尾端調整塊 | `0／100／150／200／300 mm`；非零時固定在全部 Steel 之後且不形成 joint | Core Domain |
 | Material Spec | 材料規格 | 決定可購買料長及庫存查詢範圍 | Project/Application Model |
 | Purchasable Length | 可購買料長 | 合法可取得的標準料長集合 | Core Domain |
 | Inventory Qty | 庫存數量 | 目前現有數量；不足時仍可採購 | Project/Application Model |
@@ -439,7 +452,7 @@ Solver input 會再把 Project 資訊整理成特定求解問題，例如 Strut 
 | Body-derived Brace width `> 250.0 mm` | Engineering Hard Constraint | 先由 outer supporting sides 可靠量寬再做嚴格比較；`= 250.0 mm` 不合格，centerline-only unknown 不套用 |
 | Waler joint clearance `≥ 300 mm` | Engineering Hard Constraint | `< 300 mm` 不合法，`= 300 mm` 可接受 |
 | Waler segment `1000～10000 mm` 且屬可購買集合 | Engineering Hard Constraint | 數值範圍與對應 Purchasable Length 都必須符合 |
-| Waler 鋼材總長閉區間 | Engineering Hard Constraint | `required_length - 200 mm <= steel_length <= required_length`；Waler 不使用 adjustment block 或 Shim |
+| Waler 尾端完成長度 | Engineering Hard Constraint | `steel + tail adjustment + Gap = required`；Gap 為 `0～150 mm`，短差 `0～150 mm` 不用調整塊，較大短差使用最小合法調整塊，超過 `450 mm` 無解 |
 | RC / Steel Shim placement | Engineering Hard Constraint | 每個 layout 最多一塊非零 Shim；位置依兩端 Waler 類型決定，缺失／未知類型視為 Steel |
 | 庫存不足仍可採購 | Engineering Policy | Inventory Qty 不直接限制材料合法性 |
 | 優先庫存、減少採購 | Solver Preference | 在合法方案間影響選擇 |

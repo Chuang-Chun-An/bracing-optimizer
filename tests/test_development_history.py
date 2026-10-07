@@ -155,7 +155,12 @@ class DevelopmentHistoryTests(unittest.TestCase):
         )
 
         self.assertLess(history.index(MANAGED_START), history.index("2026/05/19"))
-        self.assertIn("2026/09/28【Git】", history)
+        self.assertEqual(history.count("【Git｜v1.0.0】"), 9)
+        self.assertEqual(history.count("【Git｜v2.0.0】"), 3)
+        self.assertNotIn("【Git】", history)
+        self.assertIn("2026/09/28【Git｜v2.0.0】", history)
+        self.assertIn("2026/10/06", history)
+        self.assertIn("Global Waler 可保留跨 stage 的完整合法候選池", history)
         self.assertIn("916 次 AI 對話回合", history)
         self.assertIn("118 次", history)
 

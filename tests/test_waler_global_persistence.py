@@ -40,7 +40,7 @@ def candidate(waler_id, rank, segments, score):
 class GlobalResult:
     def __init__(self):
         candidates = (
-            candidate("W1", 2, [5_000, 7_000], 12),
+            candidate("W1", 6, [5_000, 7_000], 12),
             candidate("W2", 1, [9_000, 5_000], 10),
         )
         self.solution = WalerGlobalSolution(
@@ -56,7 +56,7 @@ class GlobalResult:
             ratio_deviation=0.6,
             total_local_regret=2,
             changed_waler_count=1,
-            objective_tuple=(0, 0, 0.6, 2, 1, (2, 1)),
+            objective_tuple=(0, 0, 0.6, 2, 1, (6, 1)),
             valid=True,
         )
         self.diagnostics = WalerGlobalDiagnostics(
@@ -251,7 +251,7 @@ class WalerGlobalPersistenceTests(unittest.TestCase):
                 json.loads(json.dumps(original["global_search_diagnostics"])),
             )
 
-        diagnostics = reopened.result_items["W1-方案2"]["result"][
+        diagnostics = reopened.result_items["W1-方案6"]["result"][
             "global_search_diagnostics"
         ]
         self.assertEqual(diagnostics["algorithm_version"], "waler_global_dp_v1")

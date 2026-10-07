@@ -41,6 +41,338 @@ PROBLEM_SEVERITY_RANK = {
     "info": 1,
 }
 
+# Description source is an explicit code contract.  Runtime projection never
+# guesses whether an arbitrary message is already suitable for users.
+PRESERVE_MESSAGE_CODES = frozenset(
+    {
+        "AMBIGUOUS_CENTERLINE",
+        "AMBIGUOUS_INNER_LINE",
+        "BEAM_CROSSING_SNAPPED",
+        "BEAM_NOT_ASSOCIATED",
+        "BEAM_OVERLAPS_STRUT",
+        "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+        "BIM_BLOCK_WALER_FINALIZE_FAILED",
+        "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+        "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+        "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+        "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+        "BIM_JOIST_PAIR_AMBIGUOUS",
+        "BIM_JOIST_PAIR_SPACING_INVALID",
+        "BIM_JOIST_PAIR_UNPAIRED",
+        "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+        "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+        "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+        "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+        "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+        "BRACE_AXIS_EXTENDED_TO_WALER",
+        "BRACE_BODY_WIDTH_TOO_SMALL",
+        "BRACE_NOT_CONNECTED",
+        "BRACE_ONE_END_NOT_CONNECTED",
+        "BRACE_SAME_WALER_CONNECTION",
+        "CAD_MANUAL_LINE_SELECTION",
+        "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+        "CANDIDATE_LINE_DIRECTION_CHANGED",
+        "CANDIDATE_LINE_TOO_SHORT",
+        "CANDIDATE_POINT_INVALID",
+        "CANDIDATE_POINT_MISSING",
+        "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+        "COLUMN_ASSOCIATION_REQUIRES_REVIEW",
+        "COLUMN_NOT_ASSOCIATED",
+        "COMPONENT_TOO_SHORT",
+        "CORNER_BRACE_CONNECTION_INVALID",
+        "CORNER_BRACE_CONNECTION_POINT_FAILED",
+        "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
+        "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
+        "CORNER_BRACE_INTERSECTION_FAILED",
+        "DUPLICATED_COMPONENT",
+        "DUPLICATE_ENGINEERING_COMPONENT",
+        "MANUAL_POINT_SELECTION",
+        "MULTIPLE_MODELS_FROM_ONE_SOURCE",
+        "POSSIBLE_COMPONENT_SHORT_SIDE",
+        "STRUT_NOT_CONNECTED",
+        "STRUT_ONE_END_NOT_CONNECTED",
+        "STRUT_WALER_INTERSECTION_FAILED",
+        "TEXT_SKIPPED",
+        "WALER_CANDIDATE_LINE_UNUSUAL",
+        "WALER_CONTACT_ADJUSTED",
+        "WALER_CONTACT_BASELINE_CHANGED",
+        "WALER_CONTACT_FACE_AMBIGUOUS",
+        "WALER_ENVELOPE_AMBIGUOUS",
+        "WALER_ENVELOPE_UNRESOLVED",
+        "WALER_SUPPORT_SIDE_UNKNOWN",
+        "ZERO_LENGTH_CANDIDATE_LINE",
+        "ZERO_LENGTH_COMPONENT",
+        "WALER_ENGINEERING_LINE_FAILED",
+        "STRUT_CENTERLINE_FAILED",
+        "BRACE_CENTERLINE_FAILED",
+        "CORNER_BRACE_CENTERLINE_FAILED",
+        "COLUMN_CENTERLINE_FAILED",
+        "BEAM_CENTERLINE_FAILED",
+    }
+)
+
+FORMATTER_DESCRIPTION_CODES = frozenset(
+    {
+        "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+        "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "AMBIGUOUS_WALER_CONNECTION",
+        "BIM_JOIST_DETAIL_IGNORED",
+        "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+        "CORNER_BRACE_BODY_UNRESOLVED",
+        "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
+        "CORNER_BRACE_RELATIONSHIP_UNRESOLVED",
+        "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+        "HATCH_WALER_BOUNDARY_INVALID",
+        "HATCH_WALER_ENGINEERING_LINE_FAILED",
+        "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+        "WALER_COMPETING_SIDE_EVIDENCE_IGNORED",
+        "WALER_CONTACT_FACE_UNRESOLVED",
+        "WALER_CONTACT_FINALIZE_FAILED",
+        "WALER_OVERLAP_COMPETITION",
+        "WALER_SOURCE_OVERLAP",
+        "WALER_RECOGNITION_FAILED",
+        "STRUT_RECOGNITION_FAILED",
+        "BRACE_RECOGNITION_FAILED",
+        "CORNER_BRACE_RECOGNITION_FAILED",
+        "COLUMN_RECOGNITION_FAILED",
+        "BEAM_RECOGNITION_FAILED",
+    }
+)
+
+FALLBACK_DESCRIPTION_CODES = frozenset(
+    {
+        "BIM_JOIST_RECOGNITION_FAILED",
+        "BRACE_TERMINAL_VERDICT_MISSING",
+    }
+)
+
+DXF_REVIEW_DIAGNOSTIC_CODES = frozenset(
+    PRESERVE_MESSAGE_CODES
+    | FORMATTER_DESCRIPTION_CODES
+    | FALLBACK_DESCRIPTION_CODES
+)
+
+
+def assert_problem_code_catalog_complete(producer_codes: Sequence[str]) -> None:
+    """Fail when a producer code has no explicit description-source class."""
+
+    producer_set = {str(code) for code in producer_codes}
+    categories = (
+        PRESERVE_MESSAGE_CODES,
+        FORMATTER_DESCRIPTION_CODES,
+        FALLBACK_DESCRIPTION_CODES,
+    )
+    overlaps = (
+        (categories[0] & categories[1])
+        | (categories[0] & categories[2])
+        | (categories[1] & categories[2])
+    )
+    unclassified = producer_set - DXF_REVIEW_DIAGNOSTIC_CODES
+    stale = DXF_REVIEW_DIAGNOSTIC_CODES - producer_set
+    missing_display_types = (
+        producer_set
+        - FALLBACK_DESCRIPTION_CODES
+        - set(_PROBLEM_DISPLAY_TYPE_BY_CODE)
+    )
+    missing_formatters = FORMATTER_DESCRIPTION_CODES - set(
+        _PROBLEM_DESCRIPTION_FORMATTERS
+    )
+    problems = []
+    if overlaps:
+        problems.append(f"重複分類：{', '.join(sorted(overlaps))}")
+    if unclassified:
+        problems.append(f"未分類：{', '.join(sorted(unclassified))}")
+    if stale:
+        problems.append(f"不在 producer inventory：{', '.join(sorted(stale))}")
+    if missing_display_types:
+        problems.append(
+            "缺少中文類型：" + ", ".join(sorted(missing_display_types))
+        )
+    if missing_formatters:
+        problems.append(
+            "缺少專用 formatter：" + ", ".join(sorted(missing_formatters))
+        )
+    if problems:
+        raise ValueError("；".join(problems))
+
+
+_ROLE_LABELS = {
+    "waler": "圍令",
+    "strut": "支撐",
+    "brace": "斜撐",
+    "corner_brace": "角撐",
+    "column": "中間柱",
+    "beam": "托梁",
+    "unknown": "構件",
+}
+
+_SEVERITY_LABELS = {
+    "critical": "重大錯誤",
+    "error": "錯誤",
+    "warning": "警告",
+    "info": "提示",
+}
+
+_PROBLEM_DISPLAY_TYPE_BY_CODE = {
+    **dict.fromkeys(
+        {
+            "WALER_RECOGNITION_FAILED",
+            "STRUT_RECOGNITION_FAILED",
+            "BRACE_RECOGNITION_FAILED",
+            "CORNER_BRACE_RECOGNITION_FAILED",
+            "COLUMN_RECOGNITION_FAILED",
+            "BEAM_RECOGNITION_FAILED",
+        },
+        "構件辨識失敗",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_ENGINEERING_LINE_FAILED",
+            "STRUT_CENTERLINE_FAILED",
+            "BRACE_CENTERLINE_FAILED",
+            "CORNER_BRACE_CENTERLINE_FAILED",
+            "COLUMN_CENTERLINE_FAILED",
+            "BEAM_CENTERLINE_FAILED",
+            "AMBIGUOUS_CENTERLINE",
+            "AMBIGUOUS_INNER_LINE",
+        },
+        "工程線無法確認",
+    ),
+    **dict.fromkeys(
+        {
+            "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+            "HATCH_WALER_BOUNDARY_INVALID",
+            "HATCH_WALER_ENGINEERING_LINE_FAILED",
+            "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+        },
+        "填充圍令邊界問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+            "BIM_BLOCK_WALER_FINALIZE_FAILED",
+            "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+            "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+            "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+        },
+        "BIM 圖塊辨識問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+            "BIM_JOIST_PAIR_AMBIGUOUS",
+            "BIM_JOIST_PAIR_SPACING_INVALID",
+            "BIM_JOIST_PAIR_UNPAIRED",
+            "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+            "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+            "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+            "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+            "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+            "BIM_JOIST_DETAIL_IGNORED",
+        },
+        "托梁辨識問題",
+    ),
+    **dict.fromkeys(
+        {
+            "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+            "AMBIGUOUS_WALER_CONNECTION",
+            "BRACE_AXIS_EXTENDED_TO_WALER",
+            "BRACE_NOT_CONNECTED",
+            "BRACE_ONE_END_NOT_CONNECTED",
+            "BRACE_SAME_WALER_CONNECTION",
+            "STRUT_NOT_CONNECTED",
+            "STRUT_ONE_END_NOT_CONNECTED",
+        },
+        "端點連接問題",
+    ),
+    **dict.fromkeys(
+        {
+            "AMBIGUOUS_COMPONENT_ASSOCIATION",
+            "BEAM_CROSSING_SNAPPED",
+            "BEAM_NOT_ASSOCIATED",
+            "BEAM_OVERLAPS_STRUT",
+            "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+            "COLUMN_NOT_ASSOCIATED",
+        },
+        "構件關聯問題",
+    ),
+    "COLUMN_ASSOCIATION_REQUIRES_REVIEW": "中間柱關聯需確認",
+    **dict.fromkeys(
+        {"CAD_MANUAL_LINE_SELECTION", "MANUAL_POINT_SELECTION"},
+        "人工指定結果",
+    ),
+    **dict.fromkeys(
+        {
+            "COMPONENT_TOO_SHORT",
+            "MULTIPLE_MODELS_FROM_ONE_SOURCE",
+            "POSSIBLE_COMPONENT_SHORT_SIDE",
+            "TEXT_SKIPPED",
+            "ZERO_LENGTH_COMPONENT",
+        },
+        "來源幾何問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BRACE_BODY_WIDTH_TOO_SMALL",
+            "CORNER_BRACE_BODY_UNRESOLVED",
+            "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
+            "CORNER_BRACE_RELATIONSHIP_UNRESOLVED",
+            "CORNER_BRACE_CONNECTION_INVALID",
+            "CORNER_BRACE_CONNECTION_POINT_FAILED",
+            "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
+            "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
+            "CORNER_BRACE_INTERSECTION_FAILED",
+        },
+        "角撐辨識問題",
+    ),
+    **dict.fromkeys(
+        {"DUPLICATED_COMPONENT", "DUPLICATE_ENGINEERING_COMPONENT"},
+        "重複構件",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_ENVELOPE_AMBIGUOUS",
+            "WALER_ENVELOPE_UNRESOLVED",
+        },
+        "圍令外框問題",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_COMPETING_SIDE_EVIDENCE_IGNORED",
+            "WALER_CONTACT_FACE_AMBIGUOUS",
+            "WALER_CONTACT_FACE_UNRESOLVED",
+            "WALER_CONTACT_FINALIZE_FAILED",
+        },
+        "圍令接觸位置問題",
+    ),
+    **dict.fromkeys(
+        {"WALER_OVERLAP_COMPETITION", "WALER_SOURCE_OVERLAP"},
+        "圍令來源重疊",
+    ),
+    **dict.fromkeys(
+        {
+            "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+            "CANDIDATE_LINE_DIRECTION_CHANGED",
+            "CANDIDATE_LINE_TOO_SHORT",
+            "CANDIDATE_POINT_INVALID",
+            "CANDIDATE_POINT_MISSING",
+            "WALER_CANDIDATE_LINE_UNUSUAL",
+            "ZERO_LENGTH_CANDIDATE_LINE",
+        },
+        "候選工程線問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+            "STRUT_WALER_INTERSECTION_FAILED",
+            "WALER_CONTACT_ADJUSTED",
+            "WALER_CONTACT_BASELINE_CHANGED",
+            "WALER_SUPPORT_SIDE_UNKNOWN",
+        },
+        "圍令接觸調整問題",
+    ),
+}
+
 _RECOGNITION_CODES = {
     "HATCH_WALER_AMBIGUOUS_BOUNDARY",
     "HATCH_WALER_BOUNDARY_INVALID",
@@ -292,6 +624,209 @@ def _format_problem_description(
     return rendered
 
 
+def _message_location(message: object) -> str:
+    """Return only structured identifiers that are safe for user display."""
+
+    member_ids = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in getattr(message, "member_ids", ())
+            if str(value).strip()
+        )
+    )
+    source_handles = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in getattr(message, "source_handles", ())
+            if str(value).strip()
+        )
+    )
+    parts = []
+    if member_ids:
+        parts.append(f"構件 {'／'.join(member_ids)}")
+    if source_handles:
+        parts.append(f"來源 {'／'.join(source_handles)}")
+    return f"（{'；'.join(parts)}）" if parts else ""
+
+
+def _with_location(text: str, message: object) -> str:
+    location = _message_location(message)
+    if not location:
+        return text
+    if text.endswith("。"):
+        return f"{text[:-1]}{location}。"
+    return f"{text}{location}"
+
+
+def _role_label(role: object) -> str:
+    value = str(role or "unknown").strip().lower()
+    return _ROLE_LABELS.get(value, "構件")
+
+
+def _fallback_display_type(message: object) -> str:
+    role = _role_label(getattr(message, "role", ""))
+    severity = _SEVERITY_LABELS.get(
+        str(getattr(message, "severity", "")).strip().lower(),
+        "問題",
+    )
+    return f"{role}檢核{severity}"
+
+
+def _problem_display_type(message: object) -> str:
+    code = str(getattr(message, "code", ""))
+    if code in FALLBACK_DESCRIPTION_CODES or code not in DXF_REVIEW_DIAGNOSTIC_CODES:
+        return _fallback_display_type(message)
+    configured = _PROBLEM_DISPLAY_TYPE_BY_CODE.get(code)
+    if configured == "構件辨識失敗":
+        return f"{_role_label(getattr(message, 'role', ''))}辨識失敗"
+    return configured or _fallback_display_type(message)
+
+
+def _format_recognition_failure(message: object) -> str:
+    return _with_location(
+        f"來源幾何無法可靠辨識為正式{_role_label(getattr(message, 'role', ''))}。",
+        message,
+    )
+
+
+def _format_overlap_measurements(message: object) -> str:
+    """Preserve the two stable engineering measurements for this code only."""
+
+    original = str(getattr(message, "message", ""))
+    length_match = re.search(
+        r"有限重疊長度\s*([-+]?\d+(?:\.\d+)?)\s*mm",
+        original,
+    )
+    ratio_match = re.search(
+        r"占較短\s+provisional\s+axis\s*([-+]?\d+(?:\.\d+)?)%",
+        original,
+        flags=re.IGNORECASE,
+    )
+    measurements = []
+    if length_match:
+        measurements.append(f"重疊長度 {length_match.group(1)} mm")
+    if ratio_match:
+        measurements.append(f"占較短圍令 {ratio_match.group(1)}%")
+    suffix = f"；{'，'.join(measurements)}" if measurements else ""
+    return _with_location(f"兩個圍令來源有重大共線重疊{suffix}。", message)
+
+
+def _format_corner_body_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    count_match = re.search(r"body_hypothesis_count=(\d+)", original)
+    count_text = f"找到 {count_match.group(1)} 組可能結果，" if count_match else ""
+    return _with_location(f"角撐本體{count_text}無法唯一辨識。", message)
+
+
+def _format_corner_rail_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    widths_match = re.search(r"evaluated_widths_mm=\[([^\]]+)\]", original)
+    widths = widths_match.group(1).strip() if widths_match else ""
+    measurement = (
+        f"已檢查寬度：{widths} mm。"
+        if widths and widths.casefold() != "none"
+        else ""
+    )
+    return _with_location(
+        "角撐本體已辨識，但圍令與支撐關係無法唯一確認。" + measurement,
+        message,
+    )
+
+
+def _format_corner_relationship_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    assessed = re.search(r"assessment_count=(\d+)", original)
+    valid = re.search(r"hard_valid_count=(\d+)", original)
+    count_text = ""
+    if assessed and valid:
+        count_text = (
+            f"共檢查 {assessed.group(1)} 組關係，其中 "
+            f"{valid.group(1)} 組符合條件。"
+        )
+    return _with_location(
+        "角撐本體已辨識，但沒有唯一的圍令與支撐關係。" + count_text,
+        message,
+    )
+
+
+def _static_formatter(text: str):
+    def formatter(message: object) -> str:
+        return _with_location(text, message)
+
+    return formatter
+
+
+_PROBLEM_DESCRIPTION_FORMATTERS = {
+    "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION": _static_formatter(
+        "斜撐端點沿軸線延伸後同時符合多支圍令，無法唯一確認正式連接。"
+    ),
+    "AMBIGUOUS_COMPONENT_ASSOCIATION": _static_formatter(
+        "構件同時符合多個支撐關聯，需重新確認應採用的正式關聯。"
+    ),
+    "AMBIGUOUS_WALER_CONNECTION": _static_formatter(
+        "構件端點同時符合多支圍令，無法唯一確認正式連接。"
+    ),
+    "BIM_JOIST_DETAIL_IGNORED": _static_formatter(
+        "托梁來源未形成完整可辨識結構，已保留為圖面細節，未建立正式托梁。"
+    ),
+    "BRACE_RIGID_TRANSLATION_UNRESOLVED": _static_formatter(
+        "斜撐調整後無法確認兩端正式圍令或原始調整基準，未套用新的斜撐位置。"
+    ),
+    "CORNER_BRACE_BODY_UNRESOLVED": _format_corner_body_unresolved,
+    "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED": _format_corner_rail_unresolved,
+    "CORNER_BRACE_RELATIONSHIP_UNRESOLVED": _format_corner_relationship_unresolved,
+    "HATCH_WALER_AMBIGUOUS_BOUNDARY": _static_formatter(
+        "填充圍令有多個可能外框，無法唯一確認圍令邊界。"
+    ),
+    "HATCH_WALER_BOUNDARY_INVALID": _static_formatter(
+        "填充圍令的邊界不完整，無法建立圍令工程線。"
+    ),
+    "HATCH_WALER_ENGINEERING_LINE_FAILED": _static_formatter(
+        "填充圍令的外框無法建立唯一的圍令工程線。"
+    ),
+    "HATCH_WALER_UNSUPPORTED_BOUNDARY": _static_formatter(
+        "填充圍令含目前無法處理的邊界幾何，無法建立圍令工程線。"
+    ),
+    "WALER_COMPETING_SIDE_EVIDENCE_IGNORED": _static_formatter(
+        "圍令已有一致的可靠側向證據；方向相反的其他證據僅保留供追溯，不影響正式接觸面。"
+    ),
+    "WALER_CONTACT_FACE_UNRESOLVED": _static_formatter(
+        "圍令的接觸側仍無法確認，尚未確認正式接觸面。"
+    ),
+    "WALER_CONTACT_FINALIZE_FAILED": _static_formatter(
+        "圍令接觸位置無法確認，相關構件未建立正式連接。"
+    ),
+    "WALER_OVERLAP_COMPETITION": _static_formatter(
+        "重大重疊的圍令來源同時影響同一構件端點或接觸位置，目前無法完成辨識。"
+    ),
+    "WALER_SOURCE_OVERLAP": _format_overlap_measurements,
+    "WALER_RECOGNITION_FAILED": _format_recognition_failure,
+    "STRUT_RECOGNITION_FAILED": _format_recognition_failure,
+    "BRACE_RECOGNITION_FAILED": _format_recognition_failure,
+    "CORNER_BRACE_RECOGNITION_FAILED": _format_recognition_failure,
+    "COLUMN_RECOGNITION_FAILED": _format_recognition_failure,
+    "BEAM_RECOGNITION_FAILED": _format_recognition_failure,
+}
+
+
+def _fallback_problem_description(message: object) -> str:
+    role = _role_label(getattr(message, "role", ""))
+    return _with_location(
+        f"系統無法完成這項{role}檢核，請檢查相關構件與來源圖元。",
+        message,
+    )
+
+
+def _project_problem_description(message: object) -> str:
+    code = str(getattr(message, "code", ""))
+    if code in PRESERVE_MESSAGE_CODES:
+        return str(getattr(message, "message", ""))
+    formatter = _PROBLEM_DESCRIPTION_FORMATTERS.get(code)
+    if formatter is not None:
+        return formatter(message)
+    return _fallback_problem_description(message)
+
+
 def problem_severity_rank(severity: str) -> int:
     """Return the review priority without changing import-blocking policy."""
 
@@ -381,13 +916,14 @@ def build_problem_records(result: DXFImportResult) -> tuple[ProblemRecord, ...]:
                 message.code,
                 component or "—",
                 _format_problem_description(
-                    message.message,
+                    _project_problem_description(message),
                     message,
                     owners_by_handle,
                 ),
                 message.role,
                 handles,
                 member_ids,
+                _problem_display_type(message),
             )
         )
     # Python's sort is stable, so messages at the same severity retain the
@@ -566,7 +1102,8 @@ def _guidance_for_problem(record: ProblemRecord, item: ReviewItem) -> str:
     if code in _WALER_OVERLAP_CODES:
         return (
             "請定位問題列出的圍令來源與受影響端點，並依外部工程判斷檢查 DXF。"
-            "若 active sources 有變更，系統會重新辨識；本提示不推薦刪除、排除或保留任一來源。"
+            "若參與辨識的來源有變更，系統會重新辨識；"
+            "本提示不推薦刪除、排除或保留任一來源。"
         )
     if "COORDINATE" in code:
         return "請開啟「座標 ✓」檢查座標系統。"

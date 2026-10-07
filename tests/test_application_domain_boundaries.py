@@ -28,6 +28,19 @@ def imports_any(module_name: str, forbidden: set[str]) -> bool:
 
 
 class ApplicationDomainBoundaryTests(unittest.TestCase):
+    def test_manual_waler_editing_and_evaluator_do_not_own_global_profile(self):
+        manual_source = (
+            PROJECT_ROOT / "bracing_optimizer/application/plan_editing.py"
+        ).read_text(encoding="utf-8")
+        evaluator_source = (
+            PROJECT_ROOT / "bracing_optimizer/algorithms/wales.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("GLOBAL_FINAL_POPULATION", manual_source)
+        self.assertNotIn("retention_profile", manual_source)
+        self.assertNotIn("GLOBAL_FINAL_POPULATION", evaluator_source)
+        self.assertNotIn("WalerCandidateRetentionProfile", evaluator_source)
+
     def test_main_does_not_import_solver_algorithms(self):
         self.assertFalse(
             imports_any("main.py", {"bracing_optimizer.algorithms"})
@@ -111,6 +124,7 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
         }
 
         for module_name in (
+            "bracing_optimizer/algorithms/cancellation.py",
             "bracing_optimizer/algorithms/solver_search.py",
             "bracing_optimizer/algorithms/support.py",
             "bracing_optimizer/algorithms/wales.py",
@@ -121,6 +135,19 @@ class ApplicationDomainBoundaryTests(unittest.TestCase):
                     imports_any(module_name, forbidden),
                     f"{module_name} must not depend on an outer layer",
                 )
+
+    def test_solver_operation_registry_does_not_import_gui_or_infrastructure(self):
+        self.assertFalse(
+            imports_any(
+                "bracing_optimizer/application/solver_operation_registry.py",
+                {
+                    "bracing_optimizer.infrastructure",
+                    "bracing_optimizer.presentation",
+                    "main",
+                    "tkinter",
+                },
+            )
+        )
 
     def test_support_algorithm_consumes_contract_without_project_geometry(self):
         self.assertFalse(

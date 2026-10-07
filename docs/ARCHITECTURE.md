@@ -122,6 +122,8 @@ Application 位於 `bracing_optimizer/application/`，負責：
 - 將可編輯 Project rows 轉成 Domain model。
 - 建立 Solver input 並協調 Solver 搜尋流程。
 - 管理 Solver result lifecycle。
+- 為 Project load、result adoption、Material Spec 與 CAD mutation 建立包含
+  model、metadata、cache、DXF state 與 dirty state 的 typed transaction outcome。
 - 執行人工 Support／Waler 方案修改。
 - 建立與 hydrate Project payload。
 - 協調 persistence、DXF apply 與 DXF relink。
@@ -302,6 +304,7 @@ flowchart TD
 | Paused serialized DXF resume state | Main／Application session（live session 已關閉） | 狀態與繼續 Review 操作的 UI projection |
 | Durable DXF Review state | Project payload／persistence boundary | 載入後交給 Application session；恢復 live session 時交給 Workflow |
 | Solver runtime cache | Main application session | Solver Dialog 可詢問是否載入相同條件結果 |
+| Solver snapshot／execution lifecycle | Application `SolverOperationRegistry` | Dialog 只保存 opaque handle、目前 execution 與 button／close projection |
 
 DXF Dialog 透過 immutable `DXFReviewSnapshot` 取得 Workflow projection。Workflow command 成功後，Dialog 重新取得 snapshot 並刷新畫面，不直接修改正式 Review fields。
 
@@ -310,6 +313,13 @@ Live Review session 存在時，authoritative state 始終屬於 `DXFReviewWorkf
 Project load 時，`ProjectService` 先建立完整 `HydratedProject`，Main 再一次採用 Project input、result、DXF state 與 workflow status。
 
 Material Spec definition 編輯時，`MaterialSpecEditing` 以完整 deep copy 建立短期 staged `ProjectDataModel`，包含不進入 Project JSON 的 runtime-only attributes；它不透過 persistence projection 重建 model。成功 outcome 同時提供 staged `ProjectResultModel` 與 cache／refresh effects，Main 只進行一次採用及 UI projection。staged models 在採用前不是第二份 authoritative truth，失敗或取消後即丟棄。
+
+Main 採用 transaction outcome 時，commit boundary 只替換 plain runtime
+references 與 scalar metadata；property setter、Tk variable、callback、collection
+mutation、filesystem 與 UI refresh 都不在 commit 內。UI projection 失敗不回復已
+commit 的正式 state，而是由 Presentation 的 `projection_stale` guard 鎖住後續
+mutation，直到使用者執行「重新整理全部畫面」且五張輸入表、Results Tree、材料
+摘要、Preview、Project／DXF／CAD status、selection 與 action state 全部成功重建。
 
 ## 7. Major Data Flows
 
@@ -347,6 +357,8 @@ flowchart LR
 
 Support Solver 以 Zoning 為 use-case boundary。Single Waler Solver 針對一根 Waler 建立前幾名候選。Global Waler Solver 先取得各 Waler 的 local candidates，再以 exact global selection 選出全場組合。Solver Dialog 負責背景執行與顯示，不應自行實作搜尋流程。
 
+Main 在 Solver input snapshot 建立後立即向 Application `SolverOperationRegistry` 登記；Dialog 啟動 worker 時再建立 execution identity 與 read-only cancellation token。有效且非 no-op 的 CAD add／update 在正式 Project mutation 前使所有 open／running handles stale，並只對 running execution 發出合作式取消。Dialog completion 必須同時通過 registry disposition 與 Main 既有 mutation guard，才可採用 result、diagnostics、calculated time、Support candidate cache 或 Single Waler memory。registry 是 runtime-only lifecycle truth，不複製 `ProjectDataModel` 或 `ProjectResultModel`。
+
 ### 7.3 Persistence
 
 ```mermaid
@@ -364,7 +376,7 @@ flowchart LR
     Hydrated --> Main[SupportInputApp adopts state]
 ```
 
-Save 時，`ProjectService` 建立正式 payload；Persistence 驗證 schema 與 Domain rows，並以 staged files 保存 JSON 與 managed DXF。驗證成功後才替換正式檔案，失敗時保留或回復原有檔案。
+Save 時，`ProjectService` 建立正式 payload；Persistence 驗證 schema 與 Domain rows，並以 staged files 保存 JSON 與 managed DXF。驗證成功後才替換正式檔案。Project JSON 維持 `.tmp`、atomic replace 與 `.bak`；managed DXF rollback 成功後清除 `.rollback`，rollback 失敗則保留該 recovery artifact 並回報絕對路徑。下一次 save 若發現既有 `.rollback`，會在建立 temp 或替換檔案前拒絕。
 
 Load 時，Persistence 驗證 JSON 並檢查 managed DXF；`ProjectService` 建立 `ProjectDataModel`、`ProjectResultModel` 與 DXF lifecycle state，最後由 Main 採用並刷新 UI。
 
@@ -373,7 +385,7 @@ Load 時，Persistence 驗證 JSON 並檢查 managed DXF；`ProjectService` 建�
 | Accepted debt | 接受原因 | 重新評估時機 |
 | --- | --- | --- |
 | Solver Presentation 仍有少數 Algorithms dependency | 目前主要用於預設值、diagnostics、cache metadata 與顯示，不取代 Solver use case | Solver UI 開始自行判斷合法性、重算工程分數，或 Solver 規則頻繁造成 UI 漂移 |
-| CAD event transaction 仍在 Main | Mapper 已封裝幾何映射，現有 transaction 有整合測試；再拆會影響 ACK、binding 與 UI rollback | 增加更多 CAD update 類型，或 Main 對 CAD application rules 的理解持續增加 |
+| CAD event transaction 仍在 Main | Mapper 已封裝幾何映射，現有 typed transaction、ACK unresolved guard 與投影恢復有整合測試；再拆會同時影響 ACK、binding、monitor 與 save guard | 增加更多 CAD update 類型，或 Main 對 CAD application rules 的理解持續增加 |
 | Application／Infrastructure 未完全 Dependency Inversion | 目前只有一套 project persistence 與 export implementation，額外 port 的收益有限 | 需要替換 persistence backend、headless service 或第二種 adapter |
 | `DXFImporter.convert()` 同時主持 reader 與 recognition pipeline | 兩者共享 DXF document、tolerance 與 source provenance，現有責任仍具 cohesive 性 | 需要多種 reader、串流辨識或獨立 recognition service |
 | `DXFImportResult.to_project_rows()` 知道 Project row contract | 它是明確的 DXF → Project boundary，且 metadata isolation 有測試 | Project schema 大幅變更、出現第二種 consumer，或 conversion 開始依賴 Main |

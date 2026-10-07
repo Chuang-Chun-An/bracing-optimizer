@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from bracing_optimizer.algorithms.cancellation import CancellationToken
+
 
 SEARCH_INSUFFICIENT = "SEARCH_INSUFFICIENT"
 CANDIDATE_INSUFFICIENT = "CANDIDATE_INSUFFICIENT"
@@ -113,6 +115,8 @@ class SolverDiagnostics:
     policy_id: str = DEFAULT_SEARCH_POLICY.policy_id
     policy_version: int = DEFAULT_SEARCH_POLICY.policy_version
     stage_records: List[Dict[str, Any]] = field(default_factory=list)
+    retention_profile: str = ""
+    candidate_count_after_cross_stage_solution_merge: int = 0
     # Support-only optional runtime/persisted diagnostics.  Older payloads do
     # not contain these fields, and non-Support solvers leave them as None.
     validation_issues: Optional[List[Dict[str, Any]]] = None
@@ -313,18 +317,27 @@ def support_solution_signature(solution: Any, precision: int = 6) -> Tuple[Any, 
 def merge_waler_results(
     results: Iterable[Dict[str, Any]],
     *,
-    limit: int = 5,
+    limit: int | None = 5,
     precision: int = 6,
+    cancellation_token: CancellationToken | None = None,
 ) -> List[Dict[str, Any]]:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     values = list(results)
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     if any(bool(item.get("valid")) for item in values):
         values = [item for item in values if bool(item.get("valid"))]
     unique: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
     for item in values:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         signature = waler_solution_signature(item, precision)
         current = unique.get(signature)
         if current is None or float(item.get("score", float("inf"))) < float(current.get("score", float("inf"))):
             unique[signature] = item
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     ordered = sorted(
         unique.values(),
         key=lambda item: (
@@ -332,6 +345,8 @@ def merge_waler_results(
             waler_solution_signature(item, precision),
         ),
     )
+    if limit is None:
+        return ordered
     return ordered[: max(0, int(limit))]
 
 

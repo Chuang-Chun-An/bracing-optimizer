@@ -24,6 +24,7 @@ from .geometry import (
     _midpoint,
     _ordered_line,
     _projection_overlap_ratio,
+    _supporting_line_separation,
     _projection_range,
     _project_onto_segment,
     _segment_distance,
@@ -401,7 +402,12 @@ def _canonical_pair(first: Segment, second: Segment) -> tuple[Segment, Segment, 
             key=lambda line: _dot(_midpoint(*line), normal),
         )
     )
-    return ordered_faces[0], ordered_faces[1], provisional_axis, _line_separation(first, second)
+    return (
+        ordered_faces[0],
+        ordered_faces[1],
+        provisional_axis,
+        _supporting_line_separation(first, second),
+    )
 
 
 def _make_hypotheses(
@@ -428,7 +434,7 @@ def _make_hypotheses(
                 < tolerances.minimum_projection_overlap_ratio
             ):
                 continue
-            separation = _line_separation(first, second)
+            separation = _supporting_line_separation(first, second)
             if not (
                 tolerances.collinear_tolerance_mm < separation
                 <= tolerances.maximum_component_width_mm
@@ -664,7 +670,10 @@ def _recognized_component_envelope(
     normal = -axis[1], axis[0]
     rails.sort(key=lambda line: (_dot(_midpoint(*line), normal), line))
     lower, upper = rails[0], rails[-1]
-    if _line_separation(lower, upper) > tolerances.maximum_component_width_mm:
+    if (
+        _supporting_line_separation(lower, upper)
+        > tolerances.maximum_component_width_mm
+    ):
         return None
     return _qualified_exterior_fact(
         source_handles,

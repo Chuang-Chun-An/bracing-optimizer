@@ -1,5 +1,6 @@
 import json
 import math
+import argparse
 from pathlib import Path
 from collections import Counter
 
@@ -7,7 +8,19 @@ from bracing_optimizer.algorithms import support
 
 support.set_logger(lambda msg: None)
 targets = support.normalize_material_ratio_targets(38, 40, 22)
-project = sorted(Path("project_cases").glob("*.json"), key=lambda p: p.name)[1]
+
+parser = argparse.ArgumentParser(
+    description="比較指定 Project JSON 的 H1 支撐 Solver 與人工配置。",
+)
+parser.add_argument(
+    "project",
+    type=Path,
+    help="使用者自行提供的 Project JSON 路徑；repository 不附測試 Project。",
+)
+arguments = parser.parse_args()
+project = arguments.project.expanduser().resolve()
+if not project.is_file():
+    parser.error(f"找不到 Project JSON：{project}")
 
 
 def parse_positions(value):

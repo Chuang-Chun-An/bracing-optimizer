@@ -5,6 +5,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+import dxf_import.corner_brace_repair as corner_brace_repair_module
 from dxf_import.corner_brace_repair import (
     CornerBraceLocalTemplate,
     PRIMARY_REFERENCE,
@@ -29,13 +30,19 @@ from dxf_import.models import (
     DXFImportResult,
     ExcludedSource,
     GeometryTolerances,
+    ProblemRecord,
     ReviewItem,
     SourceGeometry,
     Strut,
     ValidationMessage,
     Waler,
 )
-from dxf_import.review_confirmation import confirm_review_item
+from dxf_import.review_confirmation import (
+    confirm_review_item,
+    review_confirmation_identity,
+    review_confirmation_signature,
+    review_item_is_confirmed,
+)
 from dxf_import.review_workflow import DXFReviewWorkflow
 from dxf_import.review_recovery import RecoveryCategory, RecoverySummary
 from dxf_import.review_recovery_planner import ReviewRecoveryPlanner
@@ -195,6 +202,34 @@ def _items(result: DXFImportResult, target: ReviewItem) -> tuple[ReviewItem, ...
     return formal
 
 
+def _replay_truth_projection(result, report):
+    """Stable complete projection used by replay differential tests."""
+
+    records = build_problem_records(result)
+    items = build_review_items(result, records)
+    return {
+        "members": tuple(
+            (collection, tuple(asdict(value) for value in getattr(result, collection)))
+            for collection in (
+                "walers",
+                "struts",
+                "braces",
+                "columns",
+                "beams",
+                "corner_braces",
+            )
+        ),
+        "connections": tuple(asdict(value) for value in result.corner_brace_connections),
+        "messages": tuple(asdict(value) for value in result.messages),
+        "problems": tuple(asdict(value) for value in records),
+        "review_items": tuple(asdict(value) for value in items),
+        "report": asdict(report),
+        "blocking": sum(
+            value.severity in {"error", "critical"} for value in result.messages
+        ),
+    }
+
+
 def _fb7_cb58_result() -> tuple[DXFImportResult, ReviewItem]:
     """Portable WCS characterization of the Y05 FB7 / CB58 relationship."""
 
@@ -287,6 +322,326 @@ def _fb7_cb58_result() -> tuple[DXFImportResult, ReviewItem]:
 
 
 class CornerBraceRepairPlanningTests(unittest.TestCase):
+    def test_subject_base_geometry_uses_engineering_line_without_relationship_ids(self):
+        result, recognized = _result()
+        recognized_key = repair_subject_key(result, recognized)
+        recognized_member = next(
+            value for value in result.corner_braces if value.id == recognized.member_id
+        )
+        expected_recognized = corner_brace_repair_module._line_key(
+            corner_brace_repair_module._world_line(recognized_member),
+            GeometryTolerances(),
+        )
+        renamed_relationships = replace(
+            result,
+            walers=tuple(replace(value, id=f"RENAMED-{value.id}") for value in result.walers),
+            struts=tuple(replace(value, id=f"RENAMED-{value.id}") for value in result.struts),
+        )
+
+        self.assertEqual(recognized_key.base_geometry_key, expected_recognized)
+        self.assertEqual(
+            repair_subject_key(renamed_relationships, recognized).base_geometry_key,
+            expected_recognized,
+        )
+        self.assertNotIn("W1", recognized_key.base_geometry_key)
+        self.assertNotIn("S1", recognized_key.base_geometry_key)
+
+        unresolved_result, unresolved = _result(target_kind="unresolved")
+        unresolved_key = repair_subject_key(unresolved_result, unresolved)
+        expected_unresolved = corner_brace_repair_module._canonical_json_hash(
+            {
+                "segments": [
+                    corner_brace_repair_module._line_key(
+                        ((100.0, 900.0), (900.0, 100.0)),
+                        GeometryTolerances(),
+                    )
+                ]
+            }
+        )
+        self.assertEqual(unresolved_key.base_geometry_key, expected_unresolved)
+
+    def test_candidate_local_validation_matches_full_field_cases(self):
+        result, target = _fb7_cb58_result()
+        tolerances = GeometryTolerances()
+        plan = plan_corner_brace_repair(
+            result,
+            target,
+            base_revision=0,
+            review_items=_items(result, target),
+            tolerances=tolerances,
+        )
+        self.assertTrue(plan.candidates)
+        candidate = plan.candidates[0]
+        duplicate = _corner(
+            "CB-DUP",
+            candidate.world_start,
+            candidate.world_end,
+            "DUP",
+        )
+        reverse_duplicate = replace(
+            duplicate,
+            id="CB-DUP-REVERSED",
+            start=candidate.world_end,
+            end=candidate.world_start,
+            world_start=candidate.world_end,
+            world_end=candidate.world_start,
+            local_start=candidate.world_end,
+            local_end=candidate.world_start,
+            source_handles=("DUP-REVERSED",),
+        )
+        tolerance_shift = tolerances.duplicate_tolerance_mm
+        tolerance_duplicate = _corner(
+            "CB-DUP-TOLERANCE",
+            (
+                candidate.world_start[0] + tolerance_shift,
+                candidate.world_start[1],
+            ),
+            (
+                candidate.world_end[0] + tolerance_shift,
+                candidate.world_end[1],
+            ),
+            "DUP-TOLERANCE",
+        )
+        ambiguous_strut = replace(
+            result.struts[0],
+            id="S21-AMBIGUOUS",
+            source_handles=("S21-AMBIGUOUS",),
+        )
+        cases = (
+            ("valid", result, candidate, True),
+            (
+                "no connection",
+                result,
+                replace(
+                    candidate,
+                    world_start=(100000.0, 100000.0),
+                    world_end=(101000.0, 101000.0),
+                ),
+                False,
+            ),
+            (
+                "target mismatch",
+                result,
+                replace(candidate, target_waler_id="W1"),
+                False,
+            ),
+            (
+                "ambiguous connection",
+                replace(result, struts=(*result.struts, ambiguous_strut)),
+                candidate,
+                False,
+            ),
+            (
+                "duplicate",
+                replace(result, corner_braces=(*result.corner_braces, duplicate)),
+                candidate,
+                False,
+            ),
+            (
+                "reverse duplicate",
+                replace(
+                    result,
+                    corner_braces=(*result.corner_braces, reverse_duplicate),
+                ),
+                candidate,
+                False,
+            ),
+            (
+                "duplicate tolerance boundary",
+                replace(
+                    result,
+                    corner_braces=(*result.corner_braces, tolerance_duplicate),
+                ),
+                candidate,
+                False,
+            ),
+        )
+        for label, case_result, case_candidate, expected in cases:
+            with self.subTest(label=label):
+                full = corner_brace_repair_module._candidate_passes_full_validation(
+                    case_result,
+                    target,
+                    case_candidate,
+                    tolerances,
+                )
+                local = corner_brace_repair_module._candidate_passes_local_validation(
+                    case_result,
+                    target,
+                    case_candidate,
+                    tolerances,
+                )
+                self.assertEqual(full, expected)
+                self.assertEqual(local, full)
+
+    def test_every_enumerated_candidate_has_local_full_validation_parity(self):
+        result, target = _fb7_cb58_result()
+        tolerances = GeometryTolerances()
+        checked = []
+
+        def differential(result_value, item, candidate, tolerance_value):
+            full = corner_brace_repair_module._candidate_passes_full_validation(
+                result_value,
+                item,
+                candidate,
+                tolerance_value,
+            )
+            local = corner_brace_repair_module._candidate_passes_local_validation(
+                result_value,
+                item,
+                candidate,
+                tolerance_value,
+            )
+            self.assertEqual(local, full)
+            checked.append(candidate.id)
+            return local
+
+        with patch.object(
+            corner_brace_repair_module,
+            "_candidate_passes_existing_validation",
+            side_effect=differential,
+        ):
+            plan = plan_corner_brace_repair(
+                result,
+                target,
+                base_revision=0,
+                review_items=_items(result, target),
+                tolerances=tolerances,
+            )
+
+        self.assertTrue(plan.candidates)
+        self.assertGreater(len(checked), len(plan.candidates))
+
+    def test_local_validation_preserves_complete_plan_and_scopes_work(self):
+        result, target = _fb7_cb58_result()
+        tolerances = GeometryTolerances()
+        with patch.object(
+            corner_brace_repair_module,
+            "_candidate_passes_existing_validation",
+            corner_brace_repair_module._candidate_passes_full_validation,
+        ):
+            full_plan = plan_corner_brace_repair(
+                result,
+                target,
+                base_revision=0,
+                review_items=_items(result, target),
+                tolerances=tolerances,
+            )
+
+        original_connections = (
+            corner_brace_repair_module.build_corner_brace_connections
+        )
+        connection_corner_counts = []
+
+        def counted_connections(result_value, tolerance_value):
+            connection_corner_counts.append(len(result_value.corner_braces))
+            return original_connections(result_value, tolerance_value)
+
+        with patch.object(
+            corner_brace_repair_module,
+            "build_corner_brace_connections",
+            side_effect=counted_connections,
+        ), patch.object(
+            corner_brace_repair_module,
+            "validate_duplicate_engineering_members",
+            wraps=corner_brace_repair_module.validate_duplicate_engineering_members,
+        ) as duplicate_validator:
+            local_plan = plan_corner_brace_repair(
+                result,
+                target,
+                base_revision=0,
+                review_items=_items(result, target),
+                tolerances=tolerances,
+            )
+
+        self.assertEqual(local_plan, full_plan)
+        self.assertTrue(connection_corner_counts)
+        self.assertEqual(set(connection_corner_counts), {1})
+        duplicate_validator.assert_not_called()
+
+    def test_target_evidence_index_preserves_complete_candidate_enumeration(self):
+        result, target = _fb7_cb58_result()
+        original_validate = corner_brace_repair_module._validate_target_evidence
+
+        def unindexed(line, evidence, tolerances, **_kwargs):
+            return original_validate(line, evidence, tolerances)
+
+        with patch.object(
+            corner_brace_repair_module,
+            "_validate_target_evidence",
+            side_effect=unindexed,
+        ):
+            unindexed_plan = plan_corner_brace_repair(
+                result,
+                target,
+                base_revision=0,
+                review_items=_items(result, target),
+            )
+        indexed_plan = plan_corner_brace_repair(
+            result,
+            target,
+            base_revision=0,
+            review_items=_items(result, target),
+        )
+
+        self.assertEqual(indexed_plan, unindexed_plan)
+        self.assertTrue(indexed_plan.candidates)
+
+    def test_planning_context_memoizes_only_within_one_call(self):
+        result, target = _fb7_cb58_result()
+        original_frame = corner_brace_repair_module._relationship_frame
+        frame_keys = []
+
+        def counted_frame(waler, strut, endpoint_name, tolerances):
+            frame_keys.append(
+                (
+                    waler.id,
+                    waler.world_start or waler.start,
+                    waler.world_end or waler.end,
+                    strut.id,
+                    strut.world_start or strut.start,
+                    strut.world_end or strut.end,
+                    endpoint_name,
+                    tolerances.endpoint_tolerance_mm,
+                )
+            )
+            return original_frame(waler, strut, endpoint_name, tolerances)
+
+        with patch.object(
+            corner_brace_repair_module,
+            "_relationship_frame",
+            side_effect=counted_frame,
+        ):
+            first = plan_corner_brace_repair(
+                result,
+                target,
+                base_revision=0,
+                review_items=_items(result, target),
+            )
+            first_call_count = len(frame_keys)
+            first_keys = tuple(frame_keys)
+            changed_result = replace(
+                result,
+                corner_braces=(
+                    *result.corner_braces,
+                    _corner("CB-NEW", (5000.0, 1000.0), (4000.0, 0.0), "NEW"),
+                ),
+            )
+            second = plan_corner_brace_repair(
+                changed_result,
+                target,
+                base_revision=1,
+                review_items=_items(changed_result, target),
+            )
+
+        self.assertTrue(first.candidates)
+        self.assertTrue(second.candidates)
+        self.assertEqual(first_call_count, len(set(first_keys)))
+        self.assertGreater(len(frame_keys), first_call_count)
+        self.assertEqual(
+            frame_keys[first_call_count:first_call_count * 2],
+            list(first_keys),
+        )
+
     def test_fb7_cb58_fixture_preserves_measured_local_template(self):
         result, target = _fb7_cb58_result()
         primary, _secondary = eligible_repair_references(
@@ -1151,6 +1506,87 @@ class CornerBraceRepairPlanningTests(unittest.TestCase):
 
 
 class CornerBraceRepairReferenceTests(unittest.TestCase):
+    def test_stable_reference_resolver_ignores_display_id_and_preserves_order(self):
+        result, target = _result()
+        primary, _secondary = eligible_repair_references(
+            result,
+            _items(result, target),
+            {},
+            excluded_member_id=target.member_id or "",
+        )
+        first = primary[0]
+        second_key = replace(
+            first.reference.subject_key,
+            source_handles=("P2",),
+            base_geometry_key="SECOND-GEOMETRY",
+        )
+        second = replace(
+            first,
+            reference=CornerBraceRepairReference(
+                second_key,
+                "CB11",
+                PRIMARY_REFERENCE,
+            ),
+        )
+        saved = (
+            replace(second.reference, member_id="OLD-SECOND"),
+            replace(first.reference, member_id="OLD-FIRST"),
+        )
+
+        resolved = corner_brace_repair_module._resolve_saved_references(
+            saved,
+            (first, second),
+            expected_class=PRIMARY_REFERENCE,
+        )
+
+        self.assertIsNotNone(resolved)
+        assert resolved is not None
+        self.assertEqual(
+            tuple(value.reference.member_id for value in resolved),
+            ("CB11", "CB10"),
+        )
+        self.assertNotEqual(saved[1], first.reference)
+        self.assertEqual(asdict(saved[1])["member_id"], "OLD-FIRST")
+
+    def test_stable_reference_resolver_rejects_missing_ambiguous_and_invalid_groups(self):
+        result, target = _result()
+        primary, _secondary = eligible_repair_references(
+            result,
+            _items(result, target),
+            {},
+            excluded_member_id=target.member_id or "",
+        )
+        current = primary[0]
+        saved = replace(current.reference, member_id="OLD-CB")
+        duplicate_current = replace(
+            current,
+            reference=replace(current.reference, member_id="CB99"),
+        )
+        wrong_class = replace(saved, reference_class=SECONDARY_REFERENCE)
+        missing = replace(
+            saved,
+            subject_key=replace(
+                saved.subject_key,
+                source_handles=("MISSING",),
+            ),
+        )
+
+        cases = (
+            ((missing,), (current,), PRIMARY_REFERENCE),
+            ((saved,), (current, duplicate_current), PRIMARY_REFERENCE),
+            ((saved, saved), (current,), PRIMARY_REFERENCE),
+            ((wrong_class,), (current,), PRIMARY_REFERENCE),
+        )
+        for saved_group, current_group, expected_class in cases:
+            with self.subTest(saved=saved_group, current=current_group):
+                self.assertIsNone(
+                    corner_brace_repair_module._resolve_saved_references(
+                        saved_group,
+                        current_group,
+                        expected_class=expected_class,
+                    )
+                )
+
     def test_confirmed_repaired_reference_is_secondary_never_primary(self):
         result, target = _result()
         plan = plan_corner_brace_repair(
@@ -1308,6 +1744,252 @@ class CornerBraceRepairReferenceTests(unittest.TestCase):
         self.assertEqual(secondary, ())
 
 
+class CornerBraceConfirmationIdentityTests(unittest.TestCase):
+    def _repaired(self):
+        result, target = _result()
+        plan = plan_corner_brace_repair(
+            result,
+            target,
+            base_revision=0,
+            review_items=_items(result, target),
+        )
+        repaired, _ = apply_corner_brace_repair(
+            result,
+            target,
+            plan,
+            plan.candidates[0].id,
+            explicit_adoption=True,
+        )
+        items = build_review_items(repaired, build_problem_records(repaired))
+        item = next(value for value in items if value.member_id == "CB71")
+        member = next(value for value in repaired.corner_braces if value.id == "CB71")
+        return repaired, item, member
+
+    def test_corner_brace_signature_ignores_only_display_metadata(self):
+        result, item, member = self._repaired()
+        original_signature = review_confirmation_signature(result, item)
+        confirmations = confirm_review_item(result, item)
+        assert member.repair_provenance is not None
+        provenance = member.repair_provenance
+
+        def rename_reference(reference):
+            return (
+                replace(reference, member_id=f"RENAMED-{reference.member_id}")
+                if reference is not None
+                else None
+            )
+
+        renamed_provenance = replace(
+            provenance,
+            automatic_primary_references=tuple(
+                rename_reference(value)
+                for value in provenance.automatic_primary_references
+            ),
+            manual_secondary_references=tuple(
+                rename_reference(value)
+                for value in provenance.manual_secondary_references
+            ),
+            selected_template_reference=rename_reference(
+                provenance.selected_template_reference
+            ),
+            preferred_display_id="CB99",
+            evidence_signature="DISPLAY-ONLY-AUDIT-DIGEST",
+        )
+        renamed_member = replace(
+            member,
+            id="CB99",
+            candidate_points=tuple(
+                replace(value, component_id="CB99")
+                if value.component_id == member.id
+                else value
+                for value in member.candidate_points
+            ),
+            repair_provenance=renamed_provenance,
+        )
+        renamed_result = replace(
+            result,
+            corner_braces=tuple(
+                renamed_member if value.id == member.id else value
+                for value in result.corner_braces
+            ),
+        )
+        renamed_item = replace(item, member_id="CB99", display_id="CB99")
+
+        self.assertEqual(
+            review_confirmation_signature(renamed_result, renamed_item),
+            original_signature,
+        )
+        self.assertTrue(
+            review_item_is_confirmed(
+                renamed_result,
+                renamed_item,
+                confirmations,
+            )
+        )
+        changed_geometry = replace(
+            renamed_result,
+            corner_braces=tuple(
+                replace(value, start=(value.start[0] + 1.0, value.start[1]))
+                if value.id == "CB99"
+                else value
+                for value in renamed_result.corner_braces
+            ),
+        )
+        self.assertNotEqual(
+            review_confirmation_signature(changed_geometry, renamed_item),
+            original_signature,
+        )
+
+    def test_confirmation_key_isolates_sources_and_other_roles_keep_existing_signature(self):
+        result, item, member = self._repaired()
+        confirmations = confirm_review_item(result, item)
+        other_member = replace(member, source_handles=("OTHER",))
+        other_result = replace(
+            result,
+            corner_braces=tuple(
+                other_member if value.id == member.id else value
+                for value in result.corner_braces
+            ),
+        )
+        other_item = replace(item, source_handles=("OTHER",))
+        self.assertNotEqual(
+            review_confirmation_identity(other_item),
+            review_confirmation_identity(item),
+        )
+        self.assertFalse(
+            review_item_is_confirmed(other_result, other_item, confirmations)
+        )
+
+        waler_item = next(
+            value
+            for value in build_review_items(result, build_problem_records(result))
+            if value.role == "waler" and value.member_id == "W1"
+        )
+        waler_signature = review_confirmation_signature(result, waler_item)
+        renamed_waler = replace(
+            next(value for value in result.walers if value.id == "W1"),
+            id="W9",
+        )
+        renamed_result = replace(
+            result,
+            walers=tuple(
+                renamed_waler if value.id == "W1" else value
+                for value in result.walers
+            ),
+        )
+        self.assertNotEqual(
+            review_confirmation_signature(
+                renamed_result,
+                replace(waler_item, member_id="W9", display_id="W9"),
+            ),
+            waler_signature,
+        )
+
+    def test_corner_brace_signature_keeps_each_engineering_truth_category(self):
+        result, item, member = self._repaired()
+        original_signature = review_confirmation_signature(result, item)
+        assert member.repair_provenance is not None
+        provenance = member.repair_provenance
+        self.assertTrue(provenance.automatic_primary_references)
+
+        def signature_for(changed_member, changed_item=item):
+            changed_result = replace(
+                result,
+                corner_braces=tuple(
+                    changed_member if value.id == member.id else value
+                    for value in result.corner_braces
+                ),
+            )
+            return review_confirmation_signature(changed_result, changed_item)
+
+        changed_subject = replace(
+            provenance.subject_key,
+            base_geometry_key=f"{provenance.subject_key.base_geometry_key}-CHANGED",
+        )
+        changed_reference = provenance.automatic_primary_references[0]
+        changed_reference = replace(
+            changed_reference,
+            subject_key=replace(
+                changed_reference.subject_key,
+                base_geometry_key=(
+                    f"{changed_reference.subject_key.base_geometry_key}-CHANGED"
+                ),
+            ),
+        )
+        provenance_mutations = {
+            "repair_subject": replace(provenance, subject_key=changed_subject),
+            "adopted_line": replace(
+                provenance,
+                adopted_world_start=(
+                    provenance.adopted_world_start[0] + 1.0,
+                    provenance.adopted_world_start[1],
+                ),
+            ),
+            "transfer_evidence": replace(
+                provenance,
+                reference_waler_offset_mm=(
+                    (provenance.reference_waler_offset_mm or 0.0) + 1.0
+                ),
+            ),
+            "stable_reference_identity": replace(
+                provenance,
+                automatic_primary_references=(
+                    changed_reference,
+                    *provenance.automatic_primary_references[1:],
+                ),
+            ),
+            "relationship": replace(
+                provenance,
+                target_strut_identity=f"{provenance.target_strut_identity}-CHANGED",
+            ),
+        }
+        for name, changed_provenance in provenance_mutations.items():
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    signature_for(
+                        replace(member, repair_provenance=changed_provenance)
+                    ),
+                    original_signature,
+                )
+
+        member_mutations = {
+            "source": replace(member, source_handles=("OTHER",)),
+            "geometry": replace(
+                member,
+                start=(member.start[0] + 1.0, member.start[1]),
+            ),
+            "warnings": replace(member, warnings=(*member.warnings, "CHANGED")),
+        }
+        for name, changed_member in member_mutations.items():
+            with self.subTest(name=name):
+                changed_item = (
+                    replace(item, source_handles=("OTHER",))
+                    if name == "source"
+                    else item
+                )
+                self.assertNotEqual(
+                    signature_for(changed_member, changed_item),
+                    original_signature,
+                )
+
+        changed_problem = ProblemRecord(
+            severity="warning",
+            code="CORNER_BRACE_SIGNATURE_CHANGED",
+            component=member.id,
+            description="Changed review problem",
+            role="corner_brace",
+            source_handles=member.source_handles,
+            member_ids=(member.id,),
+        )
+        self.assertNotEqual(
+            signature_for(
+                member,
+                replace(item, problems=(*item.problems, changed_problem)),
+            ),
+            original_signature,
+        )
+
+
 class CornerBraceRepairWorkflowTests(unittest.TestCase):
     class _Importer:
         tolerances = GeometryTolerances()
@@ -1452,6 +2134,129 @@ class CornerBraceRepairWorkflowTests(unittest.TestCase):
 
 
 class CornerBraceRepairPersistenceTests(unittest.TestCase):
+    def test_multi_repair_deferred_replay_preserves_complete_truth_projection(self):
+        base, _target = _result()
+        second_target = _corner(
+            "CB72",
+            (0.0, 4800.0),
+            (800.0, 4000.0),
+            "T2",
+        )
+        second_geometry = SourceGeometry(
+            role="corner_brace",
+            source_handle="T2",
+            points=((100.0, 4900.0), (900.0, 4100.0)),
+            closed=False,
+            source_layer="CORNER",
+            source_entity_type="LINE",
+        )
+        base = replace(
+            base,
+            struts=(*base.struts, _strut("S3", 4000.0)),
+            corner_braces=(*base.corner_braces, second_target),
+            source_geometry=(*base.source_geometry, second_geometry),
+        )
+        connections, messages = build_corner_brace_connections(base)
+        base = replace(base, corner_brace_connections=connections, messages=messages)
+
+        items = build_review_items(base, build_problem_records(base))
+        target2 = next(value for value in items if value.member_id == "CB72")
+        plan2 = plan_corner_brace_repair(
+            base,
+            target2,
+            base_revision=0,
+            review_items=items,
+        )
+        repaired2, _ = apply_corner_brace_repair(
+            base,
+            target2,
+            plan2,
+            plan2.candidates[0].id,
+            explicit_adoption=True,
+        )
+        items2 = build_review_items(repaired2, build_problem_records(repaired2))
+        repaired2_item = next(value for value in items2 if value.member_id == "CB72")
+        confirmations = confirm_review_item(repaired2, repaired2_item)
+        target1 = next(value for value in items2 if value.member_id == "CB71")
+        plan1 = plan_corner_brace_repair(
+            repaired2,
+            target1,
+            base_revision=1,
+            review_items=items2,
+            confirmations=confirmations,
+        )
+        dependent = next(
+            candidate for candidate in plan1.candidates
+            if candidate.secondary_references
+        )
+        repaired_both, _ = apply_corner_brace_repair(
+            repaired2,
+            target1,
+            plan1,
+            dependent.id,
+            explicit_adoption=True,
+        )
+        repair_overrides = tuple(
+            value
+            for value in capture_manual_overrides(repaired_both)
+            if value.corner_brace_repair is not None
+        )
+        producer = next(
+            value for value in repair_overrides
+            if value.source_handles == ("T2",)
+        )
+        consumer = next(
+            value for value in repair_overrides
+            if value.source_handles == ("T1",)
+        )
+        replay_base = replace(
+            base,
+            corner_braces=tuple(
+                replace(value, id="CB57") if value.id == "CB10" else value
+                for value in base.corner_braces
+            ),
+        )
+        connections, messages = build_corner_brace_connections(replay_base)
+        replay_base = replace(
+            replay_base,
+            corner_brace_connections=connections,
+            messages=messages,
+        )
+
+        with patch(
+            "dxf_import.corner_brace_repair.plan_corner_brace_repair",
+            wraps=plan_corner_brace_repair,
+        ) as planner:
+            deferred_result, deferred_report = replay_manual_overrides(
+                replay_base,
+                (consumer, producer),
+                review_confirmations=confirmations,
+            )
+        ordered_result, ordered_report = replay_manual_overrides(
+            replay_base,
+            (producer, consumer),
+            review_confirmations=confirmations,
+        )
+
+        self.assertEqual(planner.call_count, 3)
+        self.assertEqual(len(deferred_report.preserved), 2)
+        self.assertEqual(deferred_report.needs_review, ())
+        self.assertEqual(deferred_report.disabled, ())
+        producer_after = next(
+            value
+            for value in deferred_result.corner_braces
+            if value.source_handles == ("T2",)
+        )
+        assert producer_after.repair_provenance is not None
+        self.assertEqual(
+            producer_after.repair_provenance.selected_template_reference.member_id,
+            "CB57",
+        )
+        self.assertEqual(
+            _replay_truth_projection(deferred_result, deferred_report),
+            _replay_truth_projection(ordered_result, ordered_report),
+        )
+
     def test_relationship_selection_provenance_round_trips_without_template(self):
         result, target = _result()
         subject_key = repair_subject_key(result, target)
@@ -1569,7 +2374,15 @@ class CornerBraceRepairPersistenceTests(unittest.TestCase):
         replay_base = replace(
             result,
             struts=(*result.struts, _strut("S3", 2000.0)),
-            corner_braces=(*result.corner_braces, closer),
+            corner_braces=(
+                *(
+                    replace(value, id="CB57")
+                    if value.id == "CB10"
+                    else value
+                    for value in result.corner_braces
+                ),
+                closer,
+            ),
         )
         connections, messages = build_corner_brace_connections(replay_base)
         replay_base = replace(
@@ -1589,6 +2402,10 @@ class CornerBraceRepairPersistenceTests(unittest.TestCase):
         assert replayed_target.repair_provenance is not None
         self.assertIsNone(
             replayed_target.repair_provenance.selected_template_reference
+        )
+        self.assertEqual(
+            replayed_target.repair_provenance.automatic_primary_references[0].member_id,
+            "CB57",
         )
         self.assertTrue(
             any(value.endswith("CornerBrace repair") for value in report.preserved)
@@ -1615,6 +2432,138 @@ class CornerBraceRepairPersistenceTests(unittest.TestCase):
         self.assertEqual(replayed_target.start, (0.0, 1000.0))
         self.assertIsNotNone(replayed_target.repair_provenance)
         self.assertTrue(any(value.endswith("CornerBrace repair") for value in report.preserved))
+
+    def test_same_fingerprint_replay_remaps_primary_display_id_to_current_reference(self):
+        result, target = _result()
+        plan = plan_corner_brace_repair(
+            result,
+            target,
+            base_revision=0,
+            review_items=_items(result, target),
+        )
+        repaired, _ = apply_corner_brace_repair(
+            result,
+            target,
+            plan,
+            plan.candidates[0].id,
+            explicit_adoption=True,
+        )
+        overrides = capture_manual_overrides(repaired)
+        renamed = replace(
+            result,
+            corner_braces=tuple(
+                replace(value, id="CB57") if value.id == "CB10" else value
+                for value in result.corner_braces
+            ),
+        )
+        connections, messages = build_corner_brace_connections(renamed)
+        renamed = replace(
+            renamed,
+            corner_brace_connections=connections,
+            messages=messages,
+        )
+
+        replayed, report = replay_manual_overrides(renamed, overrides)
+
+        replayed_target = next(
+            value for value in replayed.corner_braces if value.id == "CB71"
+        )
+        self.assertIsNotNone(replayed_target.repair_provenance)
+        assert replayed_target.repair_provenance is not None
+        selected = replayed_target.repair_provenance.selected_template_reference
+        self.assertIsNotNone(selected)
+        assert selected is not None
+        self.assertEqual(selected.member_id, "CB57")
+        self.assertEqual(
+            tuple(
+                value.member_id
+                for value in replayed_target.repair_provenance.automatic_primary_references
+            ),
+            ("CB57",),
+        )
+        self.assertTrue(
+            any(value.endswith("CornerBrace repair") for value in report.preserved)
+        )
+
+    def test_replay_uses_target_source_identity_after_waler_and_strut_id_shift(self):
+        result, target = _result()
+        plan = plan_corner_brace_repair(
+            result,
+            target,
+            base_revision=0,
+            review_items=_items(result, target),
+        )
+        repaired, _ = apply_corner_brace_repair(
+            result,
+            target,
+            plan,
+            plan.candidates[0].id,
+            explicit_adoption=True,
+        )
+        overrides = capture_manual_overrides(repaired)
+        renamed = replace(
+            result,
+            walers=tuple(
+                replace(value, id="W9") if value.id == "W1" else value
+                for value in result.walers
+            ),
+            struts=tuple(
+                replace(
+                    value,
+                    id="S9" if value.id == "S1" else value.id,
+                    from_waler="W9" if value.from_waler == "W1" else value.from_waler,
+                    to_waler="W9" if value.to_waler == "W1" else value.to_waler,
+                )
+                for value in result.struts
+            ),
+        )
+        connections, messages = build_corner_brace_connections(renamed)
+        renamed = replace(
+            renamed,
+            corner_brace_connections=connections,
+            messages=messages,
+        )
+
+        replayed, report = replay_manual_overrides(renamed, overrides)
+
+        replayed_target = next(
+            value for value in replayed.corner_braces if value.id == "CB71"
+        )
+        self.assertIsNotNone(replayed_target.repair_provenance)
+        connection = next(
+            value
+            for value in replayed.corner_brace_connections
+            if value.corner_brace_id == "CB71"
+        )
+        self.assertEqual((connection.waler_id, connection.strut_id), ("W9", "S9"))
+        self.assertTrue(
+            any(value.endswith("CornerBrace repair") for value in report.preserved)
+        )
+
+        duplicate_target = replace(
+            renamed,
+            walers=(
+                *renamed.walers,
+                replace(
+                    next(value for value in renamed.walers if value.id == "W9"),
+                    id="W10",
+                ),
+            ),
+        )
+        rejected, rejected_report = replay_manual_overrides(
+            duplicate_target,
+            overrides,
+        )
+        rejected_target = next(
+            value for value in rejected.corner_braces if value.id == "CB71"
+        )
+        self.assertIsNone(rejected_target.repair_provenance)
+        self.assertTrue(
+            any(
+                value.endswith("CornerBrace repair")
+                for value in rejected_report.needs_review
+            )
+        )
 
     def test_same_fingerprint_replay_does_not_substitute_changed_primary(self):
         result, target = _result()

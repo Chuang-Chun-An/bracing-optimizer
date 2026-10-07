@@ -1,4 +1,5 @@
 import unittest
+from copy import deepcopy
 from unittest.mock import patch
 
 from bracing_optimizer.algorithms import wales
@@ -19,7 +20,7 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
             purchasable_lengths=list(
                 purchasable_lengths
                 if purchasable_lengths is not None
-                else [4_000, 5_800, 5_799, 6_000, 6_001, 8_000]
+                else [4_000, 5_500, 5_549, 5_550, 6_000, 6_001, 8_000]
             ),
         )
 
@@ -31,16 +32,100 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
             "qty": qty,
         }]
 
+    def test_config_distinguishes_omitted_from_explicit_empty_lengths(self):
+        omitted = wales.Config(
+            total_length=12_000,
+            support_points=[],
+            candidate_joint_points=[6_000],
+        )
+        explicit_empty = wales.Config(
+            total_length=12_000,
+            support_points=[],
+            candidate_joint_points=[6_000],
+            purchasable_lengths=[],
+        )
+
+        self.assertTrue(omitted.purchasable_lengths)
+        self.assertEqual(explicit_empty.purchasable_lengths, [])
+
+    def test_explicit_empty_lengths_stop_before_allocation_and_local_score(self):
+        config = wales.Config(
+            total_length=12_000,
+            support_points=[],
+            candidate_joint_points=[6_000],
+            purchasable_lengths=[],
+        )
+
+        with patch.object(wales, "allocate_stock_best_fit") as allocate:
+            result = wales.evaluate_waler_plan(
+                [6_000, 6_000],
+                [6_000],
+                config,
+                [],
+            )
+
+        allocate.assert_not_called()
+        self.assertFalse(result.valid)
+        self.assertEqual(
+            [issue.code for issue in result.issues],
+            [
+                wales.ISSUE_SEGMENT_NOT_PURCHASABLE,
+                wales.ISSUE_SEGMENT_NOT_PURCHASABLE,
+            ],
+        )
+        self.assertIsNone(result.assignments)
+        self.assertIsNone(result.local_score)
+
+    def test_explicit_empty_automatic_candidates_keep_invalid_fitness_and_order(self):
+        config = wales.Config(
+            total_length=12_000,
+            support_points=[],
+            candidate_joint_points=[4_000, 6_000],
+            purchasable_lengths=[],
+            top_n=2,
+        )
+        two_segments = wales.evaluate_individual([1, 0], config, [])
+        three_segments = wales.evaluate_individual([1, 1], config, [])
+
+        self.assertEqual(two_segments["score"], 1_100_000)
+        self.assertEqual(three_segments["score"], 1_150_000)
+        results = wales._top_results(
+            [three_segments, two_segments],
+            config,
+        )
+        self.assertEqual(
+            [item["segments"] for item in results],
+            [[4_000, 8_000], [4_000, 2_000, 6_000]],
+        )
+
     def test_total_length_closed_interval_boundaries(self):
         config = self.config()
         cases = (
-            ([6_000, 5_799], False, wales.ISSUE_STEEL_TOTAL_SHORT),
-            ([6_000, 5_800], True, None),
-            ([6_000, 6_000], True, None),
-            ([6_000, 6_001], False, wales.ISSUE_STEEL_TOTAL_LONG),
+            (
+                [6_000, 5_549],
+                False,
+                wales.ISSUE_STEEL_TOTAL_SHORT,
+                None,
+                None,
+            ),
+            ([6_000, 5_550], True, None, 300, 150),
+            ([6_000, 6_000], True, None, 0, 0),
+            (
+                [6_000, 6_001],
+                False,
+                wales.ISSUE_STEEL_TOTAL_LONG,
+                None,
+                None,
+            ),
         )
 
-        for segments, expected_valid, expected_total_issue in cases:
+        for (
+            segments,
+            expected_valid,
+            expected_total_issue,
+            expected_adjustment,
+            expected_gap,
+        ) in cases:
             with self.subTest(steel_length=sum(segments)):
                 result = wales.evaluate_waler_plan(
                     segments,
@@ -63,6 +148,8 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
                     total_codes,
                     [] if expected_total_issue is None else [expected_total_issue],
                 )
+                self.assertEqual(result.tail_adjustment, expected_adjustment)
+                self.assertEqual(result.gap, expected_gap)
                 if expected_valid:
                     self.assertIsNotNone(result.assignments)
                     self.assertIsNotNone(result.local_score)
@@ -79,10 +166,10 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
                     self.assertIsNone(result.local_score)
 
     def test_total_issue_facts_are_normalized(self):
-        config = self.config(purchasable_lengths=[5_799, 6_000])
+        config = self.config(purchasable_lengths=[5_549, 6_000])
 
         result = wales.evaluate_waler_plan(
-            [6_000, 5_799],
+            [6_000, 5_549],
             [6_000],
             config,
             [],
@@ -95,8 +182,11 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
             dict(issue.facts),
             {
                 "required_length": 12_000,
-                "minimum_steel_length": 11_800,
-                "actual_steel_length": 11_799,
+                "minimum_steel_length": 11_550,
+                "maximum_complete_shortfall": 450,
+                "legal_adjustments": (0, 100, 150, 200, 300),
+                "max_gap": 150,
+                "actual_steel_length": 11_549,
             },
         )
 
@@ -231,7 +321,8 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
     def test_repair_boolean_probe_matches_full_issue_collection(self):
         cases = (
             ([6_000], [6_000, 6_000], [], [6_000], False),
-            ([6_000], [6_000, 5_799], [], [5_799, 6_000], True),
+            ([6_000], [6_000, 5_549], [], [5_549, 6_000], True),
+            ([6_000], [6_000, 5_550], [], [5_550, 6_000], False),
             ([6_000], [6_000, 6_000], [6_200], [6_000], True),
             ([500], [500, 11_500], [], [500, 11_500], True),
             ([500], [500, 10_500], [700], [6_000], True),
@@ -399,7 +490,93 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
         self.assertEqual(automatic["joint_count"], core.joint_count)
         self.assertEqual(automatic["score"], core.local_score)
 
-    def test_waler_results_never_add_adjustment_or_shim(self):
+    def test_tail_completion_does_not_change_any_steel_score_component(self):
+        stock_items = self.stock(6_000, 1)
+        without_adjustment = wales.evaluate_waler_plan(
+            [6_000, 6_000],
+            [6_000],
+            self.config(required_length=12_000, purchasable_lengths=[6_000]),
+            stock_items,
+        )
+        with_adjustment = wales.evaluate_waler_plan(
+            [6_000, 6_000],
+            [6_000],
+            self.config(required_length=12_250, purchasable_lengths=[6_000]),
+            stock_items,
+        )
+
+        self.assertEqual(without_adjustment.tail_adjustment, 0)
+        self.assertEqual(with_adjustment.tail_adjustment, 100)
+        self.assertEqual(with_adjustment.gap, 150)
+        exact_fields = (
+            "assignments",
+            "total_waste",
+            "buy_count",
+            "distinct_groups",
+            "length_variation",
+            "under_4000_segment_count",
+            "segment_counts",
+            "segment_ratios",
+            "ratio_penalty",
+            "joint_count",
+            "local_score",
+        )
+        self.assertEqual(
+            {field: getattr(without_adjustment, field) for field in exact_fields},
+            {field: getattr(with_adjustment, field) for field in exact_fields},
+        )
+
+    def test_global_retention_only_extends_same_exact_evaluated_order(self):
+        candidate_points = list(range(2_000, 11_000, 1_000))
+        config = wales.Config(
+            total_length=12_000,
+            support_points=[],
+            candidate_joint_points=candidate_points,
+            purchasable_lengths=list(range(1_000, 10_001, 1_000)),
+            top_n=5,
+        )
+        evaluated = []
+        for selected_index in range(7):
+            genes = [0] * len(candidate_points)
+            genes[selected_index] = 1
+            evaluated.append(wales.evaluate_individual(genes, config, []))
+        original = deepcopy(evaluated)
+
+        single = wales._top_results(evaluated, config)
+        expanded = wales._top_results(
+            evaluated,
+            config,
+            retain_all_final_results=True,
+        )
+
+        self.assertEqual(evaluated, original)
+        self.assertEqual(len(single), 5)
+        self.assertEqual(len(expanded), 7)
+        self.assertEqual(single, expanded[:5])
+        exact_fields = (
+            "valid",
+            "assignments",
+            "total_waste",
+            "buy_count",
+            "distinct_groups",
+            "length_variation",
+            "under_4000_segment_count",
+            "segment_ratios",
+            "ratio_penalty",
+            "joint_count",
+            "score",
+        )
+        originals_by_segments = {
+            tuple(item["segments"]): item for item in original
+        }
+        for retained in expanded:
+            source = originals_by_segments[tuple(retained["segments"])]
+            self.assertEqual(
+                {field: retained[field] for field in exact_fields},
+                {field: source[field] for field in exact_fields},
+            )
+
+    def test_waler_results_add_smallest_adjustment_as_one_tail_shim(self):
         config = wales.Config(
             total_length=12_200,
             support_points=[],
@@ -416,14 +593,47 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
         results = wales._top_results([evaluated], config)
 
         self.assertTrue(results[0]["valid"])
-        self.assertEqual(results[0]["tail_adjustment"], 0)
-        self.assertEqual(results[0]["gap"], 200)
+        self.assertEqual(results[0]["tail_adjustment"], 100)
+        self.assertEqual(results[0]["gap"], 100)
         self.assertEqual(
             results[0]["pieces"],
+            [("steel", 6_000), ("steel", 6_000), ("shim", 100)],
+        )
+        self.assertEqual(
+            results[0]["steel_length"]
+            + results[0]["tail_adjustment"]
+            + results[0]["gap"],
+            results[0]["required_length"],
+        )
+        self.assertEqual(
+            [piece for piece in results[0]["pieces"] if piece[0] == "shim"],
+            [("shim", 100)],
+        )
+
+    def test_waler_result_without_adjustment_has_no_shim_piece(self):
+        config = wales.Config(
+            total_length=12_100,
+            support_points=[],
+            candidate_joint_points=[6_000],
+            purchasable_lengths=[6_000],
+            top_n=1,
+        )
+        evaluated = wales.evaluate_individual(
+            [1],
+            config,
+            self.stock(6_000, 2),
+        )
+
+        result = wales._top_results([evaluated], config)[0]
+
+        self.assertEqual(result["tail_adjustment"], 0)
+        self.assertEqual(result["gap"], 100)
+        self.assertEqual(
+            result["pieces"],
             [("steel", 6_000), ("steel", 6_000)],
         )
 
-    def test_adjustment_only_shortfall_is_invalid_without_search_changes(self):
+    def test_adjustment_completes_previous_shortfall_without_search_changes(self):
         config = wales.Config(
             total_length=12_201,
             support_points=[],
@@ -438,14 +648,10 @@ class WalerPlanEvaluatorTests(unittest.TestCase):
         )
 
         self.assertEqual(config.steel_target_length, 12_000)
-        self.assertEqual(config.tail_adjustment, 0)
-        self.assertEqual(config.tail_gap, 201)
-        self.assertFalse(result["valid"])
-        self.assertEqual(result["score"], 1050000)
-        self.assertEqual(
-            result["errors"],
-            ["鋼材總長 12000 小於允許下限 12001"],
-        )
+        self.assertEqual(config.tail_adjustment, 100)
+        self.assertEqual(config.tail_gap, 101)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["errors"], [])
 
 
 if __name__ == "__main__":

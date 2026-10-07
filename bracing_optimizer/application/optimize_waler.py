@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from enum import Enum
 from typing import Callable
 
 from bracing_optimizer.algorithms import solver_search, wales
+from bracing_optimizer.algorithms.cancellation import CancellationToken
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
@@ -36,6 +38,17 @@ class OptimizeWalerResult:
 
 ProgressCallback = Callable[[WalerOptimizationProgress], None]
 LogCallback = Callable[..., None]
+
+
+class WalerCandidateRetentionProfile(str, Enum):
+    """Control result retention without changing the staged-search budget."""
+
+    SINGLE_TOP_5 = "SINGLE_TOP_5"
+    GLOBAL_FINAL_POPULATION = "GLOBAL_FINAL_POPULATION"
+
+
+SINGLE_TOP_5 = WalerCandidateRetentionProfile.SINGLE_TOP_5
+GLOBAL_FINAL_POPULATION = WalerCandidateRetentionProfile.GLOBAL_FINAL_POPULATION
 
 
 class WalerOptimizationExcludedError(ValueError):
@@ -65,7 +78,7 @@ def partition_waler_optimization_inputs(
 class OptimizeWaler:
     """Run the complete, GUI-independent Waler optimization workflow."""
 
-    CACHE_SCHEMA = "waler_tail_adjustment_v1"
+    CACHE_SCHEMA = "waler_tail_adjustment_v2"
 
     def __init__(
         self,
@@ -97,6 +110,8 @@ class OptimizeWaler:
         *,
         on_progress: ProgressCallback | None = None,
         logger: LogCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
+        retention_profile: WalerCandidateRetentionProfile = SINGLE_TOP_5,
     ) -> OptimizeWalerResult:
         """Execute synchronously and return solutions, diagnostics, and config."""
 
@@ -105,9 +120,18 @@ class OptimizeWaler:
                 f"圍令 {request.input.waler_id} 為 RC，不進行材料配置最佳化。"
             )
         cfg = self._build_config(request)
+        retention_profile = WalerCandidateRetentionProfile(retention_profile)
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         wales.set_logger(logger or print)
         try:
-            return self._run_search(request, cfg, on_progress)
+            return self._run_search(
+                request,
+                cfg,
+                on_progress,
+                cancellation_token,
+                retention_profile,
+            )
         finally:
             wales.set_logger(print)
 
@@ -147,6 +171,8 @@ class OptimizeWaler:
         request: OptimizeWalerRequest,
         cfg: wales.Config,
         on_progress: ProgressCallback | None,
+        cancellation_token: CancellationToken | None,
+        retention_profile: WalerCandidateRetentionProfile,
     ) -> OptimizeWalerResult:
         policy = self.search_policy
         all_results = []
@@ -156,6 +182,8 @@ class OptimizeWaler:
         final_assessment = None
 
         for stage_index, stage in enumerate(policy.waler_search_stages):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             stage_cfg = copy.deepcopy(cfg)
             stage_cfg.generations = stage.generations
             stage_cfg.population_size = stage.population_size
@@ -173,11 +201,18 @@ class OptimizeWaler:
             wales.logger(f"Seed：{stage.random_seed}")
 
             stage_diagnostics = {}
+            evolve_kwargs = {
+                "seed": stage.random_seed,
+                "diagnostics_out": stage_diagnostics,
+            }
+            if cancellation_token is not None:
+                evolve_kwargs["cancellation_token"] = cancellation_token
+            if retention_profile is GLOBAL_FINAL_POPULATION:
+                evolve_kwargs["retain_all_final_results"] = True
             stage_results = wales.evolve(
                 stage_cfg,
                 list(request.input.stock_items),
-                seed=stage.random_seed,
-                diagnostics_out=stage_diagnostics,
+                **evolve_kwargs,
             )
             all_results.extend(stage_results)
             stage_history = list(
@@ -214,6 +249,7 @@ class OptimizeWaler:
                 "legal_solution_found": valid_count > 0,
                 "valid_solution_count": valid_count,
                 "unique_solution_count": unique_count,
+                "result_count_after_stage_solution_merge": len(stage_results),
                 "best_score": best_score,
                 "tail_score_improvement": (
                     solver_search.relative_score_improvement(
@@ -256,10 +292,13 @@ class OptimizeWaler:
                 "初始結果仍可改善，系統正在進一步搜尋……",
             )
 
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         results = solver_search.merge_waler_results(
             all_results,
-            limit=cfg.top_n,
+            limit=(cfg.top_n if retention_profile is SINGLE_TOP_5 else None),
             precision=policy.score_comparison_precision,
+            cancellation_token=cancellation_token,
         )
         diagnostics = self._build_diagnostics(
             request=request,
@@ -269,12 +308,15 @@ class OptimizeWaler:
             best_score_history=best_score_history,
             escalation_reasons=escalation_reasons,
             final_assessment=final_assessment,
+            retention_profile=retention_profile,
         )
         self._emit_progress(
             on_progress,
             "result_processing",
             "正在整理結果與診斷……",
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         return OptimizeWalerResult(tuple(results), diagnostics, cfg)
 
     def _build_diagnostics(
@@ -287,6 +329,7 @@ class OptimizeWaler:
         best_score_history: list[float],
         escalation_reasons: list[str],
         final_assessment: solver_search.SearchStageAssessment | None,
+        retention_profile: WalerCandidateRetentionProfile,
     ) -> solver_search.SolverDiagnostics:
         policy = self.search_policy
         legal_found = any(bool(item.get("valid")) for item in results)
@@ -354,6 +397,8 @@ class OptimizeWaler:
             policy_id=policy.policy_id,
             policy_version=policy.policy_version,
             stage_records=stage_records,
+            retention_profile=retention_profile.value,
+            candidate_count_after_cross_stage_solution_merge=len(results),
         )
 
 
@@ -363,6 +408,9 @@ __all__ = [
     "OptimizeWalerResult",
     "WalerOptimizationProgress",
     "WalerOptimizationExcludedError",
+    "WalerCandidateRetentionProfile",
+    "SINGLE_TOP_5",
+    "GLOBAL_FINAL_POPULATION",
     "is_rc_waler_material",
     "partition_waler_optimization_inputs",
 ]

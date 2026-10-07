@@ -17,6 +17,12 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     PROJECT_WALER_LAYER,
     RESULT_SUPPORT_LAYER,
     RESULT_WALER_LAYER,
+    WARNING_ANCHOR_TOLERANCE_MM,
+    WARNING_FONT_FAMILY,
+    WARNING_FONT_FILE,
+    WARNING_INVALID_RESULT_LAYER,
+    WARNING_TEXT_OFFSET_MM,
+    WARNING_TEXT_STYLE,
     DXFExportMode,
     DXFResultExportError,
     ExportCoordinateSystem,
@@ -306,6 +312,58 @@ class DXFResultExportTests(unittest.TestCase):
         self.assertAlmostEqual(90.0, jacks[0].dxf.rotation, places=6)
         self.assertTrue(all(entity.has_xdata(APP_ID) for entity in dimensions))
         self.assertTrue(all(entity.dxf.layer == "0" for entity in exported.blocks[JACK_BLOCK_NAME]))
+
+    def test_exports_16450_waler_with_one_tail_adjustment_and_gap(self):
+        output_path = self.temp_path / "waler-16450.dxf"
+        plan = MemberExportPlan(
+            "W1",
+            "waler",
+            (
+                ExportPiece("steel", 8000),
+                ExportPiece("steel", 8000),
+                ExportPiece("shim", 300),
+            ),
+            gap=150,
+            result_id="W1-plan",
+        )
+
+        report = export_results_to_dxf(
+            output_path,
+            (plan,),
+            [{
+                "WalerID": "W1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 16450,
+                "EndY": 0,
+            }],
+            [],
+            [],
+            ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.RESULT_ONLY,
+        )
+
+        self.assertEqual(report.dimension_count, 4)
+        document = ezdxf.readfile(output_path)
+        displayed = []
+        for dimension in document.modelspace().query("DIMENSION"):
+            values = [tag.value for tag in dimension.get_xdata(APP_ID)]
+            block = document.blocks.get(dimension.dxf.geometry)
+            text = [
+                str(entity.dxf.get("text", ""))
+                for entity in block
+                if entity.dxftype() in {"MTEXT", "TEXT"}
+            ]
+            displayed.append((int(values[5]), text[0], dimension.get_measurement()))
+        self.assertEqual(
+            displayed,
+            [
+                (1, "8000", 8000.0),
+                (2, "8000", 8000.0),
+                (3, "調整塊 300", 300.0),
+                (4, "餘量 150", 150.0),
+            ],
+        )
 
     def test_reconstructs_every_required_background_role_and_deduplicates_lines(self):
         output_path = self.temp_path / "background.dxf"
@@ -823,6 +881,128 @@ class DXFResultExportTests(unittest.TestCase):
         self.assertEqual(1, len(inserts))
         self.assertEqual(RESULT_SUPPORT_LAYER, inserts[0].dxf.layer)
 
+    def test_invalid_warning_is_equivalent_in_both_modes_and_uses_cjk_style(self):
+        walers = [
+            {"WalerID": "W1", "StartX": 0, "StartY": 0, "EndX": 3000, "EndY": 0}
+        ]
+        plan = MemberExportPlan(
+            "W1",
+            "waler",
+            (ExportPiece("steel", 3000),),
+            result_id="W1-invalid",
+            valid=False,
+            reasons=("鋼材總長不足", "接頭落入禁止區"),
+        )
+        documents = []
+        for mode in (DXFExportMode.SOURCE_BACKED, DXFExportMode.RESULT_ONLY):
+            output_path = self.temp_path / f"warning-{mode.value}.dxf"
+            export_results_to_dxf(
+                output_path,
+                (plan,),
+                walers,
+                [],
+                [],
+                ExportCoordinateSystem("world"),
+                export_mode=mode,
+                background_state=(clean_import_state() if mode is DXFExportMode.SOURCE_BACKED else None),
+            )
+            documents.append(ezdxf.readfile(output_path))
+
+        warning_snapshots = []
+        for document in documents:
+            self.assertIn(WARNING_INVALID_RESULT_LAYER, document.layers)
+            self.assertEqual(
+                1,
+                abs(int(document.layers.get(WARNING_INVALID_RESULT_LAYER).dxf.color)),
+            )
+            style = document.styles.get(WARNING_TEXT_STYLE)
+            self.assertEqual(WARNING_FONT_FILE, style.dxf.font)
+            self.assertEqual(
+                WARNING_FONT_FAMILY,
+                style.get_extended_font_data()[0],
+            )
+            warnings = list(
+                document.modelspace().query(
+                    f'MTEXT[layer=="{WARNING_INVALID_RESULT_LAYER}"]'
+                )
+            )
+            self.assertEqual(1, len(warnings))
+            warning = warnings[0]
+            self.assertEqual(WARNING_TEXT_STYLE, warning.dxf.style)
+            self.assertEqual(256, warning.dxf.color)
+            self.assertIn("W1", warning.plain_text())
+            self.assertIn("鋼材總長不足", warning.plain_text())
+            self.assertIn("接頭落入禁止區", warning.plain_text())
+            expected_anchor = (1500.0, WARNING_TEXT_OFFSET_MM)
+            self.assertLessEqual(
+                math.dist(tuple(warning.dxf.insert)[:2], expected_anchor),
+                WARNING_ANCHOR_TOLERANCE_MM,
+            )
+            warning_snapshots.append(
+                (warning.plain_text(), tuple(warning.dxf.insert)[:2])
+            )
+        self.assertEqual(warning_snapshots[0], warning_snapshots[1])
+
+    def test_double_support_invalid_warnings_are_separate_and_deterministic(self):
+        struts = [
+            {"StrutID": "S1", "StartX": 0, "StartY": 0, "EndX": 3000, "EndY": 0},
+            {"StrutID": "S2", "StartX": 0, "StartY": 100, "EndX": 3000, "EndY": 100},
+        ]
+        plans = (
+            MemberExportPlan(
+                "S2",
+                "strut",
+                (ExportPiece("steel", 3000),),
+                result_id="Z1",
+                valid=False,
+                reasons=("S2 待修正",),
+            ),
+            MemberExportPlan(
+                "S1",
+                "strut",
+                (ExportPiece("steel", 3000),),
+                result_id="Z1",
+                valid=False,
+                reasons=("S1 待修正",),
+            ),
+        )
+
+        snapshots = []
+        for index, ordered_plans in enumerate((plans, tuple(reversed(plans)))):
+            output_path = self.temp_path / f"double-support-{index}.dxf"
+            export_results_to_dxf(
+                output_path,
+                ordered_plans,
+                [],
+                struts,
+                [],
+                ExportCoordinateSystem("world"),
+                export_mode=DXFExportMode.RESULT_ONLY,
+            )
+            document = ezdxf.readfile(output_path)
+            warnings = list(
+                document.modelspace().query(
+                    f'MTEXT[layer=="{WARNING_INVALID_RESULT_LAYER}"]'
+                )
+            )
+            self.assertEqual(2, len(warnings))
+            by_member = {}
+            for warning in warnings:
+                values = tuple(tag.value for tag in warning.get_xdata(APP_ID))
+                by_member[str(values[2])] = tuple(warning.dxf.insert)[:2]
+            self.assertEqual({"S1", "S2"}, set(by_member))
+            self.assertNotEqual(by_member["S1"], by_member["S2"])
+            snapshots.append(by_member)
+        self.assertEqual(snapshots[0], snapshots[1])
+
+    def test_legal_results_do_not_create_warning_layer_or_style(self):
+        output_path = self.temp_path / "all-legal.dxf"
+        export_basic(output_path)
+
+        document = ezdxf.readfile(output_path)
+        self.assertNotIn(WARNING_INVALID_RESULT_LAYER, document.layers)
+        self.assertNotIn(WARNING_TEXT_STYLE, document.styles)
+
     def test_export_context_uses_only_import_state_presence(self):
         mode, coordinate = resolve_dxf_export_context(None)
         self.assertEqual(DXFExportMode.RESULT_ONLY, mode)
@@ -954,6 +1134,10 @@ class DXFResultExportTests(unittest.TestCase):
         )
         self.assertEqual(ExportPiece("shim", 50.0), plans[0].pieces[-1])
         self.assertEqual(ExportPiece("jack", 600.0), plans[1].pieces[-1])
+        self.assertTrue(all(not plan.valid for plan in plans))
+        self.assertTrue(
+            all(plan.reasons == ("未提供不合法原因",) for plan in plans)
+        )
 
 
 if __name__ == "__main__":

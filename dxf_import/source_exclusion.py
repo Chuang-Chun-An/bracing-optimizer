@@ -278,14 +278,28 @@ def manual_override_from_mapping(
     selection_source = str(
         value.get("geometry_selection_source", "") or ""
     ).strip()
+    coordinate_space = str(
+        value.get("geometry_coordinate_space", "") or ""
+    ).strip()
+    if role != "brace" or coordinate_space != "baseline_wcs":
+        coordinate_space = ""
     world_start = _point(value.get("world_start"))
     world_end = _point(value.get("world_end"))
     if selection_source not in _MANUAL_GEOMETRY_SOURCES:
         selection_source = ""
+        coordinate_space = ""
         world_start = world_end = None
     elif world_start is None or world_end is None:
         selection_source = ""
+        coordinate_space = ""
         world_start = world_end = None
+    formalized = bool(
+        value.get("waler_engineering_line_formalized", False)
+        and role == "waler"
+        and selection_source in _MANUAL_GEOMETRY_SOURCES
+        and world_start is not None
+        and world_end is not None
+    )
     return SourceManualOverride(
         role=role,
         source_handles=handles,
@@ -293,8 +307,10 @@ def manual_override_from_mapping(
         has_material_spec=bool(value.get("has_material_spec", False)),
         material_spec=str(value.get("material_spec", "") or "").strip(),
         geometry_selection_source=selection_source,
+        geometry_coordinate_space=coordinate_space,
         world_start=world_start,
         world_end=world_end,
+        waler_engineering_line_formalized=formalized,
         has_waler_contact_input=bool(
             value.get("has_waler_contact_input", False)
         ),
@@ -513,6 +529,12 @@ def capture_member_manual_override(
         if member.selection_source in _MANUAL_GEOMETRY_SOURCES
         else ""
     )
+    formalized = bool(
+        isinstance(member, Waler)
+        and member.engineering_line_authority == "manual_repair"
+        and member.contact_face_state == "formal"
+        and geometry_source
+    )
     review = next(
         (
             item
@@ -527,8 +549,85 @@ def capture_member_manual_override(
         if isinstance(member, CornerBrace)
         else None
     )
-    if not (has_material or geometry_source or has_contact or repair_provenance):
+    if not (
+        has_material
+        or geometry_source
+        or formalized
+        or has_contact
+        or repair_provenance
+    ):
         return None
+    world_start = (member.world_start or member.start) if geometry_source else None
+    world_end = (member.world_end or member.end) if geometry_source else None
+    geometry_coordinate_space = ""
+    if isinstance(member, Brace) and geometry_source:
+        baseline = next(
+            (
+                item
+                for item in result.brace_adjustment_baselines
+                if item.brace_id == member.id
+                and item.source_handles == normalize_source_handles(member.source_handles)
+            ),
+            None,
+        )
+        if baseline is not None:
+            from .waler_contact_adjustment import (
+                BraceRigidTranslationError,
+                solve_brace_rigid_translation,
+            )
+
+            waler_by_id = {item.id: item for item in result.walers}
+            review_by_id = {
+                item.waler_id: item for item in result.waler_contact_reviews
+            }
+            try:
+                distance_tolerance = max(
+                    1e-6,
+                    GeometryTolerances().beam_crossing_duplicate_tolerance_mm,
+                )
+                from_review = review_by_id[baseline.from_waler_id]
+                to_review = review_by_id[baseline.to_waler_id]
+                solved = solve_brace_rigid_translation(
+                    baseline,
+                    (
+                        from_review.baseline_contact_start,
+                        from_review.baseline_contact_end,
+                    ),
+                    (
+                        to_review.baseline_contact_start,
+                        to_review.baseline_contact_end,
+                    ),
+                    (
+                        waler_by_id[baseline.from_waler_id].world_start,
+                        waler_by_id[baseline.from_waler_id].world_end,
+                    ),
+                    (
+                        waler_by_id[baseline.to_waler_id].world_start,
+                        waler_by_id[baseline.to_waler_id].world_end,
+                    ),
+                )
+                member_matches_baseline = (
+                    _distance(solved.start, world_start) <= distance_tolerance
+                    and _distance(solved.end, world_end) <= distance_tolerance
+                )
+                has_nonzero_displacement = any(
+                    abs(review_by_id[waler_id].contact_displacement or 0.0)
+                    > distance_tolerance
+                    for waler_id in (
+                        baseline.from_waler_id,
+                        baseline.to_waler_id,
+                    )
+                )
+            except (KeyError, BraceRigidTranslationError):
+                member_matches_baseline = False
+                has_nonzero_displacement = True
+            if member_matches_baseline:
+                world_start, world_end = baseline.start, baseline.end
+                geometry_coordinate_space = "baseline_wcs"
+            elif not has_nonzero_displacement:
+                # Compatibility for callers that still commit a manual line
+                # through the lower-level helper before any Waler adjustment.
+                geometry_coordinate_space = "baseline_wcs"
     return SourceManualOverride(
         role=role,
         source_handles=handles,
@@ -536,8 +635,10 @@ def capture_member_manual_override(
         has_material_spec=has_material,
         material_spec=(member.material_spec if has_material else ""),
         geometry_selection_source=geometry_source,
-        world_start=(member.world_start or member.start) if geometry_source else None,
-        world_end=(member.world_end or member.end) if geometry_source else None,
+        geometry_coordinate_space=geometry_coordinate_space,
+        world_start=world_start,
+        world_end=world_end,
+        waler_engineering_line_formalized=formalized,
         has_waler_contact_input=has_contact,
         original_backfill_mm=(review.original_backfill_mm if has_contact else None),
         adopted_backfill_mm=(review.adopted_backfill_mm if has_contact else None),
@@ -714,7 +815,10 @@ def _override_labels(override: SourceManualOverride) -> tuple[str, ...]:
     if override.has_material_spec:
         labels.append(f"{display} 材料規格")
     if override.geometry_selection_source:
-        label = "CAD 工程線" if override.geometry_selection_source == "cad_manual" else "STEP5 工程線"
+        if override.waler_engineering_line_formalized:
+            label = "人工正式工程線"
+        else:
+            label = "CAD 工程線" if override.geometry_selection_source == "cad_manual" else "STEP5 工程線"
         labels.append(f"{display} {label}")
     if override.has_waler_contact_input:
         labels.append(f"{display} Waler 背填／寬度")
@@ -765,6 +869,9 @@ def replay_manual_overrides(
         apply_waler_contact_adjustment,
         initialize_waler_contact_review,
     )
+    from .waler_engineering_line_repair import (
+        formalize_waler_engineering_line,
+    )
 
     tolerances = tolerances or GeometryTolerances()
     excluded_identities = {source.identity for source in result.excluded_sources}
@@ -794,6 +901,34 @@ def replay_manual_overrides(
 
     current = result
 
+    nonzero_adjusted_waler_ids: set[str] = set()
+    for candidate in usable:
+        if not candidate.has_waler_contact_input:
+            continue
+        member = _unique_member_for_override(current, candidate)
+        values = (
+            candidate.original_backfill_mm,
+            candidate.adopted_backfill_mm,
+            candidate.original_waler_width_mm,
+            candidate.adopted_waler_width_mm,
+        )
+        if not isinstance(member, Waler) or any(value is None for value in values):
+            continue
+        try:
+            displacement = (
+                float(candidate.adopted_backfill_mm)
+                - float(candidate.original_backfill_mm)
+                + float(candidate.adopted_waler_width_mm)
+                - float(candidate.original_waler_width_mm)
+            )
+        except (TypeError, ValueError):
+            continue
+        if abs(displacement) > max(
+            1e-6,
+            tolerances.beam_crossing_duplicate_tolerance_mm,
+        ):
+            nonzero_adjusted_waler_ids.add(member.id)
+
     def replay_geometry(override: SourceManualOverride) -> None:
         nonlocal current
         if not override.geometry_selection_source:
@@ -805,8 +940,27 @@ def replay_manual_overrides(
         if member is None or override.world_start is None or override.world_end is None:
             needs_review.append(label)
             return
+        if (
+            isinstance(member, Brace)
+            and override.geometry_coordinate_space != "baseline_wcs"
+            and bool(
+                {member.from_waler, member.to_waler}
+                & nonzero_adjusted_waler_ids
+            )
+        ):
+            needs_review.append(label)
+            return
         try:
-            if override.geometry_selection_source == "cad_manual":
+            if override.waler_engineering_line_formalized:
+                staged = formalize_waler_engineering_line(
+                    current,
+                    override.source_handles,
+                    override.world_start,
+                    override.world_end,
+                    input_kind=override.geometry_selection_source,
+                    tolerances=tolerances,
+                )
+            elif override.geometry_selection_source == "cad_manual":
                 staged = set_cad_engineering_line(
                     current,
                     member.id,
@@ -836,15 +990,24 @@ def replay_manual_overrides(
         current = staged
         preserved.append(label)
 
-    # A manually chosen Waler line defines the baseline used by contact inputs.
+    # All manual geometry is replayed in baseline WCS before any dimension input.
     waler_geometry = [
         item for item in usable
         if item.role == "waler" and item.geometry_selection_source
     ]
     for override in waler_geometry:
         replay_geometry(override)
-    if waler_geometry:
-        current = initialize_waler_contact_review(current, tolerances)
+
+    for override in usable:
+        if override.role != "waler":
+            replay_geometry(override)
+
+    if any(item.geometry_selection_source for item in usable):
+        current = initialize_waler_contact_review(
+            current,
+            tolerances,
+            rebuild_baselines=True,
+        )
 
     for override in usable:
         if not override.has_waler_contact_input:
@@ -878,10 +1041,6 @@ def replay_manual_overrides(
             continue
         current = staged
         preserved.append(label)
-
-    for override in usable:
-        if override.role != "waler":
-            replay_geometry(override)
 
     for override in usable:
         if not override.has_material_spec:
@@ -1074,10 +1233,15 @@ def replay_manual_overrides(
                     and provenance.selection_mode
                     != "body_relationship_selection"
                 ):
+                    replayed_provenance = replace(
+                        provenance,
+                        automatic_primary_references=matches[0].primary_references,
+                        manual_secondary_references=matches[0].secondary_references,
+                    )
                     replayed_current = replace(
                         replayed_current,
                         corner_braces=tuple(
-                            replace(corner, repair_provenance=provenance)
+                            replace(corner, repair_provenance=replayed_provenance)
                             if corner.id == repaired_id
                             else corner
                             for corner in replayed_current.corner_braces

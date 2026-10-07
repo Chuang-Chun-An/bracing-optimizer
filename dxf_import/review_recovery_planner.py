@@ -647,9 +647,13 @@ class ReviewRecoveryPlanner:
                 *manual_report.needs_review,
                 *manual_report.disabled,
             )))
+            disabled_labels = tuple(dict.fromkeys(
+                manual_rebind.disabled_labels
+            ))
             requires_review_set = set(requires_review_labels)
+            disabled_set = set(disabled_labels)
             for label in manual_report.preserved:
-                if label in requires_review_set:
+                if label in requires_review_set or label in disabled_set:
                     continue
                 entries.append(
                     self._manual_summary_entry(
@@ -662,6 +666,13 @@ class ReviewRecoveryPlanner:
                     self._manual_summary_entry(
                         label,
                         RecoveryCategory.REQUIRES_REVIEW,
+                    )
+                )
+            for label in disabled_labels:
+                entries.append(
+                    self._manual_summary_entry(
+                        label,
+                        RecoveryCategory.DISABLED,
                     )
                 )
 

@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from dataclasses import replace
 import math
 from pathlib import Path
+import re
 from typing import Any, Mapping, Sequence
 
 try:
@@ -1172,6 +1173,9 @@ class DXFImporter:
             material_spec=outcome.material_spec,
             material_spec_source=outcome.material_spec_source,
             waler_envelope_facts=envelope.facts,
+            waler_source_width_state=(
+                "unique" if outcome.source_width > 0.0 else "unknown"
+            ),
         )
 
     def _geometry_groups(
@@ -1595,6 +1599,7 @@ class DXFImporter:
             material_spec=candidate.material_spec,
             material_spec_source=candidate.material_spec_source,
             contact_face_state=candidate.waler_contact_face_state,
+            source_width_state=candidate.waler_source_width_state,
         )
 
     @staticmethod
@@ -1832,8 +1837,26 @@ LAYER_MAPPING_BY_FILENAME = {
     "670-co-y05-fw-圖紙 - 005 - y05站 安全支撐系統 第一層支撐平面圖.dxf": Y05_LAYER_MAPPING,
 }
 
+LAYER_MAPPING_BY_PROJECT_CODE = {
+    "y1a": Y1A_LAYER_MAPPING,
+    "y29": Y29_LAYER_MAPPING,
+    "y05": Y05_LAYER_MAPPING,
+}
+
 
 def default_layer_mapping_for_file(file_path: str | Path) -> Mapping[str, str]:
-    """Return exact filename-scoped layer defaults, or no defaults."""
+    """Return defaults for a known DXF filename or unambiguous project code."""
 
-    return LAYER_MAPPING_BY_FILENAME.get(Path(file_path).name.casefold(), {})
+    filename = Path(file_path).name.casefold()
+    exact_mapping = LAYER_MAPPING_BY_FILENAME.get(filename)
+    if exact_mapping is not None:
+        return exact_mapping
+
+    project_codes = {
+        code
+        for code in LAYER_MAPPING_BY_PROJECT_CODE
+        if re.search(rf"(?<![a-z0-9]){re.escape(code)}(?![a-z0-9])", filename)
+    }
+    if len(project_codes) != 1:
+        return {}
+    return LAYER_MAPPING_BY_PROJECT_CODE[project_codes.pop()]

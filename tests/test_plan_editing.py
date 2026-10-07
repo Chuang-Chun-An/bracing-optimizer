@@ -91,6 +91,111 @@ class PlanEditingTests(unittest.TestCase):
             [piece_type for piece_type, _length in recalculated["pieces"]],
         )
 
+    def test_waler_recalculation_uses_canonical_tail_for_all_selection_cases(self):
+        cases = (
+            (12_100, 0, 100, False),
+            (12_180, 100, 80, True),
+            (12_250, 100, 150, True),
+        )
+        editing = WalerPlanEditing(self.project_data())
+
+        for required_length, adjustment, gap, has_shim in cases:
+            with self.subTest(required_length=required_length):
+                plan = editing.recalculate(
+                    {"tail_adjustment": 75, "pieces": [("shim", 75)]},
+                    [6000, 6000],
+                    waler_id="W1",
+                    result_context={
+                        "material_spec": "H400",
+                        "required_length": required_length,
+                    },
+                )
+
+                self.assertTrue(plan["valid"])
+                self.assertEqual(plan["tail_adjustment"], adjustment)
+                self.assertEqual(plan["gap"], gap)
+                self.assertEqual(
+                    [kind for kind, _length in plan["pieces"]].count("shim"),
+                    int(has_shim),
+                )
+                if has_shim:
+                    self.assertEqual(plan["pieces"][-1], ("shim", adjustment))
+                self.assertEqual(
+                    plan["steel_length"]
+                    + plan["tail_adjustment"]
+                    + plan["gap"],
+                    required_length,
+                )
+
+    def test_waler_manual_and_automatic_share_16450_tail_projection(self):
+        project_data = ProjectDataModel(
+            walers=[{
+                "WalerID": "W1",
+                "StartX": 0,
+                "StartY": 0,
+                "EndX": 16450,
+                "EndY": 0,
+            }],
+            inventory=[{
+                "ItemCode": "W-8000",
+                "Spec": "H400",
+                "Usage": "圍令",
+                "Length": 8000,
+                "Qty": 2,
+            }],
+        )
+        manual = WalerPlanEditing(project_data).recalculate(
+            {},
+            [8000, 8000],
+            waler_id="W1",
+            result_context={
+                "material_spec": "H400",
+                "required_length": 16450,
+            },
+        )
+        config = wales.Config(
+            total_length=16450,
+            support_points=[],
+            candidate_joint_points=[8000],
+            purchasable_lengths=[8000],
+            top_n=1,
+        )
+        automatic = wales._top_results(
+            [wales.evaluate_individual(
+                [1],
+                config,
+                [{"id": "W-8000", "length": 8000, "qty": 2}],
+            )],
+            config,
+        )[0]
+
+        for field in ("tail_adjustment", "gap", "pieces", "valid"):
+            self.assertEqual(manual[field], automatic[field])
+        self.assertEqual(manual["tail_adjustment"], 300)
+        self.assertEqual(manual["gap"], 150)
+        self.assertEqual(manual["pieces"][-1], ("shim", 300))
+        self.assertIn("尾端調整塊：300 mm", manual["legality"]["details"])
+
+    def test_waler_manual_no_tail_solution_is_invalid_without_legacy_shim(self):
+        plan = WalerPlanEditing(self.project_data()).recalculate(
+            {"tail_adjustment": 75, "pieces": [("shim", 75)]},
+            [6000, 6000],
+            waler_id="W1",
+            result_context={
+                "material_spec": "H400",
+                "required_length": 12451,
+            },
+        )
+
+        self.assertFalse(plan["valid"])
+        self.assertIsNone(plan["tail_adjustment"])
+        self.assertIsNone(plan["gap"])
+        self.assertEqual(
+            plan["pieces"],
+            [("steel", 6000), ("steel", 6000)],
+        )
+        self.assertIn("鋼材總長不足", plan["legality"]["violations"])
+
     def test_waler_manual_recalculation_does_not_run_ga_repair(self):
         with patch.object(
             wales,
@@ -515,6 +620,43 @@ class PlanEditingTests(unittest.TestCase):
         self.assertFalse(result.plan.valid)
         self.assertEqual(result.plan.pieces, pieces)
         self.assertIs(solution.plans[0], original_plan)
+
+    def test_support_editing_projects_core_size_issues_and_saves_invalid_plans(self):
+        config = self.support_config()
+        original_plan = self.support_plan(config)
+        solution = support.make_global_solution([original_plan])
+        editing = self.support_editing(config)
+        cases = (
+            (
+                [("steel", 5000), ("jack", 700), ("steel", 6000)],
+                "invalid_jack_length",
+            ),
+            (
+                [
+                    ("steel", 5000),
+                    ("jack", 600),
+                    ("shim", 145),
+                    ("steel", 6000),
+                ],
+                "invalid_shim_length",
+            ),
+        )
+
+        for pieces, issue_code in cases:
+            with self.subTest(issue_code=issue_code):
+                result = editing.stage_edit(solution, "S1", pieces)
+                core = support.evaluate_single_support(config, pieces)
+
+                self.assertTrue(result.changed)
+                self.assertFalse(result.validation.valid)
+                self.assertEqual(result.validation.issue_code, issue_code)
+                self.assertEqual(result.validation.message, f"❌ {core.reason}")
+                self.assertFalse(result.plan.valid)
+                self.assertEqual(result.plan.reason, core.reason)
+                self.assertEqual(result.plan.breakdown, core.breakdown)
+                self.assertEqual(result.plan.score, core.score)
+                self.assertEqual(result.plan.pieces, pieces)
+                self.assertIs(solution.plans[0], original_plan)
 
     def test_support_editing_saves_forbidden_joint_as_invalid(self):
         config = self.support_config()

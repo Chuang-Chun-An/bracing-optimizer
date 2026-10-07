@@ -13,7 +13,12 @@ from bracing_optimizer.algorithms.waler_global import (
     merge_equivalent_candidates,
     solve_global_waler_candidates,
 )
+from bracing_optimizer.algorithms.cancellation import (
+    CancellationToken,
+    SolverCancelled,
+)
 from bracing_optimizer.application.optimize_waler import (
+    GLOBAL_FINAL_POPULATION,
     OptimizeWaler,
     OptimizeWalerRequest,
     OptimizeWalerResult,
@@ -88,8 +93,11 @@ class OptimizeWalerGlobal:
         *,
         on_progress: ProgressCallback | None = None,
         logger: LogCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> OptimizeWalerGlobalResult:
         log = logger or (lambda *args: None)
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         inputs, excluded_inputs = partition_waler_optimization_inputs(
             tuple(request.waler_inputs)
         )
@@ -107,8 +115,11 @@ class OptimizeWalerGlobal:
         local_records: list[WalerLocalOptimizationRecord] = []
         candidates_by_waler: dict[str, tuple[WalerGlobalCandidate, ...]] = {}
         raw_candidate_count = 0
+        raw_candidate_counts_by_waler: dict[str, int] = {}
 
         for index, waler_input in enumerate(inputs, start=1):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             waler_id = str(waler_input.waler_id or "").strip()
             self._emit_progress(
                 on_progress,
@@ -117,19 +128,30 @@ class OptimizeWalerGlobal:
             )
             log(f"\n--- {waler_id}：產生單支候選（{index}/{len(inputs)}）---")
             try:
+                local_execute_kwargs = {"logger": log}
+                local_execute_kwargs["retention_profile"] = (
+                    GLOBAL_FINAL_POPULATION
+                )
+                if cancellation_token is not None:
+                    local_execute_kwargs["cancellation_token"] = (
+                        cancellation_token
+                    )
                 local_result = self.optimize_waler_factory().execute(
                     OptimizeWalerRequest(
                         input=waler_input,
                         material_ratio_targets=request.material_ratio_targets,
                     ),
-                    logger=log,
+                    **local_execute_kwargs,
                 )
+                if cancellation_token is not None:
+                    cancellation_token.raise_if_cancelled()
                 local_records.append(WalerLocalOptimizationRecord(
                     waler_input=waler_input,
                     result=local_result,
                 ))
                 raw_solutions = tuple(local_result.solutions)
                 raw_candidate_count += len(raw_solutions)
+                raw_candidate_counts_by_waler[waler_id] = len(raw_solutions)
                 valid_solutions = tuple(
                     (rank, payload)
                     for rank, payload in enumerate(raw_solutions, start=1)
@@ -141,6 +163,9 @@ class OptimizeWalerGlobal:
                         targets=request.material_ratio_targets,
                         local_records=local_records,
                         raw_candidate_count=raw_candidate_count,
+                        raw_candidate_counts_by_waler=(
+                            raw_candidate_counts_by_waler
+                        ),
                         failed_waler_id=waler_id,
                         message=f"圍令 {waler_id} 沒有合法的第一名候選。",
                     )
@@ -155,18 +180,26 @@ class OptimizeWalerGlobal:
                     for rank, payload in valid_solutions
                 )
                 candidates_by_waler[waler_id] = merge_equivalent_candidates(
-                    candidates
+                    candidates,
+                    cancellation_token=cancellation_token,
                 )
+                if cancellation_token is not None:
+                    cancellation_token.raise_if_cancelled()
+            except SolverCancelled:
+                raise
             except Exception as exc:
                 return self._failure_result(
                     inputs=inputs,
                     targets=request.material_ratio_targets,
                     local_records=local_records,
                     raw_candidate_count=raw_candidate_count,
+                    raw_candidate_counts_by_waler=raw_candidate_counts_by_waler,
                     failed_waler_id=waler_id,
                     message=f"圍令 {waler_id} 候選建立失敗：{exc}",
                 )
 
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         retained_count = sum(len(items) for items in candidates_by_waler.values())
         log(f"\n單支候選：{raw_candidate_count}")
         log(f"全域代表候選：{retained_count}")
@@ -176,12 +209,22 @@ class OptimizeWalerGlobal:
             "global_exact_dp",
             "單支候選已完成，正在進行全域 Exact DP……",
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
+        solve_kwargs = {
+            "waler_order": waler_order,
+            "raw_candidate_count": raw_candidate_count,
+            "raw_candidate_counts_by_waler": raw_candidate_counts_by_waler,
+        }
+        if cancellation_token is not None:
+            solve_kwargs["cancellation_token"] = cancellation_token
         solution, diagnostics = solve_global_waler_candidates(
             candidates_by_waler,
             request.material_ratio_targets,
-            waler_order=waler_order,
-            raw_candidate_count=raw_candidate_count,
+            **solve_kwargs,
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         self._log_result(log, solution, diagnostics)
         self._emit_progress(
             on_progress,
@@ -215,6 +258,7 @@ class OptimizeWalerGlobal:
         targets: MaterialRatioTargets,
         local_records: list[WalerLocalOptimizationRecord],
         raw_candidate_count: int,
+        raw_candidate_counts_by_waler: dict[str, int],
         failed_waler_id: str,
         message: str,
     ) -> OptimizeWalerGlobalResult:
@@ -222,6 +266,7 @@ class OptimizeWalerGlobal:
         diagnostics = WalerGlobalDiagnostics(
             waler_count=len(inputs),
             raw_candidate_count=raw_candidate_count,
+            raw_candidate_counts_by_waler=dict(raw_candidate_counts_by_waler),
             target_ratio=targets.as_dict(),
             failed_waler_ids=(failed_waler_id,),
             messages=(message,),

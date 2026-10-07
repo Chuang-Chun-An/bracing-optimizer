@@ -3,6 +3,7 @@ import json
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -33,11 +34,14 @@ from dxf_import.models import (
     DXFImportError,
     DXFImportResult,
     ValidationMessage,
+    Waler,
 )
 from dxf_import.models import GeometryTolerances
 from dxf_import.review_workflow import DXFReviewWorkflow
 from dxf_import.source_exclusion import source_file_fingerprint
+from dxf_import.validation import build_problem_records
 from main import SupportInputApp
+from tests.sample_dxf_assets import Y29_DXF_PATH
 
 
 def create_dxf(path: Path, *, offset: float = 0.0) -> Path:
@@ -172,6 +176,277 @@ class DxfReviewWorkflowTests(unittest.TestCase):
             world_result=result,
         )
 
+    def provisional_waler_workflow(self):
+        fingerprint = source_file_fingerprint(self.source)
+        waler = Waler(
+            id="W14",
+            start=(0.0, 0.0),
+            end=(1000.0, 0.0),
+            source_layer="WALER",
+            source_handles=("58D",),
+            source_entity_types=("LWPOLYLINE",),
+            recognition_method="closed_outline_axis",
+            centerline_computed=True,
+            source_width=400.0,
+            confidence=0.9,
+            contact_face_state="provisional",
+            source_width_state="unique",
+        )
+        result = DXFImportResult(
+            source_path=str(self.source),
+            source_fingerprint=fingerprint,
+            layer_names=("WALER",),
+            selected_layers={"waler": ("WALER",)},
+            layer_info=(),
+            walers=(waler,),
+            struts=(),
+            braces=(),
+            entity_debug=(),
+            messages=(
+                ValidationMessage(
+                    "error",
+                    "WALER_ENVELOPE_AMBIGUOUS",
+                    "ambiguous",
+                    "waler",
+                    ("58D",),
+                ),
+            ),
+            source_entity_counts={},
+        )
+        importer = SimpleNamespace(
+            source_fingerprint=fingerprint,
+            layer_names=("WALER",),
+            tolerances=GeometryTolerances(),
+        )
+        return DXFReviewWorkflow(
+            importer,
+            self.source,
+            initial_world_result=result,
+        )
+
+    def test_generic_candidate_change_does_not_formalize_provisional_waler(self):
+        workflow = self.provisional_waler_workflow()
+        start_id, end_id, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+
+        workflow.apply_candidate_change(
+            "W14", start_id, end_id, "cad_manual"
+        )
+
+        self.assertEqual(workflow.world_result.walers[0].contact_face_state, "provisional")
+        self.assertEqual(
+            workflow.world_result.walers[0].engineering_line_authority,
+            "automatic",
+        )
+
+    def test_waler_repair_plan_is_nonmutating_and_commit_is_atomic(self):
+        workflow = self.provisional_waler_workflow()
+        start_id, end_id, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+        before = workflow.world_result
+
+        plan = workflow.plan_waler_engineering_line_repair(
+            "W14", start_id, end_id, "cad_manual"
+        )
+
+        self.assertIs(workflow.world_result, before)
+        self.assertEqual(plan.world_result.walers[0].contact_face_state, "formal")
+        mutation = workflow.commit_waler_engineering_line_repair(plan)
+        self.assertTrue(mutation.changed)
+        self.assertEqual(workflow.world_result.walers[0].world_start, (0.0, 50.0))
+        self.assertEqual(
+            workflow.world_result.walers[0].engineering_line_authority,
+            "manual_repair",
+        )
+        self.assertNotIn(
+            "WALER_ENVELOPE_AMBIGUOUS",
+            {message.code for message in workflow.world_result.messages},
+        )
+
+    def test_manual_repair_waler_re_adopts_cad_line_only_after_successful_commit(self):
+        workflow = self.provisional_waler_workflow()
+        first_start, first_end, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+        first_plan = workflow.plan_waler_engineering_line_repair(
+            "W14", first_start, first_end, "manual_candidate_points"
+        )
+        workflow.commit_waler_engineering_line_repair(first_plan)
+        old_formal = workflow.world_result.walers[0]
+
+        second_start, second_end, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 75.0), (1000.0, 75.0)
+        )
+        self.assertEqual(workflow.world_result.walers[0].world_start, old_formal.world_start)
+        self.assertEqual(workflow.world_result.walers[0].world_end, old_formal.world_end)
+        self.assertEqual(
+            workflow.world_result.walers[0].engineering_line_authority,
+            "manual_repair",
+        )
+
+        second_plan = workflow.plan_waler_engineering_line_repair(
+            "W14", second_start, second_end, "cad_manual"
+        )
+        before_commit = workflow.world_result
+        self.assertIs(workflow.world_result, before_commit)
+        self.assertEqual(workflow.world_result.walers[0].world_start, old_formal.world_start)
+
+        workflow.commit_waler_engineering_line_repair(second_plan)
+
+        repaired = workflow.world_result.walers[0]
+        self.assertEqual(repaired.world_start, (0.0, 75.0))
+        self.assertEqual(repaired.world_end, (1000.0, 75.0))
+        self.assertEqual(repaired.selection_source, "cad_manual")
+        self.assertEqual(repaired.engineering_line_authority, "manual_repair")
+
+    def test_manual_repair_waler_failed_re_adoption_keeps_old_formal_line(self):
+        workflow = self.provisional_waler_workflow()
+        first_start, first_end, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+        workflow.commit_waler_engineering_line_repair(
+            workflow.plan_waler_engineering_line_repair(
+                "W14", first_start, first_end, "manual_candidate_points"
+            )
+        )
+        old_formal = workflow.world_result.walers[0]
+        second_start, second_end, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 75.0), (1000.0, 75.0)
+        )
+        plan = workflow.plan_waler_engineering_line_repair(
+            "W14", second_start, second_end, "cad_manual"
+        )
+        workflow.set_coordinate_origin((10.0, 20.0))
+        before_failure = workflow.world_result
+
+        with self.assertRaisesRegex(DXFImportError, "已變更"):
+            workflow.commit_waler_engineering_line_repair(plan)
+
+        self.assertIs(workflow.world_result, before_failure)
+        current = workflow.world_result.walers[0]
+        self.assertEqual(current.world_start, old_formal.world_start)
+        self.assertEqual(current.world_end, old_formal.world_end)
+        self.assertEqual(current.engineering_line_authority, "manual_repair")
+
+    def test_waler_repair_commit_rejects_stale_revision_without_mutation(self):
+        workflow = self.provisional_waler_workflow()
+        start_id, end_id, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+        plan = workflow.plan_waler_engineering_line_repair(
+            "W14", start_id, end_id, "cad_manual"
+        )
+        workflow.set_coordinate_origin((10.0, 20.0))
+        before = workflow.world_result
+
+        with self.assertRaisesRegex(DXFImportError, "已變更"):
+            workflow.commit_waler_engineering_line_repair(plan)
+
+        self.assertIs(workflow.world_result, before)
+        self.assertEqual(workflow.world_result.walers[0].contact_face_state, "provisional")
+
+    def test_waler_repair_commit_guards_fingerprint_and_exact_identity(self):
+        workflow = self.provisional_waler_workflow()
+        start_id, end_id, _mutation = workflow.add_cad_candidate_line(
+            "W14", (0.0, 50.0), (1000.0, 50.0)
+        )
+        plan = workflow.plan_waler_engineering_line_repair(
+            "W14", start_id, end_id, "cad_manual"
+        )
+        original_fingerprint = workflow.importer.source_fingerprint
+        workflow.importer.source_fingerprint = "DIFFERENT"
+
+        with self.assertRaisesRegex(DXFImportError, "來源已變更"):
+            workflow.commit_waler_engineering_line_repair(plan)
+        self.assertEqual(workflow.world_result.walers[0].contact_face_state, "provisional")
+
+        workflow.importer.source_fingerprint = original_fingerprint
+        workflow.world_result = replace(
+            workflow.world_result,
+            walers=(
+                replace(workflow.world_result.walers[0], source_handles=("OTHER",)),
+            ),
+        )
+        with self.assertRaises(DXFImportError):
+            workflow.commit_waler_engineering_line_repair(plan)
+        self.assertEqual(workflow.world_result.walers[0].source_handles, ("OTHER",))
+        self.assertEqual(workflow.world_result.walers[0].contact_face_state, "provisional")
+
+    def test_plain_language_projection_keeps_blocking_and_counts_unchanged(self):
+        messages = (
+            ValidationMessage(
+                "warning",
+                "WALER_SOURCE_OVERLAP",
+                "圍令來源 A 與 B 有重大重疊。",
+                "waler",
+                ("A", "B"),
+            ),
+            ValidationMessage(
+                "error",
+                "WALER_CONTACT_FINALIZE_FAILED",
+                "staged finalization failed: RuntimeError('internal')",
+                "waler",
+                ("A",),
+            ),
+            ValidationMessage(
+                "critical",
+                "BRACE_TERMINAL_VERDICT_MISSING",
+                "terminal verdict missing",
+                "brace",
+                ("C",),
+            ),
+        )
+        result = empty_result(self.source, messages=messages)
+        original_truth = tuple(
+            (
+                message.severity,
+                message.code,
+                message.role,
+                message.source_handles,
+                message.member_ids,
+            )
+            for message in result.messages
+        )
+
+        records = build_problem_records(result)
+
+        self.assertEqual(
+            original_truth,
+            tuple(
+                (
+                    message.severity,
+                    message.code,
+                    message.role,
+                    message.source_handles,
+                    message.member_ids,
+                )
+                for message in result.messages
+            ),
+        )
+        self.assertEqual(
+            [record.code for record in records],
+            [
+                "BRACE_TERMINAL_VERDICT_MISSING",
+                "WALER_CONTACT_FINALIZE_FAILED",
+                "WALER_SOURCE_OVERLAP",
+            ],
+        )
+        self.assertFalse(result.can_import)
+        self.assertEqual(
+            sum(message.severity in {"error", "critical"} for message in result.messages),
+            2,
+        )
+        self.assertEqual(
+            sum(message.severity == "warning" for message in result.messages),
+            1,
+        )
+
+        warning_only = empty_result(self.source, messages=(messages[0],))
+        build_problem_records(warning_only)
+        self.assertTrue(warning_only.can_import)
+
     def test_brace_axis_extension_rebuilds_across_exclusion_restore_and_resume(self):
         source = self.root / "brace-extension.dxf"
         document = ezdxf.new("R2018")
@@ -262,11 +537,11 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         self.assertNotIn("brace_waler_connections", state)
 
     @unittest.skipUnless(
-        (Path(__file__).resolve().parents[1] / "Y29_test.dxf").is_file(),
+        Y29_DXF_PATH.is_file(),
         "Y29 DXF test asset unavailable",
     )
     def test_y29_b15_exclusion_restore_invalidates_formal_pair_and_confirmation(self):
-        source = Path(__file__).resolve().parents[1] / "Y29_test.dxf"
+        source = Y29_DXF_PATH
         importer = DXFImporter(source).read()
         roles = {
             layer: DXFImportDialog.USE_TO_ROLE[label]
@@ -1167,11 +1442,11 @@ class DxfReviewWorkflowTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        (Path(__file__).resolve().parents[1] / "Y29_test.dxf").is_file(),
+        Y29_DXF_PATH.is_file(),
         "Y29 DXF test asset unavailable",
     )
     def test_y29_overlap_truth_rebuilds_across_exclusion_restore_and_resume(self):
-        source = Path(__file__).resolve().parents[1] / "Y29_test.dxf"
+        source = Y29_DXF_PATH
         importer = DXFImporter(source).read()
         roles = {
             layer: DXFImportDialog.USE_TO_ROLE[label]

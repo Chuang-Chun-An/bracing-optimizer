@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import ast
+import re
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import Mock
 from types import SimpleNamespace
 
@@ -21,10 +24,130 @@ from dxf_import.models import (
 )
 from dxf_import.preview import RenderDirty, TreeSelectionSynchronizer
 from dxf_import.validation import (
+    DXF_REVIEW_DIAGNOSTIC_CODES,
+    FALLBACK_DESCRIPTION_CODES,
+    FORMATTER_DESCRIPTION_CODES,
+    PRESERVE_MESSAGE_CODES,
+    assert_problem_code_catalog_complete,
     build_problem_records,
     build_review_items,
     review_item_guidance,
 )
+
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_DIAGNOSTIC_PRODUCER_PATHS = (
+    "dxf_import/candidate_points.py",
+    "dxf_import/importer.py",
+    "dxf_import/hatch_waler_recognition.py",
+    "dxf_import/block_member_recognition.py",
+    "dxf_import/joist_recognition.py",
+    "dxf_import/recognition.py",
+    "dxf_import/waler_contact_face.py",
+    "dxf_import/validation.py",
+    "dxf_import/waler_contact_adjustment.py",
+)
+_NON_MESSAGE_UPPERCASE_LITERALS = frozenset(
+    {
+        "BIM_JOIST_WHOLE_SOURCE_AXIS_FAILED",
+        "BRACE_STATION_INVALID",
+        "CAD_TEMP",
+        "HATCH_WALER_CONFIDENCE",
+        "HATCH_WALER_RECOGNIZED",
+        "INVALID_WALER_CONTACT_VALUE",
+        "JOIST_COLUMN_TERMINAL_WINDOW_MM",
+        "JOIST_PAIR_COLUMN_MIDPOINT_TOLERANCE_MM",
+        "JOIST_PAIR_NOMINAL_STATION_SPACING_MM",
+        "JOIST_PAIR_STATION_SPACING_TOLERANCE_MM",
+        "JOIST_STRUT_FACE_CONTACT_TOLERANCE_MM",
+        "MANUAL_LINE_SELECTION",
+        "NO_HANDLE_",
+        "NO_HANDLE_HATCH",
+        "NO_HANDLE_TEXT_",
+        "NUMERICAL_GEOMETRY_PRECISION_MM",
+        "SIGNIFICANT_WALER_OVERLAP_RATIO",
+        "TEXT_SUMMARY",
+    }
+)
+_DIAGNOSTIC_LITERAL_PATTERN = re.compile(r"[A-Z][A-Z0-9_]+")
+
+
+def _call_name(node: ast.Call) -> str:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return ""
+
+
+def _literal_validation_message_codes(tree: ast.AST) -> set[str]:
+    codes = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or _call_name(node) != "ValidationMessage":
+            continue
+        code_node = node.args[1] if len(node.args) > 1 else next(
+            (item.value for item in node.keywords if item.arg == "code"),
+            None,
+        )
+        if isinstance(code_node, ast.Constant) and isinstance(code_node.value, str):
+            codes.add(code_node.value)
+    return codes
+
+
+def _importer_engineering_roles(tree: ast.AST) -> tuple[str, ...]:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "engineering_roles"
+            for target in node.targets
+        ):
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            continue
+        roles = tuple(
+            item.value
+            for item in node.value.elts
+            if isinstance(item, ast.Constant) and isinstance(item.value, str)
+        )
+        if roles:
+            return roles
+    raise AssertionError("找不到 importer engineering_roles，請更新 producer inventory")
+
+
+def _producer_diagnostic_codes() -> set[str]:
+    trees = {
+        relative_path: ast.parse(
+            (_PROJECT_ROOT / relative_path).read_text(encoding="utf-8"),
+            filename=relative_path,
+        )
+        for relative_path in _DIAGNOSTIC_PRODUCER_PATHS
+    }
+    codes = set()
+    for relative_path, tree in trees.items():
+        if relative_path == "dxf_import/validation.py":
+            # validation.py 同時持有 catalog；只收集實際建構的訊息，避免
+            # catalog 自己證明自己完整。
+            codes.update(_literal_validation_message_codes(tree))
+            continue
+        codes.update(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and _DIAGNOSTIC_LITERAL_PATTERN.fullmatch(node.value)
+            and "_" in node.value
+        )
+
+    importer_tree = trees["dxf_import/importer.py"]
+    engineering_roles = _importer_engineering_roles(importer_tree)
+    codes.update(f"{role.upper()}_RECOGNITION_FAILED" for role in engineering_roles)
+    codes.update(
+        f"{role.upper()}_CENTERLINE_FAILED"
+        for role in engineering_roles
+        if role != "waler"
+    )
+    return codes - _NON_MESSAGE_UPPERCASE_LITERALS
 
 
 class _Variable:
@@ -181,6 +304,168 @@ def _problem(
 
 
 class ReviewProjectionTests(unittest.TestCase):
+    def test_problem_record_adds_chinese_display_type_without_changing_identity(self):
+        message = ValidationMessage(
+            "warning",
+            "STRUT_ONE_END_NOT_CONNECTED",
+            "S1 只有一端連接圍令。",
+            "strut",
+            ("H1",),
+            ("S1",),
+        )
+
+        record = build_problem_records(
+            _result(struts=(_strut("S1", "H1"),), messages=(message,))
+        )[0]
+
+        self.assertEqual(record.display_type, "端點連接問題")
+        self.assertEqual(record.code, message.code)
+        self.assertEqual(record.severity, message.severity)
+        self.assertEqual(record.role, message.role)
+        self.assertEqual(record.source_handles, message.source_handles)
+        self.assertEqual(record.member_ids, message.member_ids)
+
+    def test_diagnostic_code_inventory_has_one_explicit_description_source(self):
+        categories = (
+            PRESERVE_MESSAGE_CODES,
+            FORMATTER_DESCRIPTION_CODES,
+            FALLBACK_DESCRIPTION_CODES,
+        )
+        producer_codes = _producer_diagnostic_codes()
+
+        self.assertEqual(producer_codes, DXF_REVIEW_DIAGNOSTIC_CODES)
+        self.assertEqual(len(DXF_REVIEW_DIAGNOSTIC_CODES), 88)
+        self.assertEqual(set().union(*categories), DXF_REVIEW_DIAGNOSTIC_CODES)
+        for index, category in enumerate(categories):
+            self.assertTrue(
+                category.isdisjoint(set().union(*categories[index + 1 :])),
+            )
+        assert_problem_code_catalog_complete(producer_codes)
+        with self.assertRaisesRegex(ValueError, "NEW_UNCLASSIFIED_DIAGNOSTIC"):
+            assert_problem_code_catalog_complete(
+                (*DXF_REVIEW_DIAGNOSTIC_CODES, "NEW_UNCLASSIFIED_DIAGNOSTIC")
+            )
+
+    def test_special_formatters_hide_internal_terms_and_keep_locations(self):
+        fixtures = (
+            (
+                "WALER_CONTACT_FACE_UNRESOLVED",
+                "已選定來源無法建立 provisional 交點。",
+                "尚未確認正式接觸面",
+            ),
+            (
+                "AMBIGUOUS_WALER_CONNECTION",
+                "terminal identity 無法唯一決定。",
+                "無法唯一確認正式連接",
+            ),
+            (
+                "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+                "adjustment baseline 遺失（identity_invalid）。",
+                "調整基準",
+            ),
+            (
+                "WALER_CONTACT_FINALIZE_FAILED",
+                "staged finalization 失敗：RuntimeError('boom')",
+                "接觸位置無法確認",
+            ),
+        )
+        forbidden = (
+            "provisional",
+            "identity",
+            "baseline",
+            "staged finalization",
+            "RuntimeError",
+        )
+
+        for code, raw_message, expected in fixtures:
+            with self.subTest(code=code):
+                record = build_problem_records(
+                    _result(
+                        struts=(_strut("S1", "H1"),),
+                        messages=(
+                            ValidationMessage(
+                                "error",
+                                code,
+                                raw_message,
+                                "waler" if code.startswith("WALER_") else "brace",
+                                ("H1",),
+                                ("S1",),
+                            ),
+                        ),
+                    )
+                )[0]
+                self.assertIn(expected, record.description)
+                self.assertIn("S1", record.description)
+                self.assertIn("H1", record.description)
+                for token in forbidden:
+                    self.assertNotIn(token, record.description)
+
+    def test_overlap_formatter_keeps_measurements_and_formal_source_labels(self):
+        message = ValidationMessage(
+            "warning",
+            "WALER_SOURCE_OVERLAP",
+            (
+                "圍令來源 232 與 4E4 的 source-supported provisional axes "
+                "有重大共線重疊：有限重疊長度 1250.500 mm，"
+                "占較短 provisional axis 82.5%。"
+            ),
+            "waler",
+            ("232", "4E4"),
+        )
+
+        record = build_problem_records(
+            _result(
+                struts=(_strut("W6", "232"), _strut("W12", "4E4")),
+                messages=(message,),
+            )
+        )[0]
+
+        self.assertIn("W6（232）", record.description)
+        self.assertIn("W12（4E4）", record.description)
+        self.assertIn("1250.500 mm", record.description)
+        self.assertIn("82.5%", record.description)
+        self.assertNotIn("provisional", record.description)
+        self.assertNotIn("source-supported", record.description)
+
+    def test_known_and_unknown_fallback_hide_raw_diagnostic_details(self):
+        messages = (
+            ValidationMessage(
+                "error",
+                "BIM_JOIST_RECOGNITION_FAILED",
+                "reason=internal_router_error RuntimeError('secret') traceback",
+                "beam",
+                ("J01",),
+                ("BM2",),
+            ),
+            ValidationMessage(
+                "warning",
+                "NEW_DIAGNOSTIC_CODE",
+                "reason=secret_token ValueError('secret') traceback",
+                "brace",
+                ("B01",),
+                ("B7",),
+            ),
+        )
+
+        records = build_problem_records(
+            _result(
+                struts=(_strut("BM2", "J01"), _strut("B7", "B01")),
+                messages=messages,
+            )
+        )
+
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertIn("系統無法完成這項", record.description)
+            self.assertIn(record.member_ids[0], record.description)
+            self.assertIn(record.source_handles[0], record.description)
+            self.assertNotIn(record.code, record.description)
+            self.assertNotIn("reason=", record.description)
+            self.assertNotIn("Error", record.description)
+            self.assertNotIn("traceback", record.description)
+        self.assertEqual(records[0].display_type, "托梁檢核錯誤")
+        self.assertEqual(records[1].display_type, "斜撐檢核警告")
+
     def test_missing_column_decision_stays_visible_without_repair_subject(self):
         result = _result(
             messages=(
@@ -292,7 +577,7 @@ class ReviewProjectionTests(unittest.TestCase):
         unrelated_owner = _strut("W12", "4E4")
         message = ValidationMessage(
             "warning",
-            "SOURCE_REFERENCE",
+            "WALER_ENVELOPE_UNRESOLVED",
             (
                 "圍令來源 232；長度 232 mm；角度 232°；比例 232%；"
                 "小數 232.5；座標 (232, 400)；未列來源 4E4。"
@@ -321,7 +606,7 @@ class ReviewProjectionTests(unittest.TestCase):
     def test_problem_description_accepts_explicit_competing_identities(self):
         message = SimpleNamespace(
             severity="error",
-            code="STRUCTURED_COMPETITION",
+            code="WALER_ENVELOPE_AMBIGUOUS",
             message="競爭來源 A 與 B。",
             role="strut",
             source_handles=("ROOT",),
@@ -347,7 +632,7 @@ class ReviewProjectionTests(unittest.TestCase):
     def test_problem_description_naturally_sorts_multiple_owners(self):
         message = ValidationMessage(
             "error",
-            "SHARED_SOURCE",
+            "DUPLICATE_ENGINEERING_COMPONENT",
             "來源 SHARED。",
             "strut",
             ("SHARED",),
@@ -373,7 +658,7 @@ class ReviewProjectionTests(unittest.TestCase):
         )
         message = ValidationMessage(
             "warning",
-            "COMPOUND_SOURCE",
+            "WALER_ENVELOPE_UNRESOLVED",
             "圍令來源 232 / 4E4 重疊。",
             "strut",
             ("232", "4E4"),
@@ -417,8 +702,9 @@ class ReviewProjectionTests(unittest.TestCase):
             (excluded_record,),
         )
 
-        self.assertEqual(unresolved_record.description, "來源 FB7 無法辨識。")
-        self.assertEqual(excluded_record.description, "來源 FB7 無法辨識。")
+        self.assertIn("來源 FB7", unresolved_record.description)
+        self.assertIn("來源 FB7", excluded_record.description)
+        self.assertNotIn("BEAM_RECOGNITION_FAILED", unresolved_record.description)
         self.assertIn("待修-FB7", {item.display_id for item in unresolved_items})
         self.assertIn("已排除-FB7", {item.display_id for item in excluded_items})
 
@@ -578,6 +864,35 @@ class ReviewProjectionTests(unittest.TestCase):
         self.assertEqual(len(unresolved_guidance), 1)
         self.assertIn("圖層 ✓", unresolved_guidance[0])
         self.assertIn("幾何修正工具不適用", unresolved_guidance[0])
+
+    def test_overlap_guidance_uses_user_facing_source_wording(self):
+        item = ReviewItem(
+            "member:waler:W1",
+            "W1",
+            "waler",
+            "recognized",
+            "W1",
+            ("H1",),
+            ("WALER",),
+            ("LINE",),
+            "auto",
+            (
+                _problem(
+                    "error",
+                    "WALER_OVERLAP_COMPETITION",
+                    role="waler",
+                    handles=("H1",),
+                    member_ids=("W1",),
+                ),
+            ),
+            "error",
+        )
+
+        guidance = review_item_guidance(item)[0]
+
+        self.assertIn("參與辨識的來源", guidance)
+        self.assertNotIn("active sources", guidance)
+        self.assertNotIn("winner", guidance)
 
     def test_rebuilding_projection_removes_resolved_source_item(self):
         failed = _result(
@@ -1228,6 +1543,7 @@ class ReviewPresentationTests(unittest.TestCase):
             "waler",
             ("232", "4E4"),
             ("W6", "W12"),
+            "圍令來源重疊",
         )
         item = ReviewItem(
             "member:waler:W6",
@@ -1267,6 +1583,18 @@ class ReviewPresentationTests(unittest.TestCase):
         self.assertEqual(
             dialog.detail_problem_tree.rows["detail_problem_0"]["values"][-1],
             description,
+        )
+        self.assertEqual(
+            dialog.problem_tree.rows["problem_0"]["values"][1],
+            "圍令來源重疊",
+        )
+        self.assertEqual(
+            dialog.detail_problem_tree.rows["detail_problem_0"]["values"][1],
+            "圍令來源重疊",
+        )
+        self.assertNotIn(
+            "WALER_OVERLAP_COMPETITION",
+            dialog.problem_tree.rows["problem_0"]["values"],
         )
 
     def test_unresolved_issue_level_is_available_for_preview_overlay(self):

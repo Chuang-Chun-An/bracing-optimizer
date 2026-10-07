@@ -261,18 +261,6 @@ class SupportPlanEditing:
                     issue_code="invalid_steel_length",
                     message=f"❌ 鋼材長度不合法：{length} mm",
                 )
-            if kind == "shim" and length not in support.SHIM_LENGTHS:
-                return SupportPieceValidation(
-                    valid=False,
-                    issue_code="invalid_shim_length",
-                    message=f"❌ 調整塊長度不合法：{length} mm",
-                )
-            if kind == "jack" and length != support.JACK_LENGTH:
-                return SupportPieceValidation(
-                    valid=False,
-                    issue_code="invalid_jack_length",
-                    message=f"❌ 千斤頂長度必須固定為 {support.JACK_LENGTH} mm",
-                )
         return SupportPieceValidation(valid=True)
 
     @classmethod
@@ -877,6 +865,9 @@ class WalerPlanEditing:
             self.inventory.stock_items(material_spec, "圍令"),
             required_length=required_length,
         )
+        pieces = [("steel", length) for length in segments]
+        if evaluation.tail_adjustment:
+            pieces.append(("shim", evaluation.tail_adjustment))
         issue_codes = {issue.code for issue in evaluation.issues}
         errors = []
         if wales.ISSUE_SEGMENT_NOT_PURCHASABLE in issue_codes:
@@ -910,9 +901,9 @@ class WalerPlanEditing:
             "errors": errors,
             "required_length": required_length,
             "steel_length": steel_length,
-            "tail_adjustment": 0,
-            "gap": required_length - steel_length,
-            "pieces": [("steel", length) for length in segments],
+            "tail_adjustment": evaluation.tail_adjustment,
+            "gap": evaluation.gap,
+            "pieces": pieces,
         })
         if waler_id:
             legality = self._project_legality(
@@ -1075,16 +1066,21 @@ class WalerPlanEditing:
                 ])
 
         valid = evaluation.valid
-        gap = required_length - current_length
+        tail_adjustment = evaluation.tail_adjustment
+        gap = evaluation.gap
         if valid:
             summary = "✅ 合法"
             details = [
                 "✅ 合法",
                 f"需求長度：{required_length} mm",
                 f"標準鋼材總長：{current_length} mm",
+            ]
+            if tail_adjustment:
+                details.append(f"尾端調整塊：{tail_adjustment} mm")
+            details.extend([
                 f"現場處理餘量：{gap} mm",
                 "✅ 所有接頭均符合規範",
-            ]
+            ])
         elif len(violations) == 1:
             summary = f"❌ {violations[0]}"
         else:
@@ -1101,7 +1097,7 @@ class WalerPlanEditing:
             "warnings": warnings,
             "required_length": required_length,
             "current_length": current_length,
-            "tail_adjustment": 0,
+            "tail_adjustment": tail_adjustment,
             "gap": gap,
         }
 

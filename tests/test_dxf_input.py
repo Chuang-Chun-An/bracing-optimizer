@@ -21,6 +21,7 @@ from dxf_import.controllers import SelectionController
 from dxf_import.dialog import DXFImportDialog
 from dxf_import.importer import (
     DEFAULT_LAYER_MAPPING,
+    DXFImporter,
     Y1A_LAYER_MAPPING,
     Y29_LAYER_MAPPING,
     Y05_LAYER_MAPPING,
@@ -28,6 +29,10 @@ from dxf_import.importer import (
     import_dxf,
     read_dxf_layers,
 )
+from dxf_import.waler_engineering_line_repair import (
+    formalize_waler_engineering_line,
+)
+from tests.sample_dxf_assets import Y29_DXF_PATH
 from dxf_import.models import (
     CandidatePoint,
     Column,
@@ -76,13 +81,114 @@ class DXFInputRecognitionTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    @unittest.skipUnless(Y29_DXF_PATH.is_file(), "Y29 DXF test asset unavailable")
+    def test_y29_w14_candidate_line_can_be_adopted_as_formal_contact_face(self):
+        importer = DXFImporter(Y29_DXF_PATH).read()
+        roles = {
+            layer: DXFImportDialog.USE_TO_ROLE[label]
+            for layer, label in Y29_LAYER_MAPPING.items()
+            if layer in importer.layer_names
+        }
+        result = importer.convert(layer_roles=roles)
+        waler = next(item for item in result.walers if "58D" in item.source_handles)
+        candidate = next(item for item in waler.line_candidates if item.id == "line_1")
+        points = {point.id: point for point in waler.candidate_points}
+
+        self.assertEqual(waler.id, "W14")
+        self.assertEqual(waler.selected_start_point_id, "P01")
+        self.assertEqual(waler.selected_end_point_id, "P02")
+        self.assertEqual(waler.recommended_start_point_id, "P01")
+        self.assertEqual(waler.recommended_end_point_id, "P02")
+        self.assertEqual(points["P01"].world_point, waler.world_start)
+        self.assertEqual(points["P02"].world_point, waler.world_end)
+        self.assertEqual(candidate.world_start, points["P01"].world_point)
+        self.assertEqual(candidate.world_end, points["P02"].world_point)
+
+        store = CandidatePointStore(
+            min(
+                importer.tolerances.duplicate_tolerance_mm,
+                importer.tolerances.endpoint_tolerance_mm,
+                1.0,
+            )
+        )
+        store.register_component(waler.id, waler.candidate_points)
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = SimpleNamespace(world_result=result, revision=0)
+        dialog.candidate_point_store = store
+        session = dialog._build_waler_formalization_session(waler.id)
+        self.assertEqual(session.selected_start_point_id, "P01")
+        self.assertEqual(session.selected_end_point_id, "P02")
+
+        staged = formalize_waler_engineering_line(
+            result,
+            waler.source_handles,
+            candidate.world_start,
+            candidate.world_end,
+            input_kind="manual_candidate_points",
+            selected_candidate_id=candidate.id,
+        )
+
+        repaired = next(item for item in staged.walers if "58D" in item.source_handles)
+        review = next(
+            item for item in staged.waler_contact_reviews
+            if item.waler_id == repaired.id
+        )
+        self.assertEqual(repaired.id, "W14")
+        self.assertEqual(repaired.contact_face_state, "formal")
+        self.assertEqual(repaired.engineering_line_authority, "manual_repair")
+        self.assertEqual(repaired.selected_candidate_id, "line_1")
+        self.assertEqual(repaired.source_width_state, "unique")
+        self.assertAlmostEqual(repaired.source_width, 400.0)
+        self.assertIsNotNone(review.support_normal_world)
+        self.assertFalse(
+            {
+                "WALER_ENVELOPE_AMBIGUOUS",
+                "WALER_ENVELOPE_UNRESOLVED",
+                "WALER_CONTACT_FACE_AMBIGUOUS",
+                "WALER_CONTACT_FACE_UNRESOLVED",
+            }
+            & {
+                message.code
+                for message in staged.messages
+                if message.role == "waler"
+                and tuple(message.source_handles) == ("58D",)
+            }
+        )
+        self.assertFalse(staged.can_import)
+
+    @unittest.skipUnless(Y29_DXF_PATH.is_file(), "Y29 DXF test asset unavailable")
+    def test_y29_w14_cad_line_uses_same_formalization_contract(self):
+        importer = DXFImporter(Y29_DXF_PATH).read()
+        roles = {
+            layer: DXFImportDialog.USE_TO_ROLE[label]
+            for layer, label in Y29_LAYER_MAPPING.items()
+            if layer in importer.layer_names
+        }
+        result = importer.convert(layer_roles=roles)
+        waler = next(item for item in result.walers if "58D" in item.source_handles)
+        candidate = waler.line_candidates[0]
+
+        staged = formalize_waler_engineering_line(
+            result,
+            waler.source_handles,
+            candidate.world_start,
+            candidate.world_end,
+            input_kind="cad_manual",
+        )
+
+        repaired = next(item for item in staged.walers if "58D" in item.source_handles)
+        self.assertEqual(repaired.contact_face_state, "formal")
+        self.assertEqual(repaired.engineering_line_authority, "manual_repair")
+        self.assertEqual(repaired.selection_source, "cad_manual")
+        self.assertEqual(repaired.source_width_state, "unique")
+
     def new_doc(self):
         doc = ezdxf.new("R2010")
         for layer in LAYERS:
             doc.layers.add(layer)
         return doc
 
-    def test_layer_defaults_are_scoped_by_filename_and_saved_selection_wins(self):
+    def test_layer_defaults_are_scoped_by_project_code_and_saved_selection_wins(self):
         self.assertEqual(
             DXFImportDialog.LAYER_USE_OPTIONS,
             (
@@ -151,7 +257,22 @@ class DXFInputRecognitionTests(unittest.TestCase):
             ),
             expected_y05_defaults,
         )
+        self.assertEqual(
+            default_layer_mapping_for_file("C:/drawings/Y1A_2026-10-05.dxf"),
+            expected_defaults,
+        )
+        self.assertEqual(
+            default_layer_mapping_for_file("C:/drawings/Y29車站_修正版.dxf"),
+            expected_y29_defaults,
+        )
+        self.assertEqual(
+            default_layer_mapping_for_file("C:/drawings/施工圖-Y05-rev2.dxf"),
+            expected_y05_defaults,
+        )
         self.assertEqual(default_layer_mapping_for_file("other.dxf"), {})
+        self.assertEqual(default_layer_mapping_for_file("Y290.dxf"), {})
+        self.assertEqual(default_layer_mapping_for_file("MY05.dxf"), {})
+        self.assertEqual(default_layer_mapping_for_file("Y05-to-Y29.dxf"), {})
         self.assertNotIn("圍令", Y1A_LAYER_MAPPING)
         self.assertNotIn("L-SITE-WALL", Y29_LAYER_MAPPING)
         self.assertNotIn("I-WALL", Y1A_LAYER_MAPPING)

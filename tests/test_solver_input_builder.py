@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from main import SupportInputApp
+from bracing_optimizer.algorithms import support
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.solver_input_builder import (
     InventoryLookup,
@@ -58,6 +59,41 @@ class InventoryLookupTests(unittest.TestCase):
             "qty": 2,
         }])
         self.assertEqual(inventory.quantity("H350", "圍令", 8000), 7)
+
+    def test_blank_spec_resolves_default_lengths_with_quantity_99(self):
+        inventory = InventoryLookup([])
+
+        lengths = inventory.purchasable_lengths("", "圍令")
+        stock_items = inventory.stock_items("", "圍令")
+
+        self.assertEqual(lengths, support.STEEL_LENGTHS)
+        self.assertEqual(
+            [item["length"] for item in stock_items],
+            support.STEEL_LENGTHS,
+        )
+        self.assertTrue(stock_items)
+        self.assertTrue(all(item["qty"] == 99 for item in stock_items))
+
+    def test_explicit_quantity_five_is_preserved(self):
+        inventory = InventoryLookup([{
+            "ItemCode": "W-60",
+            "Spec": "H400",
+            "Usage": "圍令",
+            "Length": 6000,
+            "Qty": 5,
+        }])
+
+        self.assertEqual(inventory.purchasable_lengths("H400", "圍令"), [6000])
+        self.assertEqual(
+            inventory.stock_items("H400", "圍令"),
+            [{"id": "W-60", "length": 6000, "qty": 5}],
+        )
+
+    def test_named_spec_without_inventory_resolves_explicit_empty_context(self):
+        inventory = InventoryLookup([])
+
+        self.assertEqual(inventory.purchasable_lengths("H400", "圍令"), [])
+        self.assertEqual(inventory.stock_items("H400", "圍令"), [])
 
 
 class SupportInputBuilderTests(unittest.TestCase):

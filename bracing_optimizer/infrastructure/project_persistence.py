@@ -42,10 +42,23 @@ CRITICAL_COMPONENT_TABLES = ("walers", "struts", "braces")
 class ProjectPersistenceError(RuntimeError):
     """A project operation failed at a named, user-actionable stage."""
 
-    def __init__(self, stage: str, detail: str):
+    def __init__(
+        self,
+        stage: str,
+        detail: str,
+        *,
+        recovery_path: str | Path | None = None,
+        managed_path: str | Path | None = None,
+    ):
         super().__init__(f"{stage}：{detail}")
         self.stage = stage
         self.detail = detail
+        self.recovery_path = (
+            Path(recovery_path).resolve() if recovery_path is not None else None
+        )
+        self.managed_path = (
+            Path(managed_path).resolve() if managed_path is not None else None
+        )
 
 
 class DxfStatus(str, Enum):
@@ -678,9 +691,21 @@ class DxfAssetManager:
         backup_path = project_path.with_name(project_path.name + ".bak")
         copied_dxf = False
         asset_replaced = False
+        preserve_rollback = False
         had_managed_asset = managed_path.is_file()
         stage = "建立專案資料夾失敗"
         final_payload = copy.deepcopy(dict(payload))
+        if dxf_rollback.exists():
+            raise ProjectPersistenceError(
+                "儲存前檢查失敗",
+                (
+                    "發現尚未處理的 DXF 救援檔，已在建立暫存檔前停止儲存。\n"
+                    f"救援檔：{dxf_rollback.resolve()}\n"
+                    f"管理副本：{managed_path.resolve()}"
+                ),
+                recovery_path=dxf_rollback,
+                managed_path=managed_path,
+            )
         try:
             project_dir.mkdir(parents=True, exist_ok=True)
             self._checkpoint("project_directory_created")
@@ -765,16 +790,37 @@ class DxfAssetManager:
             os.replace(json_temporary, project_path)
         except ProjectPersistenceError:
             if asset_replaced:
-                self._rollback_asset(managed_path, dxf_rollback, had_managed_asset)
+                try:
+                    self._rollback_asset(
+                        managed_path,
+                        dxf_rollback,
+                        had_managed_asset,
+                    )
+                except ProjectPersistenceError:
+                    preserve_rollback = True
+                    raise
             raise
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
             if asset_replaced:
-                self._rollback_asset(managed_path, dxf_rollback, had_managed_asset)
+                try:
+                    self._rollback_asset(
+                        managed_path,
+                        dxf_rollback,
+                        had_managed_asset,
+                    )
+                except ProjectPersistenceError:
+                    preserve_rollback = True
+                    raise
             raise ProjectPersistenceError(stage, str(exc)) from exc
         finally:
-            for temporary in (json_temporary, dxf_temporary, dxf_rollback):
+            for temporary in (json_temporary, dxf_temporary):
                 try:
                     temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if not preserve_rollback:
+                try:
+                    dxf_rollback.unlink(missing_ok=True)
                 except OSError:
                     pass
 
@@ -793,9 +839,17 @@ class DxfAssetManager:
             elif not had_asset:
                 target.unlink(missing_ok=True)
         except OSError as exc:
+            recovery_path = rollback.resolve()
+            managed_path = target.resolve()
             raise ProjectPersistenceError(
                 "交易回復失敗",
-                f"DXF 管理副本可能需要人工檢查：{target}\n{exc}",
+                (
+                    "DXF 管理副本可能需要人工檢查。\n"
+                    f"救援檔：{recovery_path}\n"
+                    f"管理副本：{managed_path}\n{exc}"
+                ),
+                recovery_path=recovery_path,
+                managed_path=managed_path,
             ) from exc
 
 

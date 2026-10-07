@@ -20,6 +20,7 @@ from bracing_optimizer.domain.material_rules import (
     MaterialRatioTargets,
     classify_length,
 )
+from bracing_optimizer.algorithms.cancellation import CancellationToken
 
 
 GLOBAL_WALER_ALGORITHM_VERSION = "waler_global_dp_v1"
@@ -104,7 +105,11 @@ class WalerGlobalDiagnostics:
     algorithm_version: str = GLOBAL_WALER_ALGORITHM_VERSION
     waler_count: int = 0
     raw_candidate_count: int = 0
+    raw_candidate_counts_by_waler: Mapping[str, int] = field(default_factory=dict)
     retained_candidate_count_after_signature_merge: int = 0
+    retained_candidate_counts_by_waler: Mapping[str, int] = field(
+        default_factory=dict
+    )
     transition_count: int = 0
     merged_state_count: int = 0
     cumulative_state_count: int = 0
@@ -124,8 +129,14 @@ class WalerGlobalDiagnostics:
             "algorithm_version": self.algorithm_version,
             "waler_count": self.waler_count,
             "raw_candidate_count": self.raw_candidate_count,
+            "raw_candidate_counts_by_waler": dict(
+                self.raw_candidate_counts_by_waler
+            ),
             "retained_candidate_count_after_signature_merge": (
                 self.retained_candidate_count_after_signature_merge
+            ),
+            "retained_candidate_counts_by_waler": dict(
+                self.retained_candidate_counts_by_waler
             ),
             "transition_count": self.transition_count,
             "merged_state_count": self.merged_state_count,
@@ -258,14 +269,20 @@ def build_global_candidate(
 
 def merge_equivalent_candidates(
     candidates: Sequence[WalerGlobalCandidate],
+    *,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[WalerGlobalCandidate, ...]:
     """Keep the globally dominant representative of each material signature."""
 
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     representatives: dict[
         tuple[int, int, int, int, int],
         WalerGlobalCandidate,
     ] = {}
     for candidate in sorted(candidates, key=lambda item: item.candidate_rank):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         current = representatives.get(candidate.material_signature)
         candidate_key = (
             _normalized_score(candidate.local_regret),
@@ -279,6 +296,8 @@ def merge_equivalent_candidates(
         ) if current is not None else None
         if current is None or candidate_key < current_key:
             representatives[candidate.material_signature] = candidate
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     return tuple(sorted(
         representatives.values(),
         key=lambda item: item.candidate_rank,
@@ -313,6 +332,8 @@ def solve_global_waler_candidates(
     *,
     waler_order: Sequence[str] | None = None,
     raw_candidate_count: int | None = None,
+    raw_candidate_counts_by_waler: Mapping[str, int] | None = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> tuple[WalerGlobalSolution, WalerGlobalDiagnostics]:
     """Select exactly one candidate per Waler by deterministic exact DP."""
 
@@ -328,14 +349,22 @@ def solve_global_waler_candidates(
     missing = []
     calculated_raw_count = 0
     for waler_id in order:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         raw_candidates = tuple(candidates_by_waler.get(waler_id, ()) or ())
         calculated_raw_count += len(raw_candidates)
-        retained = merge_equivalent_candidates(raw_candidates)
+        retained = merge_equivalent_candidates(
+            raw_candidates,
+            cancellation_token=cancellation_token,
+        )
         if not retained:
             missing.append(waler_id)
         groups[waler_id] = retained
 
     retained_count = sum(len(group) for group in groups.values())
+    retained_counts_by_waler = {
+        waler_id: len(groups[waler_id]) for waler_id in order
+    }
     base_diagnostics = {
         "waler_count": len(order),
         "raw_candidate_count": (
@@ -343,7 +372,14 @@ def solve_global_waler_candidates(
             if raw_candidate_count is None
             else int(raw_candidate_count)
         ),
+        "raw_candidate_counts_by_waler": dict(
+            raw_candidate_counts_by_waler or {
+                waler_id: len(tuple(candidates_by_waler.get(waler_id, ()) or ()))
+                for waler_id in order
+            }
+        ),
         "retained_candidate_count_after_signature_merge": retained_count,
+        "retained_candidate_counts_by_waler": retained_counts_by_waler,
         "target_ratio": targets.as_dict(),
     }
     if not order:
@@ -372,8 +408,12 @@ def solve_global_waler_candidates(
     max_active_state_count = 1
 
     for waler_id in order:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         next_states: dict[tuple[int, int, int, int], _PartialPath] = {}
         for state, path in states.items():
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             for candidate in groups[waler_id]:
                 transition_count += 1
                 next_state = tuple(
@@ -407,7 +447,11 @@ def solve_global_waler_candidates(
         max_active_state_count = max(max_active_state_count, active_count)
 
     final_options = []
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     for state, path in states.items():
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         short_count, mid_count, long_count, out_count = state
         ratios = project_ratio_values(
             short_count,

@@ -124,6 +124,7 @@ class CriticalMemberMatchResult:
 class ManualOverrideRebindResult:
     rebound: tuple[SourceManualOverride, ...] = ()
     requires_review_labels: tuple[str, ...] = ()
+    disabled_labels: tuple[str, ...] = ()
 
 
 def critical_member_identity_map(
@@ -156,12 +157,25 @@ def rebind_manual_overrides(
     identity_map = critical_member_identity_map(matches)
     rebound: list[SourceManualOverride] = []
     requires_review: list[str] = []
+    disabled: list[str] = []
     for override in overrides:
         identity = canonical_source_identity(
             override.role,
             override.source_handles,
         )
         candidate_handles = identity_map.get(identity)
+        if override.waler_engineering_line_formalized:
+            labels = manual_override_labels(override)
+            if (
+                override.role == "waler"
+                and candidate_handles == normalize_source_handles(
+                    override.source_handles
+                )
+            ):
+                requires_review.extend(labels)
+            else:
+                disabled.extend(labels)
+            continue
         if candidate_handles is None:
             requires_review.extend(manual_override_labels(override))
             continue
@@ -174,6 +188,7 @@ def rebind_manual_overrides(
     return ManualOverrideRebindResult(
         rebound=tuple(rebound),
         requires_review_labels=tuple(dict.fromkeys(requires_review)),
+        disabled_labels=tuple(dict.fromkeys(disabled)),
     )
 
 

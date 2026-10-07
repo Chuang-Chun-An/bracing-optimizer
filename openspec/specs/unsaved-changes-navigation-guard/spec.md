@@ -1,5 +1,11 @@
 # unsaved-changes-navigation-guard Specification
 
+## 閱讀導航
+
+- **必讀**：「Dirty Project 必須提供 Save Discard Cancel 決策」、「Destructive continuation 必須延後到 guard 成功之後」與「New 與 Open 必須共用相同 guard semantics」；三者定義 navigation safety 的共同契約。
+- **條件式閱讀**：「Save 分支必須沿用目前 Project 的既有儲存路徑」、「儲存嘗試必須回報明確結果」與「Open 目標取消或缺失不得改變目前 Project」；修改 Save outcome 或 Open target selection 時必讀。
+- **可先跳過**：Project persistence schema、DXF、Solver、Domain 與各 destination 成功後的專屬操作；本 capability 只定義 destructive navigation 的 guard 與 continuation 邊界。
+
 ## Purpose
 
 定義 Main UI 在建立新專案或開啟其他專案前，如何保護未儲存修改、取得 Save／Discard／Cancel 決策，並確保 destructive navigation 只在安全條件成立後執行。
@@ -94,17 +100,33 @@ navigation guard 使用的儲存流程 MUST 明確區分 `saved`、`cancelled` �
 - **THEN** 系統可執行且只執行一次原本的 New 或 Open continuation
 
 ### Requirement: Open 目標取消或缺失不得改變目前 Project
-系統 SHALL 沿用目前 Open target selection 入口；若使用者取消 Open 目標選擇，或目前沒有有效目標可開啟，系統不得進入 destructive navigation。這項要求不新增另一套 Open file picker。
+
+系統 SHALL由「檔案 → 開啟專案…」顯示目前Project repository的單選視窗，並只在使用者選定一個有效Project目標後進入既有Open navigation guard。若使用者取消或關閉選擇視窗、repository沒有可選Project、沒有有效選取，或選定目標在進入guard前已失效，系統不得進入destructive navigation。這項要求以應用程式內repository selection取代既有工具列selector，但不新增任意filesystem Open file picker。
 
 #### Scenario: Open 目標選擇被取消
-- **WHEN** 使用者取消 Open 目標選擇
+
+- **WHEN** 使用者按Cancel或關閉「開啟專案」選擇視窗
 - **THEN** 系統不得顯示會導致目前修改被放棄的確認流程
-- **AND** 目前 Project、dirty state、Project path、committed results 與 UI selection MUST 保持不變
+- **AND** 目前Project、dirty state、Project path、committed results與UI selection MUST保持不變
 
 #### Scenario: Open 沒有有效選取專案
-- **WHEN** 使用者執行 Open，但目前沒有有效的選取 Project
-- **THEN** 系統依既有 presentation pattern 提示選取 Project
-- **AND** 不得儲存、清空或取代目前 Project
+
+- **WHEN** 使用者執行Open，但repository為空、目前沒有有效單一選取，或選定目標已失效
+- **THEN** 系統 SHALL留在或返回Project選擇流程並提供可理解的無可用目標狀態
+- **AND** 不得儲存、清空或取代目前Project
+- **AND** 不得執行未儲存變更guard
+
+#### Scenario: Open 先取得目標再執行 guard
+
+- **WHEN** 使用者在Project選擇視窗選定一個有效目標並執行Open
+- **THEN** 系統 SHALL先固定該目標，再依目前Project dirty state執行既有navigation guard
+- **AND** 只有guard回報可繼續後才可載入該目標
+
+#### Scenario: Guard 取消後保留選定目標以外的正式狀態
+
+- **WHEN** 使用者已選定有效Open目標，但後續Save As取消、Save失敗或navigation guard選擇Cancel
+- **THEN** 目標Project MUST NOT被載入
+- **AND** 目前Project、dirty state、Project path、committed results與UI selection MUST保持不變
 
 ### Requirement: New 與 Open 必須共用相同 guard semantics
 New 與 Open MUST 使用同一套 clean bypass、Save／Discard／Cancel、明確 save outcome 與 continuation gate semantics；兩個入口不得各自定義互相漂移的未儲存變更規則。

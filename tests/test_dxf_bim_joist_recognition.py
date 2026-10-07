@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 import unittest
 from dataclasses import replace
-from pathlib import Path
 from unittest.mock import patch
 
 import ezdxf
@@ -44,12 +43,7 @@ from dxf_import.joist_recognition import (
     pair_spacing_is_eligible,
     recognize_bim_joist,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-Y05_DXF_PATH = next(PROJECT_ROOT.glob("670-CO-Y05*.dxf"), None)
-Y1A_DXF_PATH = PROJECT_ROOT / "Y1A擋土支撐簡化版.dxf"
-Y29_DXF_PATH = PROJECT_ROOT / "Y29_test.dxf"
+from tests.sample_dxf_assets import Y05_DXF_PATH, Y1A_DXF_PATH, Y29_DXF_PATH
 
 
 def _line(

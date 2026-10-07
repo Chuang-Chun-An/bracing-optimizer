@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -27,6 +28,8 @@ class ExcelResultExporterTests(unittest.TestCase):
                 material_type="steel",
                 material_spec="H350",
                 length=9000,
+                valid=False,
+                reasons=("鋼材總長不足", "接頭落入禁止區"),
             ),
             MaterialDetailRow(
                 result_id="Z1",
@@ -71,7 +74,7 @@ class ExcelResultExporterTests(unittest.TestCase):
                 detail = workbook["材料明細"]
                 summary = workbook["材料彙總"]
                 self.assertEqual(
-                    tuple(detail.cell(4, column).value for column in range(1, 11)),
+                    tuple(detail.cell(4, column).value for column in range(1, 13)),
                     DETAIL_HEADERS,
                 )
                 self.assertEqual(
@@ -79,7 +82,7 @@ class ExcelResultExporterTests(unittest.TestCase):
                     SUMMARY_HEADERS,
                 )
                 self.assertEqual(
-                    [detail.cell(5, column).value for column in range(1, 11)],
+                    [detail.cell(5, column).value for column in range(1, 13)],
                     [
                         1,
                         "圍令",
@@ -91,8 +94,12 @@ class ExcelResultExporterTests(unittest.TestCase):
                         "H350",
                         9000,
                         1,
+                        "不合法",
+                        "鋼材總長不足\n接頭落入禁止區",
                     ],
                 )
+                self.assertEqual(detail["K6"].value, "合法")
+                self.assertIsNone(detail["L6"].value)
                 self.assertEqual(detail["G6"].value, "千斤頂")
                 self.assertEqual(detail["H6"].value, "未設定")
                 self.assertEqual(detail["I2"].value, "=SUM(J5:J6)")
@@ -111,6 +118,45 @@ class ExcelResultExporterTests(unittest.TestCase):
         self.assertEqual(report.detail_row_count, 2)
         self.assertEqual(report.material_quantity, 2)
         self.assertEqual(report.summary_row_count, 1)
+
+    def test_export_keeps_canonical_waler_adjustment_after_steel_rows(self):
+        rows = [
+            MaterialDetailRow(
+                result_id="W1-plan",
+                usage="圍令",
+                member_id="W1",
+                zoning="",
+                piece_index=index,
+                material_type=material_type,
+                material_spec="H400" if material_type == "steel" else "",
+                length=length,
+            )
+            for index, (material_type, length) in enumerate(
+                (("steel", 8000), ("steel", 8000), ("shim", 300)),
+                start=1,
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "waler-tail.xlsx"
+            ExcelResultExporter().export(
+                output_path,
+                rows,
+                [],
+                project_name="測試專案",
+            )
+
+            workbook = load_workbook(output_path, read_only=True)
+            try:
+                detail = workbook["材料明細"]
+                self.assertEqual(
+                    [
+                        (detail[f"F{row}"].value, detail[f"G{row}"].value, detail[f"I{row}"].value)
+                        for row in (5, 6, 7)
+                    ],
+                    [(1, "鋼材", 8000), (2, "鋼材", 8000), (3, "調整塊", 300)],
+                )
+            finally:
+                workbook.close()
 
     def test_invalid_material_does_not_replace_existing_destination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -131,6 +177,68 @@ class ExcelResultExporterTests(unittest.TestCase):
                 ExcelResultExporter().export(
                     output_path,
                     [invalid_row],
+                    [],
+                    project_name="測試專案",
+                )
+
+            self.assertEqual(
+                output_path.read_bytes(),
+                b"existing workbook placeholder",
+            )
+
+    def test_same_member_material_rows_keep_identical_legality(self):
+        rows = [
+            MaterialDetailRow(
+                result_id="Z1",
+                usage="支撐",
+                member_id="S1",
+                zoning="Z1",
+                piece_index=index,
+                material_type="steel",
+                material_spec="H400",
+                length=length,
+                valid=False,
+                reasons=("待修正",),
+            )
+            for index, length in enumerate((6000, 8000), start=1)
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "same-member.xlsx"
+            ExcelResultExporter().export(
+                output_path,
+                rows,
+                [],
+                project_name="測試專案",
+            )
+
+            workbook = load_workbook(output_path, read_only=True)
+            try:
+                detail = workbook["材料明細"]
+                self.assertEqual(
+                    [(detail[f"K{row}"].value, detail[f"L{row}"].value) for row in (5, 6)],
+                    [("不合法", "待修正"), ("不合法", "待修正")],
+                )
+            finally:
+                workbook.close()
+
+    def test_staged_validation_failure_does_not_replace_destination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "existing.xlsx"
+            output_path.write_bytes(b"existing workbook placeholder")
+
+            with (
+                patch(
+                    "bracing_optimizer.infrastructure.excel_result_export._validate_staged_workbook",
+                    side_effect=ExcelResultExportError("合法性欄位內容驗證失敗"),
+                ),
+                self.assertRaisesRegex(
+                    ExcelResultExportError,
+                    "合法性欄位內容驗證失敗",
+                ),
+            ):
+                ExcelResultExporter().export(
+                    output_path,
+                    self.detail_rows(),
                     [],
                     project_name="測試專案",
                 )

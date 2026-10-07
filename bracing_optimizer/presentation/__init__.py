@@ -4,6 +4,8 @@ from .dialogs.selection_dialogs import (
     WalerSelectionDialog,
     ZoningSelectionDialog,
 )
+from .dialogs.software_information_dialog import SoftwareInformationDialog
+from .dialogs.project_selection_dialog import ProjectSelectionDialog
 from .dialogs.solver_dialog_base import (
     SolverDialogThreadBridge,
     TextRedirector,
@@ -21,7 +23,9 @@ from .widgets.preview_toolbar import PreviewNavigationToolbar
 
 __all__ = [
     "PreviewNavigationToolbar",
+    "ProjectSelectionDialog",
     "SolverDialogThreadBridge",
+    "SoftwareInformationDialog",
     "SupportSolverDialog",
     "TextRedirector",
     "WalerSelectionDialog",

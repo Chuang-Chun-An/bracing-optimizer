@@ -45,6 +45,7 @@ from .geometry import (
     _same_line,
     _same_point,
     _segment_distance,
+    _supporting_line_separation,
     _unit,
     _vector,
 )
@@ -146,6 +147,7 @@ class _Candidate:
     brace_terminal_verdict: BraceTerminalVerdict | None = None
     waler_terminal_topology: tuple[StrutTerminalTopology, ...] = ()
     waler_contact_face_state: str = "provisional"
+    waler_source_width_state: str = "unknown"
     selected_rail_lines: tuple[tuple[Point, Point], ...] = ()
     corner_brace_candidate_kind: str = ""
     corner_brace_group_key: str = ""
@@ -881,613 +883,7 @@ def _corner_brace_rail_separation(
     segment-separation helper.
     """
 
-    return (
-        _line_distance(_midpoint(*first), *second)
-        + _line_distance(_midpoint(*second), *first)
-    ) / 2.0
-
-
-def _legacy_corner_brace_candidates_from_group(
-    group: _GeometryGroup,
-    tolerances: GeometryTolerances,
-    *,
-    external_occluding_lines: Sequence[tuple[Point, Point]] = (),
-) -> tuple[list[_Candidate], list[ValidationMessage]]:
-    """Recognize each corner brace using its rails and connection plates.
-
-    A fabrication block may contain a left and a right corner brace.  Each
-    brace is defined by two parallel long edges and one transverse connection
-    plate at each end; therefore one INSERT can intentionally create two
-    engineering members.  Plate midpoints are only the preliminary recognition
-    axis.  The later refinement step uses the rail midline intersections as the
-    engineering endpoints.
-    """
-
-    segments = [
-        segment
-        for primitive in group.primitives
-        for segment in primitive.segments()
-        if _length(*segment) > 1e-9
-    ]
-    rejected: list[tuple[float, tuple[str, ...]]] = []
-
-    def connecting_plates(
-        first_point: Point,
-        second_point: Point,
-        excluded: set[int],
-    ) -> tuple[tuple[int, tuple[Point, Point], float], ...]:
-        matches: list[tuple[float, int, tuple[Point, Point]]] = []
-        for index, segment in enumerate(segments):
-            if index in excluded:
-                continue
-            direct = max(
-                _distance(segment[0], first_point),
-                _distance(segment[1], second_point),
-            )
-            reverse = max(
-                _distance(segment[1], first_point),
-                _distance(segment[0], second_point),
-            )
-            error = min(direct, reverse)
-            if error <= tolerances.endpoint_tolerance_mm:
-                matches.append((error, index, segment))
-        return tuple(
-            (index, segment, error)
-            for error, index, segment in sorted(
-                matches,
-                key=lambda item: (
-                    item[0],
-                    _ordered_line(*item[2]),
-                    item[1],
-                ),
-            )
-        )
-
-    def aligned_pair(
-        first: tuple[Point, Point],
-        second: tuple[Point, Point],
-    ) -> tuple[tuple[Point, Point], tuple[Point, Point]]:
-        direct_error = _distance(first[0], second[0]) + _distance(
-            first[1],
-            second[1],
-        )
-        reverse_error = _distance(first[0], second[1]) + _distance(
-            first[1],
-            second[0],
-        )
-        aligned_second = (
-            second
-            if direct_error <= reverse_error
-            else (second[1], second[0])
-        )
-        return first, aligned_second
-
-    def hypotheses_equivalent(
-        first: _CornerBraceRailHypothesis,
-        second: _CornerBraceRailHypothesis,
-    ) -> bool:
-        # CornerBrace block definitions commonly repeat the same rail/end
-        # plate with small drafting offsets.  D4 treats these as geometric
-        # equivalents using the existing endpoint tolerance, before any
-        # splittability/ambiguity decision; ordering or score must not choose
-        # between them.
-        tolerance = tolerances.endpoint_tolerance_mm
-        first_rails = first.selected_rail_lines
-        second_rails = second.selected_rail_lines
-        rails_equal = (
-            _same_line(first_rails[0], second_rails[0], tolerance)
-            and _same_line(first_rails[1], second_rails[1], tolerance)
-        ) or (
-            _same_line(first_rails[0], second_rails[1], tolerance)
-            and _same_line(first_rails[1], second_rails[0], tolerance)
-        )
-        if not rails_equal:
-            return False
-
-        def plate_lines(
-            hypothesis: _CornerBraceRailHypothesis,
-        ) -> tuple[tuple[Point, Point], ...]:
-            return tuple(
-                _ordered_line(*plate[1])
-                for plate in (hypothesis.start_plate, hypothesis.end_plate)
-                if plate is not None
-            )
-
-        first_plates = plate_lines(first)
-        second_plates = plate_lines(second)
-        return len(first_plates) == len(second_plates) and all(
-            any(_same_line(line, other, tolerance) for other in second_plates)
-            for line in first_plates
-        )
-
-    def deduplicate_hypotheses(
-        hypotheses: Sequence[_CornerBraceRailHypothesis],
-    ) -> list[_CornerBraceRailHypothesis]:
-        unique: list[_CornerBraceRailHypothesis] = []
-        for hypothesis in sorted(
-            hypotheses,
-            key=lambda item: (
-                item.selected_rail_lines,
-                -item.separation,
-                -item.length_ratio,
-            ),
-        ):
-            if not any(
-                hypotheses_equivalent(hypothesis, existing)
-                for existing in unique
-            ):
-                unique.append(hypothesis)
-        return unique
-
-    def hypothesis_conflicts(
-        first: _CornerBraceRailHypothesis,
-        second: _CornerBraceRailHypothesis,
-    ) -> bool:
-        first_rails = {first.first_index, first.second_index}
-        second_rails = {second.first_index, second.second_index}
-        if first_rails.intersection(second_rails):
-            return True
-        first_plates = {
-            plate[0]
-            for plate in (first.start_plate, first.end_plate)
-            if plate is not None
-        }
-        second_plates = {
-            plate[0]
-            for plate in (second.start_plate, second.end_plate)
-            if plate is not None
-        }
-        return bool(first_plates.intersection(second_plates))
-
-    def unique_splittable_set(
-        hypotheses: Sequence[_CornerBraceRailHypothesis],
-    ) -> tuple[list[_CornerBraceRailHypothesis], bool]:
-        ordered = list(hypotheses)
-        best_size = -1
-        best_sets: list[tuple[int, ...]] = []
-
-        def search(index: int, chosen: tuple[int, ...]) -> None:
-            nonlocal best_size, best_sets
-            if len(chosen) + len(ordered) - index < best_size:
-                return
-            if index == len(ordered):
-                size = len(chosen)
-                if size > best_size:
-                    best_size = size
-                    best_sets = [chosen]
-                elif size == best_size:
-                    best_sets.append(chosen)
-                return
-            search(index + 1, chosen)
-            candidate = ordered[index]
-            if not any(
-                hypothesis_conflicts(candidate, ordered[selected_index])
-                for selected_index in chosen
-            ):
-                search(index + 1, (*chosen, index))
-
-        search(0, ())
-        nonempty_sets = [item for item in best_sets if item]
-        if not nonempty_sets:
-            return [], False
-        unique_sets = tuple(dict.fromkeys(nonempty_sets))
-        if len(unique_sets) != 1:
-            return [], True
-        return [ordered[index] for index in unique_sets[0]], False
-
-    def source_points() -> tuple[Point, ...]:
-        return tuple(
-            dict.fromkeys(
-                point
-                for primitive in group.primitives
-                for point in primitive.points
-            )
-        )
-
-    def candidate_from_hypothesis(
-        hypothesis: _CornerBraceRailHypothesis,
-        *,
-        kind: str,
-    ) -> _Candidate:
-        if kind == "complete":
-            assert hypothesis.start_plate is not None
-            assert hypothesis.end_plate is not None
-            start, end = _ordered_line(
-                _midpoint(*hypothesis.start_plate[1]),
-                _midpoint(*hypothesis.end_plate[1]),
-            )
-            recognition_method = "connection_plate_midpoints"
-            confidence = 0.99
-        else:
-            axis = _rail_pair_midline(
-                hypothesis.first,
-                hypothesis.second,
-            )
-            assert axis is not None
-            start, end = axis
-            recognition_method = "occluded_parallel_rails"
-            confidence = 0.90
-        plates = tuple(
-            _ordered_line(*plate[1])
-            for plate in (hypothesis.start_plate, hypothesis.end_plate)
-            if plate is not None
-        )
-        boundary_lines = tuple(
-            dict.fromkeys(
-                (
-                    *hypothesis.selected_rail_lines,
-                    *plates,
-                    *hypothesis.occlusion_evidence,
-                )
-            )
-        )
-        return _Candidate(
-            start,
-            end,
-            recognition_method,
-            True,
-            hypothesis.separation,
-            confidence,
-            group.layer,
-            set(group.handles),
-            set(group.entity_types),
-            list(group.block_instances),
-            {
-                f"{group.key}:corner_brace:"
-                f"{hypothesis.first_index}:{hypothesis.second_index}"
-            },
-            [],
-            boundary_lines,
-            recognized_axis=(start, end),
-            reference_point=_midpoint(start, end),
-            source_points=source_points(),
-            selected_rail_lines=hypothesis.selected_rail_lines,
-            corner_brace_candidate_kind=kind,
-            corner_brace_group_key=group.key,
-            corner_brace_evidence=(
-                f"rail_separation_mm={hypothesis.separation:.6f}",
-                (
-                    "projection_overlap_ratio="
-                    f"{hypothesis.projection_overlap_ratio:.6f}"
-                ),
-                f"rail_length_ratio={hypothesis.length_ratio:.6f}",
-                *hypothesis.rejection_reasons,
-                *(
-                    ("terminal_occlusion_evidence=finite",)
-                    if hypothesis.occlusion_evidence
-                    else ()
-                ),
-            ),
-        )
-
-    def unresolved_message(
-        reasons: Sequence[str],
-        widths: Sequence[float],
-    ) -> ValidationMessage:
-        width_text = (
-            ", ".join(f"{value:.3f}" for value in sorted(set(widths)))
-            if widths
-            else "none"
-        )
-        reason_text = ", ".join(dict.fromkeys(reasons)) or "no_legal_hypothesis"
-        return ValidationMessage(
-            "error",
-            "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
-            (
-                "角撐本體 rail 無唯一合法解；"
-                f"evaluated_widths_mm=[{width_text}]；reasons=[{reason_text}]。"
-            ),
-            "corner_brace",
-            tuple(sorted(group.handles)),
-        )
-
-    complete: list[_CornerBraceRailHypothesis] = []
-    fallback_pairs: list[_CornerBraceRailHypothesis] = []
-
-    for first_index, first in enumerate(segments):
-        first_length = _length(*first)
-        if first_length < tolerances.minimum_component_length_mm:
-            continue
-        for second_index in range(first_index + 1, len(segments)):
-            second = segments[second_index]
-            second_length = _length(*second)
-            if second_length < tolerances.minimum_component_length_mm:
-                continue
-            if (
-                _angle_difference_deg(first, second)
-                > tolerances.parallel_angle_tolerance_deg
-            ):
-                continue
-            if (
-                _projection_overlap_ratio(first, second)
-                < tolerances.minimum_projection_overlap_ratio
-            ):
-                continue
-            separation = _corner_brace_rail_separation(first, second)
-            if not (
-                tolerances.collinear_tolerance_mm
-                < separation
-                <= tolerances.maximum_component_width_mm
-            ):
-                continue
-            overlap_ratio = _projection_overlap_ratio(first, second)
-            length_ratio = min(first_length, second_length) / max(
-                first_length,
-                second_length,
-            )
-            pair_reasons: list[str] = []
-            if (
-                separation
-                <= tolerances.minimum_corner_brace_rail_separation_mm
-            ):
-                pair_reasons.append("rail_separation_not_above_minimum")
-            if (
-                min(first_length, second_length)
-                / max(separation, 1e-9)
-                < tolerances.minimum_slenderness_ratio
-            ):
-                pair_reasons.append("rail_slenderness_below_minimum")
-            equal_length = abs(first_length - second_length) <= max(
-                tolerances.width_tolerance_mm,
-                max(first_length, second_length) * 0.05,
-            )
-            aligned_first, aligned_second = aligned_pair(first, second)
-            excluded = {first_index, second_index}
-            start_plates = connecting_plates(
-                aligned_first[0],
-                aligned_second[0],
-                excluded,
-            )
-            end_plates = connecting_plates(
-                aligned_first[1],
-                aligned_second[1],
-                excluded,
-            )
-            if not start_plates:
-                pair_reasons.append("complete_start_plate_missing")
-            if not end_plates:
-                pair_reasons.append("complete_end_plate_missing")
-            eligible_complete_pair = not pair_reasons
-            if eligible_complete_pair:
-                for start_plate in start_plates:
-                    for end_plate in end_plates:
-                        if start_plate[0] == end_plate[0]:
-                            continue
-                        start_midpoint = _midpoint(*start_plate[1])
-                        end_midpoint = _midpoint(*end_plate[1])
-                        if (
-                            _length(start_midpoint, end_midpoint)
-                            < tolerances.minimum_component_length_mm
-                        ):
-                            continue
-                        complete.append(
-                            _CornerBraceRailHypothesis(
-                                first_index=first_index,
-                                second_index=second_index,
-                                first=aligned_first,
-                                second=aligned_second,
-                                separation=separation,
-                                projection_overlap_ratio=overlap_ratio,
-                                length_ratio=length_ratio,
-                                start_plate=start_plate,
-                                end_plate=end_plate,
-                                score=(
-                                    first_length
-                                    + second_length
-                                    - start_plate[2]
-                                    - end_plate[2]
-                                ),
-                                rejection_reasons=(
-                                    (
-                                        "complete_parallel_rail_closed_traversal"
-                                        if equal_length
-                                        else "complete_mitered_closed_traversal"
-                                    ),
-                                ),
-                            )
-                        )
-            else:
-                rejected.append((separation, tuple(pair_reasons)))
-            fallback_pairs.append(
-                _CornerBraceRailHypothesis(
-                    first_index=first_index,
-                    second_index=second_index,
-                    first=aligned_first,
-                    second=aligned_second,
-                    separation=separation,
-                    projection_overlap_ratio=overlap_ratio,
-                    length_ratio=length_ratio,
-                    start_plate=start_plates[0] if start_plates else None,
-                    end_plate=end_plates[0] if end_plates else None,
-                    rejection_reasons=tuple(pair_reasons),
-                )
-            )
-
-    complete = deduplicate_hypotheses(complete)
-    if complete:
-        selected_complete, ambiguous = unique_splittable_set(complete)
-        if ambiguous:
-            return [], [
-                unresolved_message(
-                    ("complete_candidate_evidence_ambiguous",),
-                    tuple(item.separation for item in complete),
-                )
-            ]
-        return [
-            candidate_from_hypothesis(item, kind="complete")
-            for item in selected_complete
-        ], []
-
-    def missing_continuations(
-        hypothesis: _CornerBraceRailHypothesis,
-    ) -> tuple[tuple[Point, tuple[Point, Point]], ...]:
-        first = hypothesis.first
-        second = hypothesis.second
-        if _length(*first) >= _length(*second):
-            long_rail, short_rail = first, second
-        else:
-            long_rail, short_rail = second, first
-        axis = _unit(*long_rail)
-        if axis is None:
-            return ()
-        long_length = _length(*long_rail)
-        short_points = sorted(
-            (
-                _dot(_vector(long_rail[0], point), axis),
-                point,
-            )
-            for point in short_rail
-        )
-        corridors: list[tuple[Point, tuple[Point, Point]]] = []
-        start_gap = max(0.0, short_points[0][0])
-        end_gap = max(0.0, long_length - short_points[1][0])
-        if start_gap > tolerances.endpoint_tolerance_mm:
-            terminal = short_points[0][1]
-            ideal = (
-                terminal[0] - axis[0] * start_gap,
-                terminal[1] - axis[1] * start_gap,
-            )
-            corridors.append((terminal, (ideal, terminal)))
-        if end_gap > tolerances.endpoint_tolerance_mm:
-            terminal = short_points[1][1]
-            ideal = (
-                terminal[0] + axis[0] * end_gap,
-                terminal[1] + axis[1] * end_gap,
-            )
-            corridors.append((terminal, (terminal, ideal)))
-        if corridors:
-            return tuple(corridors)
-
-        # Equal-length rails can still lose one terminal plate.  In that case
-        # the finite neighborhood immediately inward from the missing plate is
-        # the only admissible occlusion corridor.
-        neighborhood = tolerances.endpoint_tolerance_mm
-        if hypothesis.start_plate is None:
-            terminal = short_rail[0]
-            corridors.append(
-                (
-                    terminal,
-                    (
-                        terminal,
-                        (
-                            terminal[0] + axis[0] * neighborhood,
-                            terminal[1] + axis[1] * neighborhood,
-                        ),
-                    ),
-                )
-            )
-        if hypothesis.end_plate is None:
-            terminal = short_rail[1]
-            corridors.append(
-                (
-                    terminal,
-                    (
-                        terminal,
-                        (
-                            terminal[0] - axis[0] * neighborhood,
-                            terminal[1] - axis[1] * neighborhood,
-                        ),
-                    ),
-                )
-            )
-        return tuple(corridors)
-
-    occluded: list[_CornerBraceRailHypothesis] = []
-    finite_external = tuple(
-        line for line in external_occluding_lines if _length(*line) > 1e-9
-    )
-    for pair in fallback_pairs:
-        reasons: list[str] = []
-        if (
-            pair.separation
-            <= tolerances.minimum_corner_brace_rail_separation_mm
-        ):
-            reasons.append("rail_separation_not_above_minimum")
-        if (
-            pair.length_ratio
-            < tolerances.minimum_corner_brace_occluded_rail_length_ratio
-        ):
-            reasons.append("occluded_rail_length_ratio_below_minimum")
-        if (
-            min(_length(*pair.first), _length(*pair.second))
-            / max(pair.separation, 1e-9)
-            < tolerances.minimum_slenderness_ratio
-        ):
-            reasons.append("rail_slenderness_below_minimum")
-        if pair.start_plate is None and pair.end_plate is None:
-            reasons.append("connection_plate_evidence_missing")
-        corridors = missing_continuations(pair)
-        if not corridors:
-            reasons.append("terminal_occlusion_corridor_missing")
-        excluded_indices = {pair.first_index, pair.second_index}
-        excluded_indices.update(
-            plate[0]
-            for plate in (pair.start_plate, pair.end_plate)
-            if plate is not None
-        )
-        possible_occluders = tuple(
-            segment
-            for index, segment in enumerate(segments)
-            if index not in excluded_indices and _length(*segment) > 1e-9
-        ) + finite_external
-        evidence: list[tuple[Point, Point]] = []
-        for terminal, corridor in corridors:
-            for line in possible_occluders:
-                corridor_point, line_point, distance = (
-                    _closest_points_between_segments(corridor, line)
-                )
-                if distance > tolerances.collinear_tolerance_mm:
-                    continue
-                if (
-                    _distance(corridor_point, terminal)
-                    > tolerances.connection_tolerance_mm
-                ):
-                    continue
-                if not any(
-                    _same_line(
-                        _ordered_line(*line),
-                        _ordered_line(*existing),
-                    )
-                    for existing in evidence
-                ):
-                    evidence.append(_ordered_line(*line))
-        if not evidence:
-            reasons.append("terminal_occlusion_evidence_missing")
-        if reasons:
-            rejected.append((pair.separation, tuple(reasons)))
-            continue
-        occluded.append(
-            _CornerBraceRailHypothesis(
-                first_index=pair.first_index,
-                second_index=pair.second_index,
-                first=pair.first,
-                second=pair.second,
-                separation=pair.separation,
-                projection_overlap_ratio=pair.projection_overlap_ratio,
-                length_ratio=pair.length_ratio,
-                start_plate=pair.start_plate,
-                end_plate=pair.end_plate,
-                occlusion_evidence=tuple(evidence),
-            )
-        )
-
-    occluded = deduplicate_hypotheses(occluded)
-    if occluded:
-        # Finite Waler/Strut association is intentionally deferred until all
-        # engineering roles are staged.  The refinement step resolves this
-        # group atomically and rejects zero or multiple surviving hypotheses.
-        return [
-            candidate_from_hypothesis(item, kind="occluded")
-            for item in occluded
-        ], []
-
-    reasons = tuple(
-        reason
-        for _width, item_reasons in rejected
-        for reason in item_reasons
-    )
-    widths = tuple(width for width, _item_reasons in rejected)
-    return [], [unresolved_message(reasons, widths)]
+    return _supporting_line_separation(first, second)
 
 
 def _corner_brace_candidates_from_group(
@@ -1911,7 +1307,11 @@ def _candidate_from_group(
                 continue
             if _projection_overlap_ratio(first, second) < tolerances.minimum_projection_overlap_ratio:
                 continue
-            separation = _line_separation(first, second)
+            separation = (
+                _supporting_line_separation(first, second)
+                if role == "waler"
+                else _line_separation(first, second)
+            )
             if separation <= tolerances.collinear_tolerance_mm:
                 continue
             if separation > tolerances.maximum_component_width_mm:
@@ -1973,7 +1373,11 @@ def _candidate_from_group(
         if _dot(_vector(*second), first_axis) < 0:
             second_start, second_end = second_end, second_start
         start, end = _midpoint(first[0], second_start), _midpoint(first[1], second_end)
-        separation = _line_separation(first, second)
+        separation = (
+            _supporting_line_separation(first, second)
+            if role == "waler"
+            else _line_separation(first, second)
+        )
         return (
             _Candidate(
                 *_ordered_line(start, end),
@@ -2066,6 +1470,10 @@ def _characterize_waler_candidate_envelope(
             else "connected_contour"
         ),
     )
+    (
+        candidate.waler_source_width_state,
+        candidate.source_width,
+    ) = _waler_source_width_assessment(outcome.facts, tolerances)
     if outcome.status in {
         WalerEnvelopeStatus.UNRESOLVED,
         WalerEnvelopeStatus.AMBIGUOUS,
@@ -2094,9 +1502,27 @@ def _characterize_waler_candidate_envelope(
     candidate.start, candidate.end = fact.provisional_axis
     candidate.recognized_axis = fact.provisional_axis
     candidate.boundary_lines = fact.outer_faces
-    candidate.source_width = fact.source_width
     candidate.waler_envelope_facts = (fact,)
     return []
+
+
+def _waler_source_width_assessment(
+    facts: Sequence[WalerEnvelopeFacts],
+    tolerances: GeometryTolerances,
+) -> tuple[str, float]:
+    """Summarize orthogonally measured envelope widths without guessing."""
+
+    widths = sorted(
+        float(fact.source_width)
+        for fact in facts
+        if math.isfinite(float(fact.source_width)) and fact.source_width > 0.0
+    )
+    if not widths:
+        return "unknown", 0.0
+    tolerance = max(1e-6, float(tolerances.material_width_tolerance_mm))
+    if any(abs(width - widths[0]) > tolerance for width in widths[1:]):
+        return "ambiguous", 0.0
+    return "unique", widths[0]
 
 
 def _deduplicate_candidates(
@@ -2183,60 +1609,6 @@ def _deduplicate_candidates(
     return kept, messages
 
 
-def _select_waler_inner_lines(
-    candidates_by_role: Mapping[str, Sequence[_Candidate]],
-) -> None:
-    """Replace Waler recognition axes with the face toward the bracing system."""
-
-    framing_points = [
-        point
-        for role in ("strut", "brace")
-        for candidate in candidates_by_role.get(role, ())
-        for point in (candidate.start, candidate.end)
-    ]
-    if not framing_points:
-        framing_points = [
-            _midpoint(candidate.start, candidate.end)
-            for candidate in candidates_by_role.get("waler", ())
-        ]
-    if not framing_points:
-        return
-    interior_reference = (
-        sum(point[0] for point in framing_points) / len(framing_points),
-        sum(point[1] for point in framing_points) / len(framing_points),
-    )
-    for candidate in candidates_by_role.get("waler", ()):
-        candidate.recognized_axis = _ordered_line(candidate.start, candidate.end)
-        if candidate.boundary_lines:
-            contact_count = min(4, len(framing_points))
-
-            def inner_line_score(line: tuple[Point, Point]) -> tuple[float, float]:
-                contact_distances = sorted(
-                    _segment_distance(point, *line) for point in framing_points
-                )
-                return (
-                    sum(contact_distances[:contact_count]),
-                    _line_distance(interior_reference, *line),
-                )
-
-            inner_line = min(
-                candidate.boundary_lines,
-                # Actual Strut/Brace endpoints are the strongest evidence for
-                # the contact face.  The framing centroid resolves ties (for
-                # example, an ideal test line drawn midway through a Waler).
-                key=inner_line_score,
-            )
-            candidate.start, candidate.end = _ordered_line(*inner_line)
-            candidate.recognition_method = (
-                "existing_inner_line"
-                if len(candidate.boundary_lines) == 1
-                else "inner_boundary_line"
-            )
-        else:
-            # A standalone LINE on the Waler layer is already the engineering
-            # contact line; no centreline reconstruction is required.
-            candidate.recognition_method = "existing_inner_line"
-        candidate.centerline_computed = False
 
 
 def _normalized_source_identity(handles: Sequence[str]) -> tuple[str, ...]:
@@ -2747,7 +2119,7 @@ def _finalize_contextual_strut_waler_spans(
     """Move contextual Strut endpoints onto the selected canonical Waler faces.
 
     Recognition selects immutable Waler source identities.  This later stage
-    resolves those same identities after ``_select_waler_inner_lines`` has
+    resolves those same identities after canonical Waler contact finalization has
     chosen the engineering contact face; it never substitutes another Waler.
     """
 

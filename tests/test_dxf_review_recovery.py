@@ -384,6 +384,18 @@ class CriticalMemberMatchingTests(unittest.TestCase):
 
 
 class ManualOverrideRebindTests(unittest.TestCase):
+    @staticmethod
+    def formal_override(handles=("OLD",)):
+        return SourceManualOverride(
+            role="waler",
+            source_handles=handles,
+            display_id="W14",
+            geometry_selection_source="cad_manual",
+            world_start=(0.0, 0.0),
+            world_end=(100.0, 0.0),
+            waler_engineering_line_formalized=True,
+        )
+
     def test_rebinds_all_manual_input_types_to_candidate_identity(self):
         override = SourceManualOverride(
             role="waler",
@@ -440,6 +452,42 @@ class ManualOverrideRebindTests(unittest.TestCase):
         self.assertEqual(
             result.requires_review_labels,
             ("S1 材料規格", "S1 STEP5 工程線"),
+        )
+
+    def test_changed_content_exact_identity_requires_review_without_replay(self):
+        override = self.formal_override()
+        exact_match = CriticalMemberMatch(
+            "waler", "W14", "W14", 0, 0, "source_identity", 0.0,
+            ("OLD",), ("OLD",),
+        )
+
+        result = rebind_manual_overrides((override,), (exact_match,))
+
+        self.assertEqual(result.rebound, ())
+        self.assertEqual(
+            result.requires_review_labels,
+            ("W14 人工正式工程線",),
+        )
+        self.assertEqual(result.disabled_labels, ())
+
+    def test_changed_content_retargeted_or_missing_identity_is_disabled(self):
+        override = self.formal_override()
+        geometry_match = CriticalMemberMatch(
+            "waler", "W14", "NW14", 0, 0, "geometry", 1.0,
+            ("OLD",), ("NEW",),
+        )
+
+        retargeted = rebind_manual_overrides((override,), (geometry_match,))
+        missing = rebind_manual_overrides((override,), ())
+
+        self.assertEqual(retargeted.rebound, ())
+        self.assertEqual(
+            retargeted.disabled_labels,
+            ("W14 人工正式工程線",),
+        )
+        self.assertEqual(
+            missing.disabled_labels,
+            ("W14 人工正式工程線",),
         )
 
 
@@ -758,6 +806,55 @@ class ReviewRecoveryPlannerTests(unittest.TestCase):
             manual_entry.category,
             RecoveryCategory.REQUIRES_REVIEW,
         )
+
+    def test_changed_content_does_not_replay_manual_waler_formalization(self):
+        state, candidate = self.compatible_fixture()
+        state["manual_overrides"] = [{
+            "role": "waler",
+            "source_handles": ["OLD-W"],
+            "display_id": "W14",
+            "geometry_selection_source": "cad_manual",
+            "world_start": [0.0, 0.0],
+            "world_end": [100.0, 0.0],
+            "waler_engineering_line_formalized": True,
+        }]
+        captured = {}
+
+        result = self.planner(candidate, captured).plan(
+            "candidate.dxf", "NEW", state, "BASE"
+        )
+
+        self.assertEqual(captured["manual_overrides"], ())
+        entry = next(
+            item for item in result.summary.entries
+            if item.label == "W14 人工正式工程線"
+        )
+        self.assertEqual(entry.category, RecoveryCategory.DISABLED)
+
+    def test_changed_content_exact_waler_subject_still_requires_review(self):
+        state, candidate = self.compatible_fixture()
+        candidate.walers = (self.member("NW1", "OLD-W", "WALER"),)
+        state["manual_overrides"] = [{
+            "role": "waler",
+            "source_handles": ["OLD-W"],
+            "display_id": "W14",
+            "geometry_selection_source": "manual_candidate_points",
+            "world_start": [0.0, 0.0],
+            "world_end": [100.0, 0.0],
+            "waler_engineering_line_formalized": True,
+        }]
+        captured = {}
+
+        result = self.planner(candidate, captured).plan(
+            "candidate.dxf", "NEW", state, "BASE"
+        )
+
+        self.assertEqual(captured["manual_overrides"], ())
+        entry = next(
+            item for item in result.summary.entries
+            if item.label == "W14 人工正式工程線"
+        )
+        self.assertEqual(entry.category, RecoveryCategory.REQUIRES_REVIEW)
 
     def test_exclusion_requires_exact_same_role_identity(self):
         state, candidate = self.compatible_fixture()

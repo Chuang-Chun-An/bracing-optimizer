@@ -75,6 +75,38 @@ class WalerGlobalMaterialMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "單支分數無效"):
             candidate("W1", 1, [5000], score=math.nan)
 
+    def test_tail_adjustment_does_not_enter_global_material_signature(self):
+        base_payload = {
+            "valid": True,
+            "segments": [6000, 6000],
+            "joints": [6000],
+        }
+        first = build_global_candidate(
+            waler_id="W1",
+            candidate_rank=1,
+            payload={
+                **base_payload,
+                "score": 10,
+                "tail_adjustment": 100,
+                "gap": 100,
+            },
+            local_best_score=10,
+        )
+        second = build_global_candidate(
+            waler_id="W1",
+            candidate_rank=2,
+            payload={
+                **base_payload,
+                "score": 20,
+                "tail_adjustment": 300,
+                "gap": 150,
+            },
+            local_best_score=10,
+        )
+
+        self.assertEqual(first.material_signature, second.material_signature)
+        self.assertEqual(merge_equivalent_candidates((first, second)), (first,))
+
 
 class WalerGlobalLexicographicTests(unittest.TestCase):
     def test_out_count_wins_before_ratio(self):
@@ -253,6 +285,29 @@ class WalerGlobalDynamicProgrammingTests(unittest.TestCase):
         )
         self.assertEqual(len(merge_equivalent_candidates(out_candidates)), 2)
 
+    def test_signature_merge_keeps_eight_distinct_material_signatures(self):
+        candidates = tuple(
+            candidate("W1", rank, segments, score=float(rank), best_score=1.0)
+            for rank, segments in enumerate(
+                (
+                    [5_000],
+                    [7_000],
+                    [9_000],
+                    [3_500],
+                    [5_000, 7_000],
+                    [5_000, 9_000],
+                    [7_000, 9_000],
+                    [5_000, 7_000, 9_000],
+                ),
+                start=1,
+            )
+        )
+
+        merged = merge_equivalent_candidates(candidates)
+
+        self.assertEqual(len(merged), 8)
+        self.assertEqual(tuple(item.candidate_rank for item in merged), tuple(range(1, 9)))
+
     def test_walers_with_one_candidate_are_a_normal_baseline(self):
         groups = {
             "W1": (candidate("W1", 1, [5000]),),
@@ -265,6 +320,41 @@ class WalerGlobalDynamicProgrammingTests(unittest.TestCase):
         self.assertTrue(solution.valid)
         self.assertEqual(len(solution.selected_candidates), 3)
         self.assertEqual(solution.changed_waler_count, 0)
+
+    def test_multiple_walers_each_with_more_than_five_candidates_reach_exact_dp(self):
+        segment_options = (
+            [5_000],
+            [7_000],
+            [9_000],
+            [3_500],
+            [5_000, 7_000],
+            [7_000, 9_000],
+        )
+        groups = {
+            waler_id: tuple(
+                candidate(waler_id, rank, segments)
+                for rank, segments in enumerate(segment_options, start=1)
+            )
+            for waler_id in ("W2", "W1", "W3")
+        }
+
+        solution, diagnostics = solve_global_waler_candidates(
+            groups,
+            TARGETS,
+            waler_order=("W1", "W2", "W3"),
+        )
+
+        self.assertTrue(solution.valid)
+        self.assertEqual(
+            tuple(item.waler_id for item in solution.selected_candidates),
+            ("W1", "W2", "W3"),
+        )
+        self.assertEqual(diagnostics.raw_candidate_count, 18)
+        self.assertEqual(
+            diagnostics.retained_candidate_count_after_signature_merge,
+            18,
+        )
+        self.assertGreater(diagnostics.transition_count, 18)
 
     def test_zero_candidate_waler_fails_without_fallback(self):
         solution, diagnostics = solve({"W1": (), "W2": (candidate("W2", 1, [5000]),)})

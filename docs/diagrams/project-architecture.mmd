@@ -1,0 +1,63 @@
+flowchart TB
+    User[使用者]
+
+    subgraph Presentation
+        Main[Main UI<br/>SupportInputApp]
+        DxfDialog[DXFImportDialog]
+        SolverDialogs[Solver Dialogs]
+    end
+
+    subgraph DXF_Subsystem[DXF Import & Review Subsystem]
+        Review[DXFReviewWorkflow]
+        Importer[DXFImporter]
+        Recognition[Recognition / Validation<br/>Pure Review Operations]
+        DxfModels[DXF Models / Geometry]
+    end
+
+    subgraph Application
+        ProjectService[ProjectService]
+        ProjectData[ProjectDataModel]
+        ProjectResults[ProjectResultModel]
+        Editing[SupportPlanEditing<br/>WalerPlanEditing]
+        Builders[Solver Input Builders]
+        SolverInput[Solver Input]
+        UseCases[Optimize Use Cases]
+    end
+
+    subgraph Core
+        Domain[Domain Entities<br/>Material Policies]
+        Algorithms[Support / Waler<br/>Global Algorithms]
+    end
+
+    subgraph Infrastructure
+        Persistence[Project Persistence<br/>Managed DXF Asset]
+        Cad[CAD Event Integration]
+        Export[Excel / DXF Export]
+        Files[JSON / DXF / XLSX]
+    end
+
+    User --> Main
+    User --> DxfDialog
+    User --> SolverDialogs
+    Main --> ProjectService
+    Main --> ProjectData
+    Main --> ProjectResults
+    Main --> Editing
+    Main --> DxfDialog
+    Main --> Cad
+    Main --> Export
+    DxfDialog --> Review
+    Review --> Importer
+    Review --> Recognition
+    Importer --> Recognition
+    Recognition --> DxfModels
+    ProjectData --> Builders
+    Builders --> SolverInput
+    SolverInput --> UseCases
+    SolverDialogs --> UseCases
+    Editing --> Algorithms
+    UseCases --> Algorithms
+    Algorithms --> Domain
+    ProjectService --> Persistence
+    Persistence --> Files
+    Export --> Files

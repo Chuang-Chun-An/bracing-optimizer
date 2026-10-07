@@ -16,6 +16,19 @@ from bracing_optimizer.infrastructure.cad_builder import (
 )
 from main import SupportInputApp
 from bracing_optimizer.application.project_data import TABLE_COLUMNS, ProjectDataModel
+from bracing_optimizer.application.solver_operation_registry import (
+    SnapshotState,
+    SolverKind,
+)
+from bracing_optimizer.presentation.dialogs.support_solver_dialog import (
+    SupportSolverDialog,
+)
+from bracing_optimizer.presentation.dialogs.waler_global_solver_dialog import (
+    WalerGlobalSolverDialog,
+)
+from bracing_optimizer.presentation.dialogs.waler_solver_dialog import (
+    WalerSolverDialog,
+)
 from bracing_optimizer.infrastructure.project_persistence import ProjectPersistenceError
 from bracing_optimizer.infrastructure.project_persistence import DxfCompatibilityChecker
 from dxf_import.dialog import DXFImportDialog
@@ -493,7 +506,13 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertFalse(in_string)
         self.assertEqual(balance, 0)
 
-        examples_path = PROJECT_DIR / "cad_bridge_event_examples.json"
+        examples_path = (
+            PROJECT_DIR
+            / "tests"
+            / "fixtures"
+            / "cad"
+            / "cad_bridge_event_examples.json"
+        )
         examples_text = examples_path.read_text(encoding="utf-8")
         examples = json.loads(examples_text)
         expected_types = {
@@ -591,6 +610,329 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertEqual(app.solver_memory, {})
         self.assertEqual(app.support_candidate_cache, {})
         self.assertEqual(app.cad_import_status, "匯入成功：W3")
+
+    def test_valid_add_and_update_invalidate_all_solver_snapshots_before_commit(self):
+        walers, strut = self.project_geometry()
+        events = (
+            {
+                "event_id": "add-waler-with-active-solvers",
+                "type": "waler",
+                "operation": "add",
+                "coordinate_space": "WCS",
+                "data": {"StartX": 0, "StartY": 2000, "EndX": 2000, "EndY": 2000},
+            },
+            self.update_event(
+                event_id="update-strut-with-active-solvers",
+                start=(200, 0),
+                end=(200, 1000),
+            ),
+        )
+        for event in events:
+            with self.subTest(operation=event["operation"]):
+                app = self.main_app_for_cad_import(walers=walers)
+                app.struts = [copy.deepcopy(strut)]
+                app.dxf_last_import_debug = self.dxf_state()
+                registry = app._ensure_solver_operation_registry()
+                open_handle = registry.register_snapshot(SolverKind.SUPPORT)
+                single_handle = registry.register_snapshot(SolverKind.SINGLE_WALER)
+                global_handle = registry.register_snapshot(SolverKind.GLOBAL_WALER)
+                single_execution = registry.start_execution(single_handle)
+                global_execution = registry.start_execution(global_handle)
+                listeners = [Mock(), Mock(), Mock()]
+                for handle, listener in zip(
+                    (open_handle, single_handle, global_handle),
+                    listeners,
+                ):
+                    registry.set_stale_listener(handle, listener)
+                commit_states = []
+                real_commit = app._commit_runtime_outcome
+
+                def commit_after_invalidation(outcome):
+                    commit_states.append(tuple(
+                        registry.status(handle).state
+                        for handle in (open_handle, single_handle, global_handle)
+                    ))
+                    return real_commit(outcome)
+
+                app._commit_runtime_outcome = Mock(
+                    side_effect=commit_after_invalidation
+                )
+
+                app._apply_cad_event(event)
+
+                self.assertEqual(
+                    commit_states,
+                    [(SnapshotState.STALE,) * 3],
+                )
+                self.assertTrue(single_execution.cancellation_token.is_cancelled)
+                self.assertTrue(global_execution.cancellation_token.is_cancelled)
+                for listener in listeners:
+                    listener.assert_called_once_with("cad_update")
+
+    def test_non_mutating_cad_events_do_not_invalidate_solver_snapshots(self):
+        walers, _strut = self.project_geometry()
+        cases = (
+            (
+                "control",
+                {
+                    "event_id": "cancel-active-solvers",
+                    "type": "control",
+                    "operation": "cancel",
+                    "coordinate_space": "WCS",
+                    "data": {},
+                },
+                False,
+            ),
+            (
+                "no-op",
+                self.linear_update_event(
+                    "waler",
+                    "W1",
+                    event_id="noop-active-solvers",
+                    start=(0, 0),
+                    end=(2000, 0),
+                ),
+                False,
+            ),
+            (
+                "invalid",
+                {
+                    "event_id": "invalid-active-solvers",
+                    "type": "circle",
+                    "operation": "add",
+                    "coordinate_space": "WCS",
+                    "data": {"StartX": 1},
+                },
+                True,
+            ),
+        )
+        for name, event, should_raise in cases:
+            with self.subTest(event=name):
+                app = self.main_app_for_cad_import(walers=walers)
+                registry = app._ensure_solver_operation_registry()
+                dialog_cases = (
+                    (SupportSolverDialog, SolverKind.SUPPORT),
+                    (WalerSolverDialog, SolverKind.SINGLE_WALER),
+                    (WalerGlobalSolverDialog, SolverKind.GLOBAL_WALER),
+                )
+                open_dialogs = []
+                for dialog_class, kind in dialog_cases:
+                    handle = registry.register_snapshot(kind)
+                    dialog = dialog_class.__new__(dialog_class)
+                    dialog._snapshot_stale = False
+                    dialog._calculation_running = False
+                    dialog.run_button = Mock()
+                    dialog.summary_var = Mock()
+                    registry.set_stale_listener(handle, dialog._on_snapshot_stale)
+                    open_dialogs.append((handle, dialog))
+                running_handle = registry.register_snapshot(
+                    SolverKind.SINGLE_WALER
+                )
+                execution = registry.start_execution(running_handle)
+                running_listener = Mock()
+                registry.set_stale_listener(running_handle, running_listener)
+
+                if should_raise:
+                    with self.assertRaises((KeyError, TypeError, ValueError)):
+                        app._apply_cad_event(event)
+                else:
+                    app._apply_cad_event(event)
+
+                for handle, dialog in open_dialogs:
+                    self.assertEqual(
+                        registry.status(handle).state,
+                        SnapshotState.OPEN,
+                    )
+                    dialog.run_button.configure.assert_not_called()
+                    dialog.summary_var.set.assert_not_called()
+                self.assertEqual(
+                    registry.status(running_handle).state,
+                    SnapshotState.RUNNING,
+                )
+                self.assertFalse(execution.cancellation_token.is_cancelled)
+                running_listener.assert_not_called()
+
+    def test_cad_mutation_disables_all_three_open_dialogs_without_workers(self):
+        app = self.main_app_for_cad_import()
+        registry = app._ensure_solver_operation_registry()
+        dialogs = []
+        for dialog_class, kind in (
+            (SupportSolverDialog, SolverKind.SUPPORT),
+            (WalerSolverDialog, SolverKind.SINGLE_WALER),
+            (WalerGlobalSolverDialog, SolverKind.GLOBAL_WALER),
+        ):
+            handle = registry.register_snapshot(kind)
+            dialog = dialog_class.__new__(dialog_class)
+            dialog._snapshot_stale = False
+            dialog._calculation_running = False
+            dialog.run_button = Mock()
+            dialog.summary_var = Mock()
+            registry.set_stale_listener(handle, dialog._on_snapshot_stale)
+            dialogs.append((handle, dialog))
+
+        app._apply_cad_event({
+            "event_id": "cad-invalidates-three-open-dialogs",
+            "type": "waler",
+            "operation": "add",
+            "coordinate_space": "WCS",
+            "data": {"StartX": 0, "StartY": 30, "EndX": 1000, "EndY": 30},
+        })
+
+        for handle, dialog in dialogs:
+            status = registry.status(handle)
+            self.assertEqual(status.state, SnapshotState.STALE)
+            self.assertFalse(status.has_active_execution)
+            dialog.run_button.configure.assert_called_once_with(state="disabled")
+            self.assertIn(
+                "請關閉後重新開啟 Solver",
+                dialog.summary_var.set.call_args.args[0],
+            )
+
+    def test_solver_success_before_cad_is_cleared_by_cad_commit(self):
+        app = self.main_app_for_cad_import()
+        registry = app._ensure_solver_operation_registry()
+        handle = registry.register_snapshot(SolverKind.SUPPORT)
+        execution = registry.start_execution(handle)
+        self.assertEqual(
+            registry.complete_execution(handle, execution.identity).value,
+            "adoptable",
+        )
+        app.result_items = {"committed-result": {"diagnostics": {"old": True}}}
+        app.project_result = {"committed": True}
+        app.last_calculated_time = "before-cad"
+        app.solver_memory = {"old-memory": {"score": 1}}
+        app.support_candidate_cache = {"old-cache": [1]}
+
+        app._apply_cad_event({
+            "event_id": "cad-after-solver-success",
+            "type": "waler",
+            "operation": "add",
+            "coordinate_space": "WCS",
+            "data": {"StartX": 0, "StartY": 20, "EndX": 1000, "EndY": 20},
+        })
+
+        self.assertEqual(app.result_items, {})
+        self.assertIsNone(app.project_result)
+        self.assertIsNone(app.last_calculated_time)
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(registry.status(handle).state, SnapshotState.STALE)
+
+    def test_cad_before_callbacks_discards_all_late_solver_outputs(self):
+        walers, strut = self.project_geometry()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.struts = [strut]
+        app.dxf_last_import_debug = self.dxf_state()
+        registry = app._ensure_solver_operation_registry()
+        support_handle = registry.register_snapshot(SolverKind.SUPPORT)
+        single_handle = registry.register_snapshot(SolverKind.SINGLE_WALER)
+        global_handle = registry.register_snapshot(SolverKind.GLOBAL_WALER)
+        support_execution = registry.start_execution(support_handle)
+        single_execution = registry.start_execution(single_handle)
+        global_execution = registry.start_execution(global_handle)
+
+        app._apply_cad_event(
+            self.update_event(
+                event_id="cad-before-late-callbacks",
+                start=(250, 0),
+                end=(250, 1000),
+            )
+        )
+        committed_state = (
+            copy.deepcopy(app.result_items),
+            copy.deepcopy(app.project_result),
+            app.last_calculated_time,
+            app.project_dirty,
+            app.project_dirty_reason,
+            copy.deepcopy(app.support_candidate_cache),
+            copy.deepcopy(app.solver_memory),
+        )
+
+        def contaminate_results(*_args, **_kwargs):
+            app.result_items = {"late": {"diagnostics": {"stale": True}}}
+            app.project_result = {"late": True}
+            app.last_calculated_time = "late"
+            app.project_dirty = False
+
+        support_dialog = SupportSolverDialog.__new__(SupportSolverDialog)
+        support_dialog.operation_registry = registry
+        support_dialog.snapshot_handle = support_handle
+        support_dialog.adoption_guard = app._ensure_mutation_allowed
+        support_dialog.callback = contaminate_results
+        support_dialog.optimize_support_zone = Mock()
+        support_dialog.optimize_support_zone.adopt_candidate_cache_updates.side_effect = (
+            lambda _result: app.support_candidate_cache.update({"late": True})
+        )
+        support_dialog.zoning = "Z9"
+        support_dialog._snapshot_stale = False
+        support_dialog._calculation_running = True
+        support_dialog.run_button = Mock()
+        support_dialog.summary_var = Mock()
+        support_dialog._display_solution = Mock()
+        support_dialog._display_diagnostics_only = Mock()
+        support_dialog._finish_worker(
+            object(),
+            object(),
+            None,
+            execution=support_execution,
+            operation_result=SimpleNamespace(candidate_cache_updates={"late": True}),
+        )
+
+        single_dialog = WalerSolverDialog.__new__(WalerSolverDialog)
+        single_dialog.operation_registry = registry
+        single_dialog.snapshot_handle = single_handle
+        single_dialog.adoption_guard = app._ensure_mutation_allowed
+        single_dialog._snapshot_stale = False
+        single_dialog._calculation_running = True
+        single_dialog.run_button = Mock()
+        single_dialog.summary_var = Mock()
+        single_dialog._display_results = Mock(side_effect=contaminate_results)
+        single_dialog._save_solver_memory = Mock(
+            side_effect=lambda *_args: app.solver_memory.update({"late": True})
+        )
+        single_dialog._finish_worker(
+            [{"segments": [4000]}],
+            object(),
+            None,
+            config=object(),
+            execution=single_execution,
+        )
+
+        global_dialog = WalerGlobalSolverDialog.__new__(WalerGlobalSolverDialog)
+        global_dialog.operation_registry = registry
+        global_dialog.snapshot_handle = global_handle
+        global_dialog.adoption_guard = app._ensure_mutation_allowed
+        global_dialog._snapshot_stale = False
+        global_dialog._calculation_running = True
+        global_dialog.run_button = Mock()
+        global_dialog.summary_var = Mock()
+        global_dialog.current_result = None
+        global_dialog._display_result = Mock(
+            side_effect=lambda _result: contaminate_results() or True
+        )
+        global_dialog._adopt_current_result = Mock(side_effect=contaminate_results)
+        global_dialog._display_error = Mock()
+        global_dialog._closed = False
+        global_dialog.dialog = SimpleNamespace(winfo_exists=lambda: True)
+        global_dialog._finish_worker(
+            object(),
+            None,
+            execution=global_execution,
+        )
+
+        self.assertEqual(
+            (
+                app.result_items,
+                app.project_result,
+                app.last_calculated_time,
+                app.project_dirty,
+                app.project_dirty_reason,
+                app.support_candidate_cache,
+                app.solver_memory,
+            ),
+            committed_state,
+        )
 
     def test_update_uses_current_event_stations_when_direction_is_reversed(self):
         walers, strut = self.project_geometry()
@@ -1197,7 +1539,7 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertEqual(app.result_items, old_results)
         self.assertIn("新斜撐幾何無法維持", app.cad_last_error)
 
-    def test_waler_and_brace_ack_failure_use_generic_row_rollback(self):
+    def test_waler_and_brace_ack_failure_keep_committed_mutation(self):
         walers, _strut = self.project_geometry()
         for member_type, table_name, target_id, row, event in (
             (
@@ -1235,19 +1577,22 @@ class CADBuilderIntegrationTests(unittest.TestCase):
                     )
                 else:
                     app.dxf_last_import_debug = self.dxf_state()
-                original_row = copy.deepcopy(getattr(app, table_name)[0])
-                original_state = copy.deepcopy(app.dxf_last_import_debug)
-                original_results = copy.deepcopy(app.result_items)
                 app.cad_event_watcher = Mock()
                 app.cad_event_watcher.acknowledge.side_effect = OSError("ack failed")
 
                 with self.assertRaisesRegex(OSError, "ack failed"):
                     app._apply_cad_event(event)
 
-                self.assertEqual(getattr(app, table_name), [original_row])
-                self.assertEqual(app.dxf_last_import_debug, original_state)
-                self.assertEqual(app.result_items, original_results)
+                self.assertNotEqual(getattr(app, table_name)[0], row)
+                self.assertEqual(app.result_items, {})
                 self.assertEqual(app.preview_update_count, 0)
+                self.assertTrue(app.project_dirty)
+                self.assertTrue(app.projection_stale)
+                self.assertFalse(app.cad_import_enabled)
+                self.assertEqual(
+                    app.cad_ack_unresolved_event_id,
+                    event["event_id"],
+                )
 
     def test_project_replace_failure_does_not_ack_or_change_adjacent_state(self):
         walers, _strut = self.project_geometry()
@@ -1278,24 +1623,75 @@ class CADBuilderIntegrationTests(unittest.TestCase):
         self.assertEqual(app.result_items, original_results)
         self.assertIs(app.dxf_last_import_debug, original_state)
 
-    def test_ack_failure_rolls_back_project_row_and_dxf_state(self):
+    def test_ack_failure_keeps_project_row_and_blocks_replay(self):
         walers, strut = self.project_geometry()
         app = self.main_app_for_cad_import(walers=walers)
         app.struts = [strut]
         app.dxf_last_import_debug = self.dxf_state()
-        original_row = copy.deepcopy(app.struts[0])
-        original_state = copy.deepcopy(app.dxf_last_import_debug)
+        event = self.update_event(start=(200, 0), end=(200, 1000))
         app.cad_event_watcher = Mock()
         app.cad_event_watcher.acknowledge.side_effect = OSError("ack failed")
+        registry = app._ensure_solver_operation_registry()
+        handle = registry.register_snapshot(SolverKind.SUPPORT)
+        execution = registry.start_execution(handle)
 
         with self.assertRaisesRegex(OSError, "ack failed"):
-            app._apply_cad_event(
-                self.update_event(start=(200, 0), end=(200, 1000))
-            )
+            app._apply_cad_event(event)
 
-        self.assertEqual(app.struts, [original_row])
-        self.assertEqual(app.dxf_last_import_debug, original_state)
+        self.assertEqual(app.struts[0]["StartX"], 200)
+        self.assertEqual(app.struts[0]["EndX"], 200)
+        self.assertEqual(app.result_items, {})
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
         self.assertEqual(app.preview_update_count, 0)
+        self.assertTrue(app.project_dirty)
+        self.assertTrue(app.projection_stale)
+        self.assertFalse(app.cad_import_enabled)
+        self.assertEqual(registry.status(handle).state, SnapshotState.STALE)
+        self.assertTrue(execution.cancellation_token.is_cancelled)
+        app.root = Mock()
+        app._cad_poll_after_id = None
+        app._schedule_cad_event_poll()
+        app.root.after.assert_not_called()
+        committed = copy.deepcopy(app.struts)
+
+        self.assertEqual(app._apply_cad_event(event), ("unresolved", {}))
+        self.assertEqual(app.struts, committed)
+        app.cad_event_watcher.acknowledge.assert_called_once_with(event)
+        self.assertEqual(registry.status(handle).state, SnapshotState.STALE)
+        self.assertTrue(execution.cancellation_token.is_cancelled)
+
+        app._ensure_project_service = Mock()
+        with self.assertRaisesRegex(RuntimeError, "ACK 尚未完成"):
+            app.save_project_case("blocked")
+        app._ensure_project_service.assert_not_called()
+
+        app.cad_event_watcher.acknowledge.side_effect = None
+        self.assertTrue(app._resolve_cad_ack_failure())
+        self.assertIsNone(app.cad_ack_unresolved_event_id)
+        with self.assertRaisesRegex(RuntimeError, "重新整理全部畫面"):
+            app._ensure_mutation_allowed()
+        app.projection_stale = False
+        app._ensure_mutation_allowed()
+
+    def test_projection_failure_after_ack_keeps_committed_cad_mutation(self):
+        walers, strut = self.project_geometry()
+        app = self.main_app_for_cad_import(walers=walers)
+        app.struts = [strut]
+        app.dxf_last_import_debug = self.dxf_state()
+        event = self.update_event(start=(220, 0), end=(220, 1000))
+        app.cad_event_watcher = Mock()
+        app._refresh_tree = Mock(side_effect=RuntimeError("refresh failed"))
+
+        with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+            app._apply_cad_event(event)
+
+        app.cad_event_watcher.acknowledge.assert_called_once_with(event)
+        self.assertEqual(app.struts[0]["StartX"], 220)
+        self.assertEqual(app.result_items, {})
+        self.assertTrue(app.project_dirty)
+        self.assertTrue(app.projection_stale)
+        self.assertIsNone(getattr(app, "cad_ack_unresolved_event_id", None))
 
     def test_dxf_import_dialog_does_not_consume_update_event(self):
         event = self.update_event()

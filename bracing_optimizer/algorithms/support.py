@@ -12,6 +12,7 @@ from bracing_optimizer.domain.material_rules import (
     classify_length,
 )
 from bracing_optimizer.algorithms.solver_search import DEFAULT_SEARCH_POLICY
+from bracing_optimizer.algorithms.cancellation import CancellationToken
 
 # =========================================================
 # dataclass 定義
@@ -1722,6 +1723,20 @@ def validate_support_layout(
         if jack_count != 1
         else None
     )
+    invalid_jack_size_issues = tuple(
+        SupportValidationIssue(
+            code="invalid_jack_length",
+            message=(
+                f"千斤頂長度不合法: {length} mm"
+                f"（應為 {JACK_LENGTH} mm）"
+            ),
+        )
+        for length in sorted(
+            length
+            for kind, length in pieces
+            if str(kind).lower() == "jack" and length != JACK_LENGTH
+        )
+    )
     shim_count_issue = (
         SupportValidationIssue(
             code="invalid_shim_count",
@@ -1729,6 +1744,19 @@ def validate_support_layout(
         )
         if len(shim_indices) > 1
         else None
+    )
+    invalid_shim_size_issues = tuple(
+        SupportValidationIssue(
+            code="invalid_shim_length",
+            message=f"Shim 長度不合法: {length} mm",
+        )
+        for length in sorted(
+            length
+            for kind, length in pieces
+            if str(kind).lower() == "shim"
+            and length != 0
+            and length not in SHIM_LENGTHS
+        )
     )
     placement_issue = (
         None
@@ -1774,7 +1802,9 @@ def validate_support_layout(
         issue
         for issue in (
             jack_issue,
+            *invalid_jack_size_issues,
             shim_count_issue,
+            *invalid_shim_size_issues,
             placement_issue,
             gap_issue,
             forbidden_issue,
@@ -1784,8 +1814,12 @@ def validate_support_layout(
     )
     if jack_issue is not None:
         reason_issues = (jack_issue,)
+    elif invalid_jack_size_issues:
+        reason_issues = invalid_jack_size_issues
     elif shim_count_issue is not None:
         reason_issues = (shim_count_issue,)
+    elif invalid_shim_size_issues:
+        reason_issues = invalid_shim_size_issues
     else:
         reason_issues = tuple(
             issue
@@ -1826,9 +1860,14 @@ def evaluate_single_support(
 
     validation = validate_support_layout(config, pieces)
     forbidden_count = validation.legacy_scoring_forbidden_count
+    has_size_issue = any(
+        issue.code in {"invalid_jack_length", "invalid_shim_length"}
+        for issue in validation.issues
+    )
 
     legacy_valid_for_scoring = (
         jack_count == 1
+        and not has_size_issue
         and SUPPORT_MIN_GAP <= gap <= MAX_GAP
         and forbidden_count == 0
         and all(
@@ -1971,6 +2010,7 @@ def generate_length_combinations_dp(
     max_steel_pieces: int = SUPPORT_DP_MAX_STEEL_PIECES,
     selection_strategy: str = SUPPORT_LENGTH_COMBINATION_SELECTION_STRATEGY,
     diagnostics_out: Optional[Dict[str, object]] = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> List[Dict[str, object]]:
     """
     用 DP 產生鋼材長度組合，保留前 N 名。
@@ -1989,6 +2029,8 @@ def generate_length_combinations_dp(
     }
 
     for steel in configured_steel_lengths(config):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         for total in range(steel, max_steel_sum + 1):
             if total - steel not in dp:
                 continue
@@ -2019,6 +2061,8 @@ def generate_length_combinations_dp(
     seen: Dict[Tuple[Tuple[int, ...], int, int], bool] = {}
 
     for shim in SHIM_LENGTHS:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         for gap in range(SUPPORT_MIN_GAP, MAX_GAP + 1):
             steel_target = config.total_length - JACK_LENGTH - shim - gap
             if steel_target < 0:
@@ -2067,15 +2111,20 @@ def beam_search_steel_orders(
     beam_width: int = 50,
     max_orders: int = 50,
     diagnostics: Optional[Dict[str, object]] = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> List[List[int]]:
     initial_state = (0.0, (), Counter(steel_lengths))
     beam: List[Tuple[float, Tuple[int, ...], Counter[int]]] = [initial_state]
     completed: List[Tuple[float, Tuple[int, ...]]] = []
 
     while beam:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         next_beam: List[Tuple[float, Tuple[int, ...], Counter[int]]] = []
 
         for score, sequence, remaining in beam:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             if not remaining:
                 completed.append((score, sequence))
                 continue
@@ -2179,6 +2228,7 @@ def beam_search_layout(
     beam_width: int = 50,
     max_layouts: int = 50,
     diagnostics: Optional[Dict[str, object]] = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> List[SupportPlan]:
     local_diagnostics: Dict[str, object] = {}
     steel_orders = beam_search_steel_orders(
@@ -2186,12 +2236,15 @@ def beam_search_layout(
         beam_width=beam_width,
         max_orders=beam_width,
         diagnostics=local_diagnostics,
+        cancellation_token=cancellation_token,
     )
 
     candidates: List[SupportPlan] = []
     seen: Dict[Tuple[Tuple[str, int], ...], bool] = {}
 
     for order in steel_orders:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         steel_pieces = [("steel", length) for length in order]
         for pieces in generate_waler_rule_layouts(config, steel_pieces, shim):
             key = tuple(pieces)
@@ -2456,7 +2509,10 @@ def generate_single_support_candidates(
     min_retained_no_under_4000_candidates: int = SUPPORT_DEFAULT_MIN_RETAINED_NO_UNDER_4000_CANDIDATES,
     final_candidate_count: Optional[int] = None,
     length_combination_selection_strategy: str = SUPPORT_LENGTH_COMBINATION_SELECTION_STRATEGY,
+    cancellation_token: CancellationToken | None = None,
 ) -> List[SupportPlan]:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     if random_seed is not None:
         random.seed(random_seed)
 
@@ -2488,6 +2544,7 @@ def generate_single_support_candidates(
         max_combinations=max_length_combinations,
         selection_strategy=length_combination_selection_strategy,
         diagnostics_out=combination_diagnostics,
+        cancellation_token=cancellation_token,
     )
 
     candidates: List[SupportPlan] = []
@@ -2514,6 +2571,8 @@ def generate_single_support_candidates(
     }
 
     for combo in combinations:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         diagnostics["combinations_processed"] = diagnostics.get("combinations_processed", 0) + 1
         layouts = beam_search_layout(
             config,
@@ -2523,6 +2582,7 @@ def generate_single_support_candidates(
             beam_width=beam_width,
             max_layouts=max_layouts_per_combo,
             diagnostics=diagnostics,
+            cancellation_token=cancellation_token,
         )
         retained_layouts.extend(layouts)
         diagnostics["layouts_retained"] = diagnostics.get("layouts_retained", 0) + len(layouts)
@@ -2558,6 +2618,8 @@ def generate_single_support_candidates(
         diagnostics["unique_steel_patterns"] = len(steel_patterns)
         diagnostics["unique_material_styles"] = len(material_styles)
         diagnostics["candidate_pool_valid_count"] = valid_count
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
 
     candidates.sort(key=lambda x: x.score)
     final_valid_plans = [plan for plan in candidates if plan.valid and not plan.reason]
@@ -2571,6 +2633,8 @@ def generate_single_support_candidates(
     )
     if not returned_candidates:
         returned_candidates = candidates[:final_candidate_count]
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     diagnostics.setdefault("stop_reason", "已完整處理選入的鋼材組合")
     diagnostics["unique_jack_center_buckets"] = len(jack_center_buckets)
     diagnostics["no_under_4000_candidates"] = no_under_4000_candidate_count
@@ -3197,10 +3261,13 @@ def build_global_solution(
     material_concentration_threshold: float = SUPPORT_MATERIAL_CONCENTRATION_THRESHOLD,
     material_concentration_weight: float = SUPPORT_MATERIAL_CONCENTRATION_WEIGHT,
     diagnostics_out: Optional[Dict[str, object]] = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> GlobalSolution:
     """Run Phase 2 over ordered adjacency-unit candidate sets."""
 
     candidates_by_unit = _normalize_phase2_candidate_sets(candidates_by_support)
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     log(f"全域最佳化開始：支撐單元數量={len(candidates_by_unit)}")
 
     phase2_diagnostics: Dict[str, object] = {
@@ -3264,6 +3331,8 @@ def build_global_solution(
         List[SupportUnitCandidate],
     ]] = []
     for candidate_index, unit_candidate in enumerate(candidates_by_unit[0]):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         plans = list(unit_candidate.plans)
         single_score_total = sum(float(plan.score) for plan in plans)
         material_ratio_analysis = calculate_material_ratio_analysis(
@@ -3316,6 +3385,8 @@ def build_global_solution(
     })
 
     for support_idx in range(1, len(candidates_by_unit)):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         new_beam: List[Tuple[
             Tuple[float, int, int, Tuple[int, ...]],
             float,
@@ -3338,6 +3409,8 @@ def build_global_solution(
             selected_indices,
             selected_units,
         ) in beam:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             previous_unit = selected_units[-1]
 
             for candidate_index, candidate in enumerate(candidates_by_unit[support_idx]):
@@ -3439,6 +3512,9 @@ def build_global_solution(
                 diagnostics_out.update(phase2_diagnostics)
             print_global_summary(solution)
             return solution
+
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
 
     (
         _best_sort_key,

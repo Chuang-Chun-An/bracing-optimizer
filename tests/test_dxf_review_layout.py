@@ -24,12 +24,15 @@ from dxf_import.models import (
     DoubleSupportCandidate,
     DXFImportError,
     DXFImportResult,
+    ExcludedSource,
     ProblemRecord,
     ReviewItem,
     SelectionState,
     Strut,
     Waler,
 )
+from dxf_import.review_workflow import PendingSourceExclusionDraft
+from dxf_import.preview import RenderDirty
 
 
 class _Variable:
@@ -49,6 +52,10 @@ class _Variable:
 class _GridFrame:
     def __init__(self):
         self.visible = None
+        self.options = {}
+
+    def configure(self, **options):
+        self.options.update(options)
 
     def grid(self):
         self.visible = True
@@ -91,18 +98,35 @@ class _Button:
         return None
 
 
-def _candidate(identifier="P1", component_id="W1"):
+def _candidate(
+    identifier="P1",
+    component_id="W1",
+    *,
+    world_point=(110.0, 220.0),
+    local_point=(10.0, 20.0),
+    point_type="endpoint",
+    point_types=(),
+    valid_for=("start", "end"),
+):
     return CandidatePoint(
         id=identifier,
-        world_point=(110.0, 220.0),
-        local_point=(10.0, 20.0),
-        point_type="endpoint",
+        world_point=world_point,
+        local_point=local_point,
+        point_type=point_type,
         label="端點 A",
+        point_types=tuple(point_types),
+        valid_for=tuple(valid_for),
         component_id=component_id,
     )
 
 
-def _waler(*, points=(), contact_face_state="formal"):
+def _waler(
+    *,
+    points=(),
+    contact_face_state="formal",
+    engineering_line_authority="automatic",
+    selection_source="auto",
+):
     return Waler(
         id="W1",
         start=(10.0, 20.0),
@@ -115,8 +139,12 @@ def _waler(*, points=(), contact_face_state="formal"):
         source_width=300.0,
         confidence=0.9,
         candidate_points=tuple(points),
+        selected_candidate_id="line_1",
         selected_start_point_id="P1",
+        selected_end_point_id="P2",
+        selection_source=selection_source,
         contact_face_state=contact_face_state,
+        engineering_line_authority=engineering_line_authority,
     )
 
 
@@ -266,6 +294,48 @@ def _select_state(state, member_id):
 
 
 class DxfReviewPhase3LayoutTests(unittest.TestCase):
+    def test_waler_formalization_uses_only_selected_repair_eligible_subject(self):
+        build_source = inspect.getsource(DXFImportDialog._build_phase3_modification_tools)
+        self.assertIn('text="圍令正式化"', build_source)
+        self.assertIn('command=self._open_waler_formalization', build_source)
+
+        provisional = _waler(contact_face_state="provisional")
+        manual = replace(
+            _waler(
+                contact_face_state="formal",
+                engineering_line_authority="manual_repair",
+            ),
+            id="W2",
+            source_handles=("A2",),
+        )
+        automatic = replace(_waler(), id="W3", source_handles=("A3",))
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = SimpleNamespace(
+            world_result=SimpleNamespace(walers=(provisional, manual, automatic)),
+        )
+
+        for member, expected in ((provisional, "W1"), (manual, "W2"), (automatic, "")):
+            item = replace(
+                _review_item(),
+                key=f"member:waler:{member.id}",
+                display_id=member.id,
+                member_id=member.id,
+                source_handles=member.source_handles,
+            )
+            dialog.review_item_by_key = {item.key: item}
+            dialog.selected_review_item_key = item.key
+            dialog.selection_state = SelectionState(selected_component_id=member.id)
+            self.assertEqual(dialog._selected_waler_formalization_subject_id(), expected)
+
+        dialog.review_workflow.world_result = SimpleNamespace(
+            walers=(provisional, replace(provisional, source_handles=("A4",))),
+        )
+        item = _review_item()
+        dialog.review_item_by_key = {item.key: item}
+        dialog.selected_review_item_key = item.key
+        dialog.selection_state = SelectionState(selected_component_id="W1")
+        self.assertEqual(dialog._selected_waler_formalization_subject_id(), "")
+
     def test_column_repair_uses_only_selected_formal_column_subject(self):
         build_source = inspect.getsource(DXFImportDialog._build_phase3_modification_tools)
         self.assertIn('text="中間柱關聯修補"', build_source)
@@ -589,11 +659,15 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
         self.assertIn("套用於本次所有已辨識構件", init_source)
         self.assertIn("附加到目前工程", init_source)
 
-    def test_preview_no_longer_duplicates_endpoint_buttons(self):
+    def test_preview_restores_generic_endpoint_buttons(self):
         source = inspect.getsource(DXFImportDialog._open_preview_window)
 
-        self.assertNotIn('text="選起點"', source)
-        self.assertNotIn('text="選終點"', source)
+        self.assertIn('text="選起點"', source)
+        self.assertIn('text="選終點"', source)
+        self.assertIn('variable=self.candidate_pick_mode_var', source)
+        self.assertIn('command=lambda: self._begin_candidate_pick("pick_start")', source)
+        self.assertIn('command=lambda: self._begin_candidate_pick("pick_end")', source)
+        self.assertNotIn('text="採用正式圍令"', source)
 
     def test_preview_provides_candidate_apply_and_cancel_actions(self):
         source = inspect.getsource(DXFImportDialog._open_preview_window)
@@ -603,14 +677,262 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
         self.assertIn('text="取消本次選點"', source)
         self.assertIn('command=self._cancel_candidate_changes', source)
 
+    def test_source_exclusion_layout_has_shared_mark_actions_and_main_list(self):
+        main_source = inspect.getsource(
+            DXFImportDialog._build_phase3_modification_tools
+        )
+        preview_source = inspect.getsource(DXFImportDialog._open_preview_window)
+
+        self.assertIn('text="標記待排除"', main_source)
+        self.assertIn('text="待排除來源"', main_source)
+        self.assertIn('columns=("component", "source", "action")', main_source)
+        self.assertIn('("component", "構件 ID"', main_source)
+        self.assertIn('("source", "來源"', main_source)
+        self.assertIn('text="重新辨識並套用（0）"', main_source)
+        self.assertIn('text="捨棄待排除"', main_source)
+        self.assertLess(
+            main_source.index("self.pending_source_tree.grid"),
+            main_source.index("self.pending_source_apply_button"),
+        )
+        self.assertIn("self.preview_source_exclusion_button", preview_source)
+        self.assertIn('text="標記待排除"', preview_source)
+        self.assertIn('command=self._on_source_exclusion_action', preview_source)
+        self.assertNotIn("pending_source_apply_button", preview_source)
+        self.assertNotIn("pending_source_discard_button", preview_source)
+
+    def test_main_and_preview_source_buttons_share_one_draft_state(self):
+        item = _review_item()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.source_exclusion_button = _Button()
+        dialog.preview_source_exclusion_button = _Button()
+        dialog.source_exclusion_status_var = _Variable()
+        dialog.review_workflow = SimpleNamespace(
+            source_exclusion_disabled_reason=lambda _item: "",
+            pending_source_exclusion_contains=lambda _item: True,
+        )
+        dialog._refresh_pending_source_exclusion_controls = Mock()
+
+        dialog._update_source_exclusion_action_state(item)
+
+        self.assertEqual(
+            dialog.source_exclusion_button.options["text"],
+            "取消待排除",
+        )
+        self.assertEqual(
+            dialog.preview_source_exclusion_button.options["text"],
+            "取消待排除",
+        )
+
+    def test_pending_gate_disables_mutation_buttons_with_required_tooltip(self):
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = SimpleNamespace(
+            pending_mutation_disabled_reason=lambda: "請先套用或捨棄待排除來源"
+        )
+        dialog._pending_gate_previous_states = {}
+        dialog.layer_settings_button = _Button(state="normal")
+        dialog.candidate_apply_button = _Button(state="normal")
+        dialog.apply_button = _Button(state="normal")
+        dialog.pause_button = _Button(state="normal")
+
+        dialog._update_pending_action_gate()
+
+        for button in (
+            dialog.layer_settings_button,
+            dialog.candidate_apply_button,
+            dialog.apply_button,
+            dialog.pause_button,
+        ):
+            self.assertEqual(button.options["state"], "disabled")
+            self.assertEqual(
+                button._tooltip_text,
+                "請先套用或捨棄待排除來源",
+            )
+
+        dialog.review_workflow = SimpleNamespace(
+            pending_mutation_disabled_reason=lambda: ""
+        )
+        dialog._update_pending_action_gate()
+        self.assertEqual(dialog.apply_button.options["state"], "normal")
+        self.assertEqual(dialog.apply_button._tooltip_text, "")
+
+    def test_pending_list_action_column_cancels_only_clicked_source(self):
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.pending_source_tree = SimpleNamespace(
+            identify_column=lambda _x: "#3",
+            identify_row=lambda _y: "pending_source_1",
+        )
+        dialog._pending_source_tree_identity_by_iid = {
+            "pending_source_0": "strut:H1",
+            "pending_source_1": "beam:H2",
+        }
+        dialog._cancel_pending_source = Mock()
+
+        dialog._on_pending_source_tree_click(SimpleNamespace(x=10, y=20))
+
+        dialog._cancel_pending_source.assert_called_once_with("beam:H2")
+
+    def test_pending_list_controls_cover_empty_active_stale_and_planning(self):
+        class _Tree:
+            def __init__(self):
+                self.rows = {}
+
+            def get_children(self):
+                return tuple(self.rows)
+
+            def delete(self, *iids):
+                for iid in iids:
+                    self.rows.pop(iid, None)
+
+            def insert(self, _parent, _where, *, iid, values):
+                self.rows[iid] = values
+
+        source = ExcludedSource(
+            "strut",
+            ("H1",),
+            source_layers=("支撐",),
+            display_id_when_excluded="S1",
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.pending_source_tree = _Tree()
+        dialog.pending_source_frame = _GridFrame()
+        dialog.pending_source_apply_button = _Button()
+        dialog.pending_source_discard_button = _Button()
+        dialog._pending_source_exclusion_planning = False
+        dialog._pending_review_item = Mock(return_value=None)
+        dialog._update_pending_action_gate = Mock()
+        workflow = SimpleNamespace(
+            pending_source_exclusion_draft=PendingSourceExclusionDraft(
+                0, "fingerprint", 0
+            )
+        )
+        dialog.review_workflow = workflow
+
+        dialog._refresh_pending_source_exclusion_controls()
+        self.assertFalse(dialog.pending_source_frame.visible)
+        self.assertEqual(
+            dialog.pending_source_frame.options["text"],
+            "待排除來源",
+        )
+        self.assertEqual(
+            dialog.pending_source_apply_button.options["text"],
+            "重新辨識並套用（0）",
+        )
+        self.assertEqual(
+            dialog.pending_source_apply_button.options["state"],
+            "disabled",
+        )
+
+        workflow.pending_source_exclusion_draft = PendingSourceExclusionDraft(
+            0, "fingerprint", 1, (source,), "ACTIVE"
+        )
+        dialog._refresh_pending_source_exclusion_controls()
+        self.assertTrue(dialog.pending_source_frame.visible)
+        self.assertEqual(
+            dialog.pending_source_frame.options["text"],
+            "待排除來源（1，尚未重新辨識）",
+        )
+        self.assertEqual(len(dialog.pending_source_tree.rows), 1)
+        self.assertEqual(
+            dialog.pending_source_apply_button.options["text"],
+            "重新辨識並套用（1）",
+        )
+        self.assertEqual(dialog.pending_source_apply_button.options["state"], "normal")
+        self.assertEqual(
+            dialog.pending_source_discard_button.options["state"],
+            "normal",
+        )
+
+        workflow.pending_source_exclusion_draft = replace(
+            workflow.pending_source_exclusion_draft,
+            state="STALE",
+        )
+        dialog._refresh_pending_source_exclusion_controls()
+        self.assertEqual(
+            dialog.pending_source_apply_button.options["state"],
+            "disabled",
+        )
+        self.assertEqual(
+            dialog.pending_source_discard_button.options["state"],
+            "normal",
+        )
+
+        workflow.pending_source_exclusion_draft = replace(
+            workflow.pending_source_exclusion_draft,
+            state="ACTIVE",
+        )
+        dialog._pending_source_exclusion_planning = True
+        dialog._refresh_pending_source_exclusion_controls()
+        self.assertEqual(
+            dialog.pending_source_apply_button.options["state"],
+            "disabled",
+        )
+        self.assertEqual(
+            dialog.pending_source_discard_button.options["state"],
+            "disabled",
+        )
+
+    def test_pending_list_selection_uses_existing_member_location_path(self):
+        item = _review_item()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog._pending_tree_identity = Mock(return_value="waler:A1")
+        dialog._pending_review_item = Mock(return_value=item)
+        dialog._select_member = Mock()
+        dialog._locate_selected_member = Mock()
+
+        dialog._on_pending_source_selected()
+
+        dialog._select_member.assert_called_once_with(
+            item.member_id,
+            refit=True,
+            clear_problem=True,
+            source="pending_source_list",
+        )
+        dialog._locate_selected_member.assert_called_once()
+
+    def test_zoom_extents_remains_presentation_only_while_pending(self):
+        draft = PendingSourceExclusionDraft(
+            4,
+            "fingerprint",
+            2,
+            (ExcludedSource("waler", ("A1",)),),
+            "ACTIVE",
+        )
+        workflow = SimpleNamespace(
+            revision=4,
+            pending_source_exclusion_draft=draft,
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = workflow
+        dialog.preview_view_bounds = (1.0, 2.0, 3.0, 4.0)
+        dialog.preview_fit_all = False
+        dialog.render_scheduler = Mock()
+
+        dialog._zoom_extents()
+
+        self.assertIsNone(dialog.preview_view_bounds)
+        self.assertTrue(dialog.preview_fit_all)
+        dialog.render_scheduler.request.assert_called_once_with(
+            RenderDirty.FULL_SCENE
+        )
+        self.assertEqual(workflow.revision, 4)
+        self.assertEqual(workflow.pending_source_exclusion_draft, draft)
+
     def test_preview_styles_formal_and_provisional_walers_from_typed_state(self):
         formal = _waler(contact_face_state="formal")
+        manual = replace(
+            _waler(
+                contact_face_state="formal",
+                engineering_line_authority="manual_repair",
+            ),
+            id="W3",
+            source_handles=("A3",),
+        )
         provisional = replace(
             _waler(contact_face_state="provisional"),
             id="W2",
             source_handles=("A2",),
         )
-        result = _result(walers=(formal, provisional))
+        result = _result(walers=(formal, provisional, manual))
         dialog = DXFImportDialog.__new__(DXFImportDialog)
         dialog.result = result
 
@@ -622,8 +944,9 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
 
         self.assertEqual(styles["W1"], ("#2e7d32", 4, None))
         self.assertEqual(styles["W2"], ("#ef6c00", 3, (6, 4)))
+        self.assertEqual(styles["W3"], ("#1565c0", 4, None))
         self.assertIs(dialog.result, result)
-        self.assertEqual(result.walers, (formal, provisional))
+        self.assertEqual(result.walers, (formal, provisional, manual))
 
     def test_engineering_rows_name_provisional_axis_without_promoting_it(self):
         provisional = _waler(contact_face_state="provisional")
@@ -707,7 +1030,7 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
         self.assertNotIn("110.000", values)
         self.assertIn("目前起點", values[3])
 
-    def test_candidate_section_only_shows_for_formal_member_with_points(self):
+    def test_candidate_section_shows_for_formal_or_repairable_waler_with_points(self):
         point = _candidate()
         dialog = DXFImportDialog.__new__(DXFImportDialog)
         dialog.candidate_frame = _GridFrame()
@@ -715,6 +1038,12 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
         dialog._update_candidate_section_visibility(
             _review_item(),
             _waler(points=(point,)),
+        )
+        self.assertTrue(dialog.candidate_frame.visible)
+
+        dialog._update_candidate_section_visibility(
+            _review_item(status="unresolved"),
+            _waler(points=(point,), contact_face_state="provisional"),
         )
         self.assertTrue(dialog.candidate_frame.visible)
 
@@ -726,6 +1055,440 @@ class DxfReviewPhase3LayoutTests(unittest.TestCase):
             None,
         )
         self.assertFalse(dialog.candidate_frame.visible)
+
+    def test_repairable_waler_candidate_action_stays_generic(self):
+        point = _candidate()
+        member = _waler(points=(point,), contact_face_state="provisional")
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.candidate_apply_button = _Button()
+        dialog.preview_apply_candidate_button = _Button()
+        dialog.preview_cancel_candidate_button = _Button()
+        dialog.candidate_detail_var = _Variable()
+        dialog.selection_state = SelectionState(
+            selected_component_id="W1",
+            selected_candidate_point_id="P1",
+            selected_start_point_id="P1",
+            selected_end_point_id="P2",
+            pending_start_point_id="P3",
+            pending_end_point_id="P2",
+        )
+        dialog._selected_member = lambda: member
+        dialog.candidate_point_store = SimpleNamespace(
+            get=lambda _member_id, _point_id: point
+        )
+
+        dialog._update_preview_candidate_action_state()
+        dialog._update_candidate_detail_panel()
+
+        self.assertEqual(
+            dialog.candidate_apply_button.options["text"],
+            "套用選取點",
+        )
+        self.assertNotIn("支撐頂到的面", dialog.candidate_detail_var.get())
+        self.assertNotIn("不是圍令中心線", dialog.candidate_detail_var.get())
+
+    def test_automatic_formal_waler_keeps_generic_candidate_action(self):
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.candidate_apply_button = _Button()
+        dialog.preview_apply_candidate_button = _Button()
+        dialog.preview_cancel_candidate_button = _Button()
+        dialog.selection_state = SelectionState(
+            selected_component_id="W1",
+            selected_start_point_id="P1",
+            selected_end_point_id="P2",
+            pending_start_point_id="P3",
+            pending_end_point_id="P2",
+        )
+        dialog._selected_member = lambda: _waler()
+
+        dialog._update_preview_candidate_action_state()
+
+        self.assertEqual(
+            dialog.candidate_apply_button.options["text"],
+            "套用選取點",
+        )
+
+    def test_provisional_waler_generic_apply_only_changes_geometry(self):
+        member = _waler(contact_face_state="provisional")
+        mutation = SimpleNamespace(invalidated_confirmations=())
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.preview_window = None
+        dialog.window = object()
+        dialog.world_result = object()
+        dialog.selection_state = SelectionState(
+            selected_component_id="W1",
+            pending_start_point_id="P1",
+            pending_end_point_id="P2",
+            pending_selection_source="cad_manual",
+        )
+        dialog.candidate_action_status_var = _Variable()
+        dialog.review_workflow = Mock()
+        dialog.review_workflow.validate_candidate_change.return_value = ()
+        dialog.review_workflow.apply_candidate_change.return_value = mutation
+        dialog._selected_member = lambda: member
+        dialog._clear_waler_adjustment_preview = Mock()
+        dialog._sync_review_workflow_state = Mock()
+        dialog._refresh_result_views = Mock()
+        dialog.selection_controller = SimpleNamespace(
+            synchronize_formal_member=Mock()
+        )
+        dialog._show_workflow_confirmation_invalidations = Mock()
+
+        dialog._apply_candidate_changes()
+
+        dialog.review_workflow.apply_candidate_change.assert_called_once_with(
+            "W1", "P1", "P2", "cad_manual"
+        )
+        dialog.review_workflow.plan_waler_engineering_line_repair.assert_not_called()
+        dialog.review_workflow.commit_waler_engineering_line_repair.assert_not_called()
+        self.assertIn("已套用", dialog.candidate_action_status_var.get())
+
+    def test_manual_repair_waler_generic_apply_is_rejected_without_mutation(self):
+        member = _waler(
+            contact_face_state="formal",
+            engineering_line_authority="manual_repair",
+            selection_source="manual_candidate_points",
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.preview_window = None
+        dialog.window = object()
+        dialog.world_result = object()
+        dialog.selection_state = SelectionState(
+            selected_component_id="W1",
+            pending_start_point_id="P1",
+            pending_end_point_id="P2",
+            pending_selection_source="manual_candidate_points",
+        )
+        dialog.candidate_action_status_var = _Variable()
+        dialog.review_workflow = Mock()
+        dialog._selected_member = lambda: member
+        dialog._clear_waler_adjustment_preview = Mock()
+        dialog._sync_review_workflow_state = Mock()
+        dialog._refresh_result_views = Mock()
+
+        with patch("tkinter.messagebox.showinfo") as showinfo:
+            dialog._apply_candidate_changes()
+
+        self.assertIn("修改工具", dialog.candidate_action_status_var.get())
+        self.assertIn("圍令正式化", dialog.candidate_action_status_var.get())
+        dialog.review_workflow.validate_candidate_change.assert_not_called()
+        dialog.review_workflow.apply_candidate_change.assert_not_called()
+        dialog.review_workflow.plan_waler_engineering_line_repair.assert_not_called()
+        dialog.review_workflow.commit_waler_engineering_line_repair.assert_not_called()
+        dialog._clear_waler_adjustment_preview.assert_not_called()
+        dialog._sync_review_workflow_state.assert_not_called()
+        dialog._refresh_result_views.assert_not_called()
+        self.assertIn("圍令正式化", showinfo.call_args.args[1])
+
+    def test_waler_formalization_session_defaults_and_same_member_cad_pair(self):
+        points = (
+            _candidate("P1", world_point=(0.0, 0.0), valid_for=("start",)),
+            _candidate("P2", world_point=(1000.0, 0.0), valid_for=("end",)),
+            _candidate(
+                "CAD-S",
+                world_point=(0.0, 50.0),
+                point_type="endpoint",
+                point_types=("endpoint", "cad_manual_start"),
+                valid_for=("start",),
+            ),
+            _candidate(
+                "CAD-E",
+                world_point=(1000.0, 50.0),
+                point_type="cad_manual_end",
+                point_types=("cad_manual_end",),
+                valid_for=("end",),
+            ),
+        )
+        member = _waler(points=points, contact_face_state="provisional")
+        other_cad = _candidate(
+            "OTHER-CAD-S",
+            component_id="W2",
+            point_type="cad_manual_start",
+            valid_for=("start",),
+        )
+        point_map = {point.id: point for point in points}
+        store = SimpleNamespace(
+            component_points=lambda member_id: points if member_id == "W1" else (other_cad,),
+            get=lambda member_id, point_id: point_map.get(point_id) if member_id == "W1" else None,
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = SimpleNamespace(
+            world_result=SimpleNamespace(walers=(member,)),
+            revision=12,
+        )
+        dialog.candidate_point_store = store
+
+        session = dialog._build_waler_formalization_session("W1")
+
+        self.assertEqual(session.member_id, "W1")
+        self.assertEqual(session.selected_start_point_id, "P1")
+        self.assertEqual(session.selected_end_point_id, "P2")
+        self.assertEqual(session.cad_start_point_id, "CAD-S")
+        self.assertEqual(session.cad_end_point_id, "CAD-E")
+        self.assertEqual(session.opened_revision, 12)
+        self.assertEqual(session.source_identity, ("A1",))
+        self.assertTrue(session.cad_pair_identity)
+
+        no_cad_member = replace(member, candidate_points=points[:2])
+        dialog.review_workflow.world_result = SimpleNamespace(walers=(no_cad_member,))
+        dialog.candidate_point_store = SimpleNamespace(
+            component_points=lambda _member_id: points[:2],
+            get=lambda _member_id, point_id: point_map.get(point_id),
+        )
+        self.assertIsNone(
+            dialog._build_waler_formalization_session("W1").cad_pair_identity
+        )
+
+    def test_waler_formalization_modal_has_one_adopt_action_and_no_cad_reader(self):
+        source = inspect.getsource(DXFImportDialog._open_waler_formalization)
+
+        self.assertIn('text="點位清單"', source)
+        self.assertIn('text="已讀取的 CAD 線"', source)
+        self.assertEqual(source.count('text="採用正式圍令"'), 1)
+        self.assertIn("WALER_CONTACT_FACE_ADOPTION_NOTICE", source)
+        self.assertNotIn("_read_cad_engineering_line", source)
+
+    def test_waler_formalization_cad_adoption_uses_explicit_source(self):
+        points = (
+            _candidate("P1", world_point=(0.0, 0.0), valid_for=("start",)),
+            _candidate("P2", world_point=(1000.0, 0.0), valid_for=("end",)),
+            _candidate(
+                "CAD-S",
+                world_point=(0.0, 50.0),
+                point_type="cad_manual_start",
+                valid_for=("start",),
+            ),
+            _candidate(
+                "CAD-E",
+                world_point=(1000.0, 50.0),
+                point_type="cad_manual_end",
+                valid_for=("end",),
+            ),
+        )
+        member = _waler(points=points, contact_face_state="provisional")
+        point_map = {point.id: point for point in points}
+        workflow = Mock()
+        workflow.world_result = SimpleNamespace(walers=(member,))
+        workflow.revision = 7
+        workflow.plan_waler_engineering_line_repair.return_value = SimpleNamespace(
+            member_id="W1"
+        )
+        workflow.commit_waler_engineering_line_repair.return_value = SimpleNamespace(
+            invalidated_confirmations=()
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = workflow
+        dialog.candidate_point_store = SimpleNamespace(
+            component_points=lambda _member_id: points,
+            get=lambda _member_id, point_id: point_map.get(point_id),
+        )
+        dialog.waler_formalization_session = dialog._build_waler_formalization_session(
+            "W1"
+        )
+        dialog.waler_formalization_source_var = _Variable("cad_manual")
+        dialog.waler_formalization_start_var = _Variable("P1")
+        dialog.waler_formalization_end_var = _Variable("P2")
+        dialog.waler_formalization_status_var = _Variable()
+        dialog.waler_formalization_window = object()
+        dialog.window = object()
+        dialog._sync_review_workflow_state = Mock()
+        dialog._refresh_result_views = Mock()
+        dialog.selection_controller = SimpleNamespace(
+            synchronize_formal_member=Mock()
+        )
+        dialog._show_workflow_confirmation_invalidations = Mock()
+        dialog._close_waler_formalization = Mock()
+
+        with patch("tkinter.messagebox.askyesno", return_value=True):
+            dialog._adopt_waler_formalization()
+
+        workflow.plan_waler_engineering_line_repair.assert_called_once_with(
+            "W1",
+            "CAD-S",
+            "CAD-E",
+            "cad_manual",
+            selected_candidate_id="",
+        )
+        workflow.commit_waler_engineering_line_repair.assert_called_once()
+        dialog._sync_review_workflow_state.assert_called_once()
+        dialog._refresh_result_views.assert_called_once()
+        dialog._close_waler_formalization.assert_called_once()
+
+    def test_waler_formalization_rejects_updated_cad_before_plan(self):
+        old_points = (
+            _candidate("P1", world_point=(0.0, 0.0), valid_for=("start",)),
+            _candidate("P2", world_point=(1000.0, 0.0), valid_for=("end",)),
+            _candidate(
+                "CAD-S",
+                world_point=(0.0, 50.0),
+                point_type="cad_manual_start",
+                valid_for=("start",),
+            ),
+            _candidate(
+                "CAD-E",
+                world_point=(1000.0, 50.0),
+                point_type="cad_manual_end",
+                valid_for=("end",),
+            ),
+        )
+        new_points = (
+            old_points[0],
+            old_points[1],
+            replace(old_points[2], world_point=(0.0, 75.0)),
+            replace(old_points[3], world_point=(1000.0, 75.0)),
+        )
+        member = _waler(points=old_points, contact_face_state="provisional")
+        workflow = Mock()
+        workflow.world_result = SimpleNamespace(walers=(member,))
+        workflow.revision = 10
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = workflow
+        active_points = [old_points]
+        dialog.candidate_point_store = SimpleNamespace(
+            component_points=lambda _member_id: active_points[0],
+            get=lambda _member_id, point_id: next(
+                (point for point in active_points[0] if point.id == point_id),
+                None,
+            ),
+        )
+        dialog.waler_formalization_session = dialog._build_waler_formalization_session(
+            "W1"
+        )
+        active_points[0] = new_points
+        workflow.world_result = SimpleNamespace(
+            walers=(replace(member, candidate_points=new_points),)
+        )
+        workflow.revision = 11
+        dialog.waler_formalization_source_var = _Variable("cad_manual")
+        dialog.waler_formalization_start_var = _Variable("P1")
+        dialog.waler_formalization_end_var = _Variable("P2")
+        dialog.waler_formalization_status_var = _Variable()
+        dialog.waler_formalization_window = object()
+        dialog.window = object()
+
+        with patch("tkinter.messagebox.showwarning") as showwarning:
+            dialog._adopt_waler_formalization()
+
+        self.assertEqual(
+            dialog.waler_formalization_status_var.get(),
+            "CAD 線已更新，請重新開啟圍令正式化",
+        )
+        self.assertIn(
+            "CAD 線已更新，請重新開啟圍令正式化",
+            showwarning.call_args.args,
+        )
+        workflow.plan_waler_engineering_line_repair.assert_not_called()
+        workflow.commit_waler_engineering_line_repair.assert_not_called()
+
+    def test_waler_formalization_rejects_changed_source_identity_before_plan(self):
+        points = (
+            _candidate("P1", world_point=(0.0, 0.0), valid_for=("start",)),
+            _candidate("P2", world_point=(1000.0, 0.0), valid_for=("end",)),
+        )
+        member = _waler(points=points, contact_face_state="provisional")
+        workflow = Mock()
+        workflow.world_result = SimpleNamespace(walers=(member,))
+        workflow.revision = 2
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = workflow
+        dialog.candidate_point_store = SimpleNamespace(
+            component_points=lambda _member_id: points,
+            get=lambda _member_id, point_id: next(
+                (point for point in points if point.id == point_id),
+                None,
+            ),
+        )
+        dialog.waler_formalization_session = dialog._build_waler_formalization_session(
+            "W1"
+        )
+        workflow.world_result = SimpleNamespace(
+            walers=(replace(member, source_handles=("CHANGED",)),)
+        )
+        dialog.waler_formalization_source_var = _Variable(
+            "manual_candidate_points"
+        )
+        dialog.waler_formalization_start_var = _Variable("P1")
+        dialog.waler_formalization_end_var = _Variable("P2")
+        dialog.waler_formalization_status_var = _Variable()
+        dialog.waler_formalization_window = object()
+        dialog.window = object()
+
+        with patch("tkinter.messagebox.showwarning"):
+            dialog._adopt_waler_formalization()
+
+        self.assertIn("來源已變更", dialog.waler_formalization_status_var.get())
+        workflow.plan_waler_engineering_line_repair.assert_not_called()
+        workflow.commit_waler_engineering_line_repair.assert_not_called()
+
+    def test_waler_formalization_close_discards_only_presentation_state(self):
+        window = Mock()
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.tk = SimpleNamespace(TclError=Exception)
+        dialog.review_workflow = Mock()
+        dialog.waler_formalization_window = window
+        dialog.waler_formalization_session = object()
+        dialog.waler_formalization_source_var = _Variable("cad_manual")
+        dialog.waler_formalization_start_var = _Variable("P1")
+        dialog.waler_formalization_end_var = _Variable("P2")
+        dialog.waler_formalization_status_var = _Variable("pending")
+        dialog.waler_formalization_point_buttons = [Mock()]
+
+        dialog._close_waler_formalization()
+
+        window.destroy.assert_called_once_with()
+        dialog.review_workflow.assert_not_called()
+        self.assertIsNone(dialog.waler_formalization_window)
+        self.assertIsNone(dialog.waler_formalization_session)
+
+    def test_waler_formalization_candidate_source_preserves_matching_line_id(self):
+        points = (
+            _candidate("P1", world_point=(0.0, 0.0), valid_for=("start",)),
+            _candidate("P2", world_point=(1000.0, 0.0), valid_for=("end",)),
+        )
+        member = _waler(points=points, contact_face_state="provisional")
+        point_map = {point.id: point for point in points}
+        workflow = Mock()
+        workflow.world_result = SimpleNamespace(walers=(member,))
+        workflow.revision = 3
+        workflow.plan_waler_engineering_line_repair.return_value = SimpleNamespace(
+            member_id="W1"
+        )
+        workflow.commit_waler_engineering_line_repair.return_value = SimpleNamespace(
+            invalidated_confirmations=()
+        )
+        dialog = DXFImportDialog.__new__(DXFImportDialog)
+        dialog.review_workflow = workflow
+        dialog.candidate_point_store = SimpleNamespace(
+            component_points=lambda _member_id: points,
+            get=lambda _member_id, point_id: point_map.get(point_id),
+        )
+        dialog.waler_formalization_session = dialog._build_waler_formalization_session(
+            "W1"
+        )
+        dialog.waler_formalization_source_var = _Variable("manual_candidate_points")
+        dialog.waler_formalization_start_var = _Variable("P1")
+        dialog.waler_formalization_end_var = _Variable("P2")
+        dialog.waler_formalization_status_var = _Variable()
+        dialog.waler_formalization_window = object()
+        dialog.window = object()
+        dialog._sync_review_workflow_state = Mock()
+        dialog._refresh_result_views = Mock()
+        dialog.selection_controller = SimpleNamespace(
+            synchronize_formal_member=Mock()
+        )
+        dialog._show_workflow_confirmation_invalidations = Mock()
+        dialog._close_waler_formalization = Mock()
+
+        with patch("tkinter.messagebox.askyesno", return_value=True):
+            dialog._adopt_waler_formalization()
+
+        workflow.plan_waler_engineering_line_repair.assert_called_once_with(
+            "W1",
+            "P1",
+            "P2",
+            "manual_candidate_points",
+            selected_candidate_id="line_1",
+        )
 
     def test_engineering_rows_follow_project_order_and_add_length(self):
         first = _strut("S1")

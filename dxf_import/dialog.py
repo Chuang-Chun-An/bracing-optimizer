@@ -39,6 +39,7 @@ from .models import (
     DXFImportError,
     DXFImportResult,
     ERROR_SEVERITIES,
+    ExcludedSource,
     ProblemRecord,
     ReviewItem,
     SelectionState,
@@ -72,6 +73,9 @@ from .waler_contact_adjustment import (
     WalerContactAdjustmentPlan,
     format_adjustment_plan,
 )
+from .waler_engineering_line_repair import (
+    is_waler_engineering_line_repair_eligible,
+)
 from .source_exclusion import (
     normalize_source_handles,
     result_member_counts,
@@ -86,12 +90,40 @@ from .review_workflow import (
     DXFReviewSnapshot,
     DXFReviewWorkflow,
     ReviewMutation,
+    ReviewMutationEffects,
     SourceExclusionPlan,
 )
 from window_layout import (
     _active_monitor_work_areas,
     fit_window_geometry_to_work_areas,
 )
+
+
+WALER_CONTACT_FACE_ADOPTION_NOTICE = (
+    "此線將作為圍令接觸面（支撐頂到的面），不是圍令中心線"
+)
+WALER_FORMALIZATION_SOURCE_POINTS = "manual_candidate_points"
+WALER_FORMALIZATION_SOURCE_CAD = "cad_manual"
+WALER_CAD_UPDATED_MESSAGE = "CAD 線已更新，請重新開啟圍令正式化"
+
+
+@dataclass(frozen=True)
+class WalerFormalizationSession:
+    """Presentation-only inputs captured when the formalization tool opens."""
+
+    member_id: str
+    opened_revision: int
+    source_identity: tuple[str, ...]
+    start_options: tuple[CandidatePoint, ...]
+    end_options: tuple[CandidatePoint, ...]
+    selected_start_point_id: str
+    selected_end_point_id: str
+    cad_start_point_id: str = ""
+    cad_end_point_id: str = ""
+    cad_pair_identity: tuple[
+        tuple[str, float, float],
+        tuple[str, float, float],
+    ] | None = None
 
 
 @dataclass(frozen=True)
@@ -448,6 +480,13 @@ class DXFImportDialog:
         self.column_repair_plan: Any = None
         self.column_repair_details_var: Any = None
         self._column_repair_overlay_items: list[int] = []
+        self.waler_formalization_window: Any = None
+        self.waler_formalization_session: WalerFormalizationSession | None = None
+        self.waler_formalization_source_var: Any = None
+        self.waler_formalization_start_var: Any = None
+        self.waler_formalization_end_var: Any = None
+        self.waler_formalization_status_var: Any = None
+        self.waler_formalization_point_buttons: list[Any] = []
         self._contact_panel_waler_id = ""
         self.problem_record_by_iid: dict[str, ProblemRecord] = {}
         self.selected_problem: ProblemRecord | None = None
@@ -475,6 +514,13 @@ class DXFImportDialog:
         ] = []
         self._error_source_hit_index_stamp: ErrorSourceHitIndexStamp | None = None
         self._preview_render_generation = 0
+        self._preview_scene_revision = -1
+        self._preview_source_geometry_signature: tuple[Any, ...] | None = None
+        self._pending_source_style_handles: set[str] = set()
+        self._pending_source_exclusion_planning = False
+        self._pending_source_tree_identity_by_iid: dict[str, str] = {}
+        self._pending_gate_previous_states: dict[int, tuple[Any, str]] = {}
+        self._tooltip_window: Any = None
         self.preview_scene = PreviewScene()
         self.preview_renderer: PreviewRenderer | None = None
         self.preview_window: Any = None
@@ -485,6 +531,9 @@ class DXFImportDialog:
             self.ui_state.get("preview_geometry", "1100x800+80+80")
         )
         self.developer_expanded = False
+        self._debug_payload_revision: int | None = None
+        self._debug_payload_dirty = True
+        self._debug_payload_text = ""
         self.preview_cursor_var = tk.StringVar(value="游標：—")
         self.preview_coordinate_var = tk.StringVar(value="座標系統：尚未套用")
         self.preview_selected_member_var = tk.StringVar(value="目前構件：—")
@@ -590,20 +639,22 @@ class DXFImportDialog:
         self.import_mode_frame.pack(fill="x", pady=(0, 8))
         import_mode_options = ttk.Frame(self.import_mode_frame)
         import_mode_options.pack(fill="x", padx=8, pady=(4, 0))
-        ttk.Radiobutton(
+        self.replace_import_mode_button = ttk.Radiobutton(
             import_mode_options,
             text="取代目前工程",
             variable=self.mode_var,
             value="replace",
             command=self._on_import_mode_changed,
-        ).pack(side="left", padx=(0, 12))
-        ttk.Radiobutton(
+        )
+        self.replace_import_mode_button.pack(side="left", padx=(0, 12))
+        self.append_import_mode_button = ttk.Radiobutton(
             import_mode_options,
             text="附加到目前工程",
             variable=self.mode_var,
             value="append",
             command=self._on_import_mode_changed,
-        ).pack(side="left")
+        )
+        self.append_import_mode_button.pack(side="left")
         ttk.Label(
             self.import_mode_frame,
             text=(
@@ -625,7 +676,7 @@ class DXFImportDialog:
         self.status_label.pack(side="left", fill="x", expand=True)
         pause_text = "暫停並返回主畫面" if self.allow_pause else "取消"
         pause_command = self._pause if self.allow_pause else self._cancel
-        pause_button = ttk.Button(
+        self.pause_button = ttk.Button(
             footer_actions,
             text=pause_text,
             command=pause_command,
@@ -638,7 +689,7 @@ class DXFImportDialog:
             width=18,
         )
         self.apply_button.pack(side="right")
-        pause_button.pack(side="right", padx=(6, 6))
+        self.pause_button.pack(side="right", padx=(6, 6))
         self.apply_button.configure(state="disabled", text="不可匯入")
         self.status_var.set("請開啟「圖層 ✓」確認用途並開始辨識。")
         self.form_scroll_host.pack(fill="both", expand=True)
@@ -658,6 +709,7 @@ class DXFImportDialog:
 
         self._review_snapshot: DXFReviewSnapshot = self.review_workflow.snapshot
         self._invalidate_error_source_hit_index()
+        self._refresh_pending_source_exclusion_controls()
 
     def _show_workflow_confirmation_invalidations(
         self,
@@ -1374,20 +1426,22 @@ class DXFImportDialog:
         self.candidate_pick_mode_var = self.tk.StringVar(value="")
         self.endpoint_tools_frame = self.ttk.Frame(self.geometry_tools_frame)
         self.endpoint_tools_frame.pack(side="left")
-        self.ttk.Radiobutton(
+        self.candidate_pick_start_button = self.ttk.Radiobutton(
             self.endpoint_tools_frame,
             text="選起點",
             variable=self.candidate_pick_mode_var,
             value="pick_start",
             command=lambda: self._begin_candidate_pick("pick_start"),
-        ).pack(side="left", padx=(0, 5))
-        self.ttk.Radiobutton(
+        )
+        self.candidate_pick_start_button.pack(side="left", padx=(0, 5))
+        self.candidate_pick_end_button = self.ttk.Radiobutton(
             self.endpoint_tools_frame,
             text="選終點",
             variable=self.candidate_pick_mode_var,
             value="pick_end",
             command=lambda: self._begin_candidate_pick("pick_end"),
-        ).pack(side="left", padx=5)
+        )
+        self.candidate_pick_end_button.pack(side="left", padx=5)
         self.cad_engineering_line_button = self.ttk.Button(
             self.geometry_tools_frame,
             text="從 CAD 指定工程線",
@@ -1407,6 +1461,13 @@ class DXFImportDialog:
             command=self._open_column_association_repair,
         )
         self.column_association_repair_button.pack(side="left", padx=(10, 0))
+        self.waler_formalization_button = self.ttk.Button(
+            self.geometry_tools_frame,
+            text="圍令正式化",
+            command=self._open_waler_formalization,
+            state="disabled",
+        )
+        self.waler_formalization_button.pack(side="left", padx=(10, 0))
 
         self.source_tools_frame = self.ttk.Frame(self.modification_tools_frame)
         self.source_tools_frame.grid(
@@ -1419,7 +1480,7 @@ class DXFImportDialog:
         ).pack(side="left", padx=(0, 10))
         self.source_exclusion_button = self.ttk.Button(
             self.source_tools_frame,
-            text="排除此 DXF 來源",
+            text="標記待排除",
             command=self._on_source_exclusion_action,
             state="disabled",
         )
@@ -1435,6 +1496,62 @@ class DXFImportDialog:
         self.source_exclusion_status_label.grid(
             row=2, column=0, sticky="ew", padx=7, pady=(0, 3)
         )
+        self.pending_source_frame = self.ttk.LabelFrame(
+            self.modification_tools_frame,
+            text="待排除來源",
+        )
+        self.pending_source_frame.grid(
+            row=3, column=0, sticky="ew", padx=7, pady=(2, 5)
+        )
+        self.pending_source_frame.columnconfigure(0, weight=1)
+        self.pending_source_tree = self.ttk.Treeview(
+            self.pending_source_frame,
+            columns=("component", "source", "action"),
+            show="headings",
+            selectmode="browse",
+            height=4,
+        )
+        for column, label, width, anchor in (
+            ("component", "構件 ID", 150, "w"),
+            ("source", "來源", 360, "w"),
+            ("action", "操作", 70, "center"),
+        ):
+            self.pending_source_tree.heading(column, text=label)
+            self.pending_source_tree.column(
+                column,
+                width=width,
+                minwidth=60,
+                anchor=anchor,
+                stretch=column == "source",
+            )
+        self.pending_source_tree.grid(
+            row=0, column=0, sticky="ew", padx=5, pady=(5, 3)
+        )
+        self.pending_source_tree.bind(
+            "<<TreeviewSelect>>",
+            self._on_pending_source_selected,
+        )
+        self.pending_source_tree.bind(
+            "<ButtonRelease-1>",
+            self._on_pending_source_tree_click,
+        )
+        pending_actions = self.ttk.Frame(self.pending_source_frame)
+        pending_actions.grid(row=1, column=0, sticky="ew", padx=5, pady=(2, 5))
+        self.pending_source_discard_button = self.ttk.Button(
+            pending_actions,
+            text="捨棄待排除",
+            command=self._discard_pending_source_exclusions,
+            state="disabled",
+        )
+        self.pending_source_discard_button.pack(side="right")
+        self.pending_source_apply_button = self.ttk.Button(
+            pending_actions,
+            text="重新辨識並套用（0）",
+            command=self._apply_pending_source_exclusions,
+            state="disabled",
+        )
+        self.pending_source_apply_button.pack(side="right", padx=(0, 6))
+        self.pending_source_frame.grid_remove()
         self.cad_temp_status_label = self.ttk.Label(
             self.modification_tools_frame,
             textvariable=self.cad_temp_status_var,
@@ -1443,7 +1560,7 @@ class DXFImportDialog:
             justify="left",
         )
         self.cad_temp_status_label.grid(
-            row=3, column=0, sticky="ew", padx=7, pady=(0, 6)
+            row=4, column=0, sticky="ew", padx=7, pady=(0, 6)
         )
 
     def _build_phase3_candidate_section(self, parent: Any) -> None:
@@ -1628,6 +1745,31 @@ class DXFImportDialog:
             textvariable=self.preview_selected_member_var,
             font=("Microsoft JhengHei", 10, "bold"),
         ).pack(side="left", padx=8, pady=5)
+        self.preview_source_exclusion_button = self.ttk.Button(
+            review_toolbar,
+            text="標記待排除",
+            command=self._on_source_exclusion_action,
+            state="disabled",
+        )
+        self.preview_source_exclusion_button.pack(
+            side="left", padx=(2, 8), pady=4
+        )
+        self.preview_pick_start_button = self.ttk.Radiobutton(
+            review_toolbar,
+            text="選起點",
+            variable=self.candidate_pick_mode_var,
+            value="pick_start",
+            command=lambda: self._begin_candidate_pick("pick_start"),
+        )
+        self.preview_pick_start_button.pack(side="left", padx=(4, 2), pady=4)
+        self.preview_pick_end_button = self.ttk.Radiobutton(
+            review_toolbar,
+            text="選終點",
+            variable=self.candidate_pick_mode_var,
+            value="pick_end",
+            command=lambda: self._begin_candidate_pick("pick_end"),
+        )
+        self.preview_pick_end_button.pack(side="left", padx=2, pady=4)
         self.preview_apply_candidate_button = self.ttk.Button(
             review_toolbar,
             text="套用選取點",
@@ -1643,6 +1785,9 @@ class DXFImportDialog:
         )
         self.preview_cancel_candidate_button.pack(side="right", padx=4, pady=4)
         self._update_preview_candidate_action_state()
+        self._update_source_exclusion_action_state(
+            self._selected_review_item()
+        )
 
         # Keep the instruction on its own line so tool controls remain usable
         # on a single, narrower monitor.
@@ -2217,11 +2362,55 @@ class DXFImportDialog:
             )
             self._refresh_double_support_settings_tree()
             self._on_double_support_settings_selected()
-        self.debug_text.delete("1.0", "end")
-        self.debug_text.insert("1.0", json.dumps(self.result.to_debug_dict(), ensure_ascii=False, indent=2))
+        self._invalidate_debug_payload()
         self._update_coordinate_display()
         self._update_import_controls()
         self.render_scheduler.request(preview_dirty)
+
+    def _invalidate_debug_payload(self) -> None:
+        self._debug_payload_dirty = True
+        if getattr(self, "developer_expanded", False):
+            self._refresh_debug_payload()
+
+    def _refresh_debug_payload(self) -> bool:
+        """Render developer JSON for one stable committed workflow revision."""
+
+        try:
+            for _attempt in range(3):
+                snapshot = self.review_workflow.snapshot
+                revision = snapshot.revision
+                if (
+                    not getattr(self, "_debug_payload_dirty", True)
+                    and getattr(self, "_debug_payload_revision", None) == revision
+                ):
+                    return True
+                if snapshot.result is None:
+                    payload: dict[str, Any] = {}
+                else:
+                    payload = snapshot.result.to_debug_dict()
+                payload["review_revision"] = revision
+                payload["manual_replay"] = {
+                    "preserved": list(snapshot.last_manual_replay_report.preserved),
+                    "needs_review": list(snapshot.last_manual_replay_report.needs_review),
+                    "disabled": list(snapshot.last_manual_replay_report.disabled),
+                }
+                text = json.dumps(payload, ensure_ascii=False, indent=2)
+                if self.review_workflow.revision != revision:
+                    continue
+                self.debug_text.delete("1.0", "end")
+                self.debug_text.insert("1.0", text)
+                self._debug_payload_text = text
+                self._debug_payload_revision = revision
+                self._debug_payload_dirty = False
+                return True
+        except Exception as exc:
+            self._debug_payload_dirty = True
+            status_var = getattr(self, "status_var", None)
+            if status_var is not None:
+                status_var.set(f"開發者資料更新失敗，可重新開啟重試：{exc}")
+            return False
+        self._debug_payload_dirty = True
+        return False
 
     def _update_coordinate_display(self) -> None:
         if self.result is None:
@@ -2525,7 +2714,12 @@ class DXFImportDialog:
                 "",
                 "end",
                 iid=iid,
-                values=(record.severity.upper(), record.code, record.component, record.description),
+                values=(
+                    record.severity.upper(),
+                    record.display_type,
+                    record.component,
+                    record.description,
+                ),
                 tags=(record.severity,),
             )
 
@@ -2598,6 +2792,7 @@ class DXFImportDialog:
             self.status_var.set(
                 f"✗ {self.coordinate_error_var.get() or '座標系統尚未套用'}；請完成座標系統設定。"
             )
+            self._update_pending_action_gate()
             return
         error_count = workflow_status.blocking_error_count
         unconfirmed_count = workflow_status.unconfirmed_count
@@ -2627,12 +2822,14 @@ class DXFImportDialog:
                 text=self._import_action_text(),
             )
             self.status_var.set("✓ 圖層與工程模型檢核通過，可以匯入求解器。")
+        self._update_pending_action_gate()
 
     def _toggle_developer_mode(self) -> None:
         self.developer_expanded = not self.developer_expanded
         if self.developer_expanded:
             self.developer_button.configure(text="▼ 開發者模式（原始資料 JSON）")
             self.developer_frame.pack(fill="both", padx=6, pady=(0, 6))
+            self._refresh_debug_payload()
         else:
             self.developer_frame.pack_forget()
             self.developer_button.configure(text="▶ 開發者模式（原始資料 JSON）")
@@ -2676,6 +2873,371 @@ class DXFImportDialog:
             return ""
         matches = [column for column in world.columns if column.id == item.member_id]
         return item.member_id if len(matches) == 1 else ""
+
+    def _selected_waler_formalization_subject_id(self) -> str:
+        """Return the uniquely selected repair-eligible Waler id."""
+
+        item = self._selected_review_item()
+        if item is None or item.role != "waler" or not item.member_id:
+            return ""
+        world = self.review_workflow.world_result
+        if world is None:
+            return ""
+        matches = tuple(waler for waler in world.walers if waler.id == item.member_id)
+        if len(matches) != 1:
+            return ""
+        target = matches[0]
+        source_identity = normalize_source_handles(target.source_handles)
+        if not source_identity or not is_waler_engineering_line_repair_eligible(target):
+            return ""
+        identity_matches = tuple(
+            waler
+            for waler in world.walers
+            if normalize_source_handles(waler.source_handles) == source_identity
+        )
+        return target.id if len(identity_matches) == 1 else ""
+
+    @staticmethod
+    def _candidate_has_type(candidate: CandidatePoint, point_type: str) -> bool:
+        return candidate.point_type == point_type or point_type in candidate.point_types
+
+    @staticmethod
+    def _waler_cad_pair_identity(
+        pair: tuple[CandidatePoint, CandidatePoint] | None,
+    ) -> tuple[tuple[str, float, float], tuple[str, float, float]] | None:
+        if pair is None:
+            return None
+        start, end = pair
+        return (
+            (start.id, float(start.world_point[0]), float(start.world_point[1])),
+            (end.id, float(end.world_point[0]), float(end.world_point[1])),
+        )
+
+    def _waler_cad_pair(
+        self,
+        member_id: str,
+    ) -> tuple[CandidatePoint, CandidatePoint] | None:
+        points = tuple(self.candidate_point_store.component_points(member_id))
+        starts = tuple(
+            point
+            for point in points
+            if "start" in point.valid_for
+            and self._candidate_has_type(point, "cad_manual_start")
+        )
+        ends = tuple(
+            point
+            for point in points
+            if "end" in point.valid_for
+            and self._candidate_has_type(point, "cad_manual_end")
+        )
+        if len(starts) != 1 or len(ends) != 1:
+            return None
+        return starts[0], ends[0]
+
+    def _build_waler_formalization_session(
+        self,
+        member_id: str,
+    ) -> WalerFormalizationSession:
+        world = self.review_workflow.world_result
+        if world is None:
+            raise DXFImportError("請先完成 DXF 辨識。")
+        matches = tuple(waler for waler in world.walers if waler.id == member_id)
+        if len(matches) != 1 or not is_waler_engineering_line_repair_eligible(matches[0]):
+            raise DXFImportError("此圍令不可使用圍令正式化工具。")
+        member = matches[0]
+        points = tuple(self.candidate_point_store.component_points(member_id))
+        start_options = tuple(point for point in points if "start" in point.valid_for)
+        end_options = tuple(point for point in points if "end" in point.valid_for)
+        start_ids = {point.id for point in start_options}
+        end_ids = {point.id for point in end_options}
+        if (
+            member.selected_start_point_id not in start_ids
+            or member.selected_end_point_id not in end_ids
+        ):
+            raise DXFImportError(
+                "目前圍令起終點無法對應點位清單，請重新整理或修正 DXF Review 資料。"
+            )
+        cad_pair = self._waler_cad_pair(member_id)
+        return WalerFormalizationSession(
+            member_id=member_id,
+            opened_revision=int(getattr(self.review_workflow, "revision", 0)),
+            source_identity=normalize_source_handles(member.source_handles),
+            start_options=start_options,
+            end_options=end_options,
+            selected_start_point_id=member.selected_start_point_id,
+            selected_end_point_id=member.selected_end_point_id,
+            cad_start_point_id=cad_pair[0].id if cad_pair else "",
+            cad_end_point_id=cad_pair[1].id if cad_pair else "",
+            cad_pair_identity=self._waler_cad_pair_identity(cad_pair),
+        )
+
+    @staticmethod
+    def _waler_formalization_point_label(point: CandidatePoint) -> str:
+        return (
+            f"{point.id}｜{point.label}｜"
+            f"WCS ({point.world_point[0]:.3f}, {point.world_point[1]:.3f})"
+        )
+
+    def _close_waler_formalization(self) -> None:
+        window = getattr(self, "waler_formalization_window", None)
+        self.waler_formalization_window = None
+        self.waler_formalization_session = None
+        self.waler_formalization_source_var = None
+        self.waler_formalization_start_var = None
+        self.waler_formalization_end_var = None
+        self.waler_formalization_status_var = None
+        self.waler_formalization_point_buttons = []
+        if window is not None:
+            try:
+                window.destroy()
+            except self.tk.TclError:
+                pass
+
+    def _update_waler_formalization_source_state(self) -> None:
+        source_var = getattr(self, "waler_formalization_source_var", None)
+        source = source_var.get() if source_var is not None else ""
+        state = "normal" if source == WALER_FORMALIZATION_SOURCE_POINTS else "disabled"
+        for button in getattr(self, "waler_formalization_point_buttons", ()):
+            button.configure(state=state)
+
+    def _open_waler_formalization(self) -> None:
+        from tkinter import messagebox
+
+        member_id = self._selected_waler_formalization_subject_id()
+        if not member_id:
+            messagebox.showwarning(
+                "圍令正式化",
+                "請先選取一支可修補的暫定圍令或人工正式圍令。",
+                parent=self.window,
+            )
+            return
+        try:
+            session = self._build_waler_formalization_session(member_id)
+        except DXFImportError as exc:
+            messagebox.showwarning("圍令正式化", str(exc), parent=self.window)
+            return
+
+        self._close_waler_formalization()
+        window = self.tk.Toplevel(self.window)
+        self.waler_formalization_window = window
+        self.waler_formalization_session = session
+        window.title(f"圍令正式化 — {member_id}")
+        window.transient(self.window)
+        window.protocol("WM_DELETE_WINDOW", self._close_waler_formalization)
+        frame = self.ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        self.ttk.Label(
+            frame,
+            text=f"{member_id}（本視窗只處理此圍令）",
+            font=("Microsoft JhengHei", 10, "bold"),
+        ).pack(anchor="w")
+        self.ttk.Label(
+            frame,
+            text=WALER_CONTACT_FACE_ADOPTION_NOTICE,
+            foreground="#c62828",
+            wraplength=780,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 8))
+
+        self.waler_formalization_source_var = self.tk.StringVar(
+            value=WALER_FORMALIZATION_SOURCE_POINTS
+        )
+        source_frame = self.ttk.LabelFrame(frame, text="線的來源")
+        source_frame.pack(fill="x", pady=(0, 8))
+        self.ttk.Radiobutton(
+            source_frame,
+            text="點位清單",
+            variable=self.waler_formalization_source_var,
+            value=WALER_FORMALIZATION_SOURCE_POINTS,
+            command=self._update_waler_formalization_source_state,
+        ).pack(side="left", padx=8, pady=5)
+        self.ttk.Radiobutton(
+            source_frame,
+            text="已讀取的 CAD 線",
+            variable=self.waler_formalization_source_var,
+            value=WALER_FORMALIZATION_SOURCE_CAD,
+            command=self._update_waler_formalization_source_state,
+            state="normal" if session.cad_pair_identity is not None else "disabled",
+        ).pack(side="left", padx=8, pady=5)
+        if session.cad_pair_identity is None:
+            self.ttk.Label(
+                source_frame,
+                text="目前沒有針對此圍令讀取的 CAD 線。",
+                foreground="#616161",
+            ).pack(side="left", padx=8)
+
+        point_frame = self.ttk.Frame(frame)
+        point_frame.pack(fill="both", expand=True)
+        start_frame = self.ttk.LabelFrame(point_frame, text="起點")
+        start_frame.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        end_frame = self.ttk.LabelFrame(point_frame, text="終點")
+        end_frame.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        self.waler_formalization_start_var = self.tk.StringVar(
+            value=session.selected_start_point_id
+        )
+        self.waler_formalization_end_var = self.tk.StringVar(
+            value=session.selected_end_point_id
+        )
+        self.waler_formalization_point_buttons = []
+        for option in session.start_options:
+            button = self.ttk.Radiobutton(
+                start_frame,
+                text=self._waler_formalization_point_label(option),
+                variable=self.waler_formalization_start_var,
+                value=option.id,
+            )
+            button.pack(anchor="w", padx=6, pady=2)
+            self.waler_formalization_point_buttons.append(button)
+        for option in session.end_options:
+            button = self.ttk.Radiobutton(
+                end_frame,
+                text=self._waler_formalization_point_label(option),
+                variable=self.waler_formalization_end_var,
+                value=option.id,
+            )
+            button.pack(anchor="w", padx=6, pady=2)
+            self.waler_formalization_point_buttons.append(button)
+
+        self.waler_formalization_status_var = self.tk.StringVar(value="")
+        self.ttk.Label(
+            frame,
+            textvariable=self.waler_formalization_status_var,
+            foreground="#c62828",
+            wraplength=780,
+            justify="left",
+        ).pack(fill="x", pady=(8, 2))
+        actions = self.ttk.Frame(frame)
+        actions.pack(fill="x", pady=(6, 0))
+        self.ttk.Button(
+            actions,
+            text="採用正式圍令",
+            command=self._adopt_waler_formalization,
+        ).pack(side="right", padx=(6, 0))
+        self.ttk.Button(
+            actions,
+            text="取消",
+            command=self._close_waler_formalization,
+        ).pack(side="right")
+        self._update_waler_formalization_source_state()
+
+    def _adopt_waler_formalization(self) -> None:
+        from tkinter import messagebox
+
+        session = getattr(self, "waler_formalization_session", None)
+        source_var = getattr(self, "waler_formalization_source_var", None)
+        if session is None or source_var is None:
+            return
+        parent = getattr(self, "waler_formalization_window", None) or self.window
+        world = self.review_workflow.world_result
+        matches = tuple(
+            waler for waler in getattr(world, "walers", ())
+            if waler.id == session.member_id
+        )
+        if len(matches) != 1 or not is_waler_engineering_line_repair_eligible(matches[0]):
+            message = "此圍令已變更或不再適用圍令正式化，請重新開啟工具。"
+            self.waler_formalization_status_var.set(message)
+            messagebox.showwarning("圍令正式化", message, parent=parent)
+            return
+        member = matches[0]
+        current_identity = normalize_source_handles(member.source_handles)
+        identity_matches = tuple(
+            waler
+            for waler in getattr(world, "walers", ())
+            if normalize_source_handles(waler.source_handles) == current_identity
+        )
+        if (
+            not current_identity
+            or current_identity != session.source_identity
+            or len(identity_matches) != 1
+        ):
+            message = "此圍令來源已變更或不再唯一，請重新開啟圍令正式化。"
+            self.waler_formalization_status_var.set(message)
+            messagebox.showwarning("圍令正式化", message, parent=parent)
+            return
+        source = source_var.get()
+        selected_candidate_id = ""
+        if source == WALER_FORMALIZATION_SOURCE_CAD:
+            current_pair = self._waler_cad_pair(session.member_id)
+            current_revision = int(getattr(self.review_workflow, "revision", 0))
+            if (
+                current_revision != session.opened_revision
+                or session.cad_pair_identity is None
+                or self._waler_cad_pair_identity(current_pair)
+                != session.cad_pair_identity
+            ):
+                self.waler_formalization_status_var.set(WALER_CAD_UPDATED_MESSAGE)
+                messagebox.showwarning(
+                    "圍令正式化",
+                    WALER_CAD_UPDATED_MESSAGE,
+                    parent=parent,
+                )
+                return
+            assert current_pair is not None
+            start_point_id, end_point_id = current_pair[0].id, current_pair[1].id
+            input_kind = WALER_FORMALIZATION_SOURCE_CAD
+            source_label = "已讀取的 CAD 線"
+        else:
+            start_point_id = str(self.waler_formalization_start_var.get() or "")
+            end_point_id = str(self.waler_formalization_end_var.get() or "")
+            start = self.candidate_point_store.get(session.member_id, start_point_id)
+            end = self.candidate_point_store.get(session.member_id, end_point_id)
+            if (
+                start is None
+                or end is None
+                or "start" not in start.valid_for
+                or "end" not in end.valid_for
+            ):
+                message = "所選起終點已失效，請重新開啟圍令正式化。"
+                self.waler_formalization_status_var.set(message)
+                messagebox.showwarning("圍令正式化", message, parent=parent)
+                return
+            input_kind = WALER_FORMALIZATION_SOURCE_POINTS
+            source_label = "點位清單"
+            if (
+                start_point_id == member.selected_start_point_id
+                and end_point_id == member.selected_end_point_id
+            ):
+                selected_candidate_id = member.selected_candidate_id
+
+        if not messagebox.askyesno(
+            "採用正式圍令",
+            f"{WALER_CONTACT_FACE_ADOPTION_NOTICE}\n\n"
+            f"線的來源：{source_label}\n"
+            "確定採用這條線嗎？",
+            parent=parent,
+        ):
+            return
+        try:
+            plan = self.review_workflow.plan_waler_engineering_line_repair(
+                session.member_id,
+                start_point_id,
+                end_point_id,
+                input_kind,
+                selected_candidate_id=selected_candidate_id,
+            )
+            mutation = self.review_workflow.commit_waler_engineering_line_repair(plan)
+            self._sync_review_workflow_state()
+        except DXFImportError as exc:
+            self.waler_formalization_status_var.set(str(exc))
+            messagebox.showerror("圍令正式化失敗", str(exc), parent=parent)
+            return
+
+        self._close_waler_formalization()
+        self._refresh_result_views(
+            preview_dirty=(
+                RenderDirty.COMPONENT_LAYER
+                | RenderDirty.COMPONENT_SELECTION
+                | RenderDirty.CANDIDATE_LAYER
+                | RenderDirty.CANDIDATE_SELECTION
+                | RenderDirty.TEMP_LINE
+                | RenderDirty.DETAIL_PANEL
+                | RenderDirty.TREE_SELECTION
+            ),
+            rebuild_candidate_tree=True,
+        )
+        self.selection_controller.synchronize_formal_member()
+        self._show_workflow_confirmation_invalidations(mutation)
 
     def _column_repair_problem_reason(self, plan: Any) -> str:
         source = normalize_source_handles(plan.column_source_handles)
@@ -3391,6 +3953,62 @@ class DXFImportDialog:
             )))
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_pending_source_exclusion_impact(
+        before_result: DXFImportResult,
+        before_confirmations: Mapping[str, str],
+        pending_sources: Sequence[ExcludedSource],
+        stage: SourceExclusionPlan,
+    ) -> str:
+        """Format one aggregate impact from the final canonical plan only."""
+
+        before_members = sum(result_member_counts(before_result).values())
+        after_members = sum(result_member_counts(stage.result).values())
+        before_severity = result_severity_counts(before_result)
+        after_severity = result_severity_counts(stage.result)
+        warning_delta = after_severity.get("warning", 0) - before_severity.get(
+            "warning", 0
+        )
+        error_delta = (
+            after_severity.get("error", 0)
+            + after_severity.get("critical", 0)
+            - before_severity.get("error", 0)
+            - before_severity.get("critical", 0)
+        )
+        invalidated_confirmations = tuple(
+            identity
+            for identity in before_confirmations
+            if identity not in stage.review_confirmations
+        )
+        replay = stage.manual_replay
+        lines = [
+            "以下為所有待排除來源合併後的結果",
+            "",
+            "待排除來源：",
+        ]
+        lines.extend(
+            "• "
+            + (source.display_id_when_excluded or source.identity)
+            + f"（{source.role} / Handle {', '.join(source.source_handles)}）"
+            for source in pending_sources
+        )
+        lines.extend(
+            (
+                "",
+                "重新計算後：",
+                f"• 正式構件 {before_members} → {after_members}（{after_members - before_members:+d}）",
+                f"• 警告變化：{warning_delta:+d}",
+                f"• 錯誤／嚴重錯誤變化：{error_delta:+d}",
+                f"• 人工輸入成功保留：{len(replay.preserved)}",
+                f"• 人工輸入需要重新確認：{len(replay.needs_review)}",
+                f"• 因來源仍被排除而停用：{len(replay.disabled)}",
+                f"• 失效確認：{len(invalidated_confirmations)}",
+                "",
+                "若結果不如預期，可取消個別待排除後重新套用",
+            )
+        )
+        return "\n".join(lines)
+
     def _commit_source_exclusion_stage(
         self,
         stage: SourceExclusionPlan,
@@ -3407,11 +4025,84 @@ class DXFImportDialog:
         self.selected_review_item_key = selected_key
         self.selection_state = SelectionState(selection_source="component_tree")
         self.selection_controller.state = self.selection_state
-        self.preview_view_bounds = None
         self.preview_fit_all = False
-        self._refresh_result_views()
+        self._refresh_result_views(
+            preview_dirty=self._source_exclusion_render_dirty(mutation.effects),
+        )
         self._show_workflow_confirmation_invalidations(mutation)
         return mutation
+
+    @staticmethod
+    def _dialog_source_geometry_signature(
+        result: DXFImportResult | None,
+    ) -> tuple[Any, ...] | None:
+        if result is None:
+            return None
+        return tuple(
+            (
+                geometry.role,
+                geometry.source_handle,
+                geometry.points,
+                geometry.closed,
+                geometry.source_layer,
+                geometry.source_entity_type,
+            )
+            for geometry in result.source_geometry
+        )
+
+    def _source_exclusion_render_dirty(
+        self,
+        effects: ReviewMutationEffects | None,
+    ) -> RenderDirty:
+        """Map application effects to a safe preview-layer refresh."""
+
+        if effects is None or self.result is None:
+            return RenderDirty.FULL_SCENE
+        current_revision = self.review_workflow.revision
+        current_signature = self._dialog_source_geometry_signature(self.result)
+        if (
+            effects.committed_revision != current_revision
+            or effects.source_geometry_changed
+            or effects.source_bounds_changed
+            or getattr(self, "preview_renderer", None) is None
+            or getattr(self, "preview_transform", None) is None
+            or getattr(self, "_preview_scene_revision", -1)
+            != effects.committed_revision - 1
+            or getattr(self, "_preview_source_geometry_signature", None)
+            != current_signature
+        ):
+            return RenderDirty.FULL_SCENE
+
+        changed_handles = set(effects.changed_source_handles)
+        indexed_handles = set(self.preview_scene.source_handle_items)
+        visible_changed_handles = {
+            geometry.source_handle
+            for geometry in self._preview_source_geometry(self.result)
+            if geometry.source_handle in changed_handles
+            and self._preview_intersects(
+                tuple(
+                    self.result.coordinate_system.transform(point)
+                    for point in geometry.points
+                )
+            )
+        }
+        if visible_changed_handles - indexed_handles:
+            return RenderDirty.FULL_SCENE
+
+        self._pending_source_style_handles.update(changed_handles)
+        dirty = RenderDirty.SOURCE_STYLE
+        if effects.engineering_members_changed or effects.problems_changed:
+            dirty |= RenderDirty.COMPONENT_LAYER
+        if effects.candidate_points_changed:
+            dirty |= RenderDirty.CANDIDATE_LAYER
+        if effects.selection_targets_invalidated:
+            dirty |= (
+                RenderDirty.COMPONENT_SELECTION
+                | RenderDirty.CANDIDATE_SELECTION
+                | RenderDirty.TREE_SELECTION
+                | RenderDirty.DETAIL_PANEL
+            )
+        return dirty
 
     def _on_source_exclusion_action(self) -> None:
         from tkinter import messagebox
@@ -3426,9 +4117,288 @@ class DXFImportDialog:
                     parent=self.window,
                 )
             return
+        old_handles = set(self._pending_source_handles())
         try:
-            stage, restoring, identity = (
-                self.review_workflow.plan_source_exclusion_for_item(item)
+            if item.status == "excluded":
+                stage, restoring, identity = (
+                    self.review_workflow.plan_source_exclusion_for_item(item)
+                )
+                if not messagebox.askyesno(
+                    "確認復原 DXF 來源",
+                    self._format_source_exclusion_impact(
+                        item,
+                        stage,
+                        restoring=restoring,
+                    ),
+                    parent=self.window,
+                ):
+                    return
+                selected = self._stage_review_item_for_identity(
+                    stage,
+                    identity,
+                    excluded=False,
+                )
+                self._commit_source_exclusion_stage(
+                    stage,
+                    selected.key if selected is not None else "",
+                    initiating_member_ids=(
+                        (item.member_id,) if item.member_id else ()
+                    ),
+                )
+                self.source_exclusion_status_var.set(
+                    f"已復原 {item.display_id}；工程關聯與檢核結果已重新計算。"
+                )
+                return
+            if self.review_workflow.pending_source_exclusion_contains(item):
+                self.review_workflow.unmark_source_exclusion(item)
+                action = "已取消待排除"
+            else:
+                self.review_workflow.mark_source_exclusion(item)
+                action = "已標記待排除"
+        except Exception as exc:
+            error_text = (
+                str(exc)
+                if isinstance(exc, DXFImportError)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            messagebox.showerror(
+                "DXF 來源排除失敗",
+                f"目前辨識結果完全未變更。\n\n{error_text}",
+                parent=self.window,
+            )
+            return
+        self._sync_review_workflow_state()
+        self._refresh_pending_source_visuals(old_handles)
+        self._update_selected_member_panel(rebuild_candidates=False)
+        self.source_exclusion_status_var.set(f"{action}：{item.display_id}")
+
+    def _pending_source_handles(self) -> tuple[str, ...]:
+        draft = getattr(
+            getattr(self, "review_workflow", None),
+            "pending_source_exclusion_draft",
+            None,
+        )
+        sources = getattr(draft, "sources", ())
+        if not isinstance(sources, (tuple, list)):
+            sources = ()
+        return tuple(
+            sorted(
+                {
+                    handle
+                    for source in sources
+                    for handle in source.source_handles
+                }
+            )
+        )
+
+    def _refresh_pending_source_visuals(
+        self,
+        previous_handles: Sequence[str] = (),
+    ) -> None:
+        handles = set(previous_handles) | set(self._pending_source_handles())
+        if not handles:
+            return
+        self._pending_source_style_handles.update(handles)
+        scheduler = getattr(self, "render_scheduler", None)
+        if scheduler is not None:
+            scheduler.request(RenderDirty.SOURCE_STYLE)
+
+    def _pending_review_item(self, identity: str) -> ReviewItem | None:
+        return self.review_workflow.review_item_for_identity(
+            self.review_items,
+            identity,
+            excluded=False,
+        )
+
+    @staticmethod
+    def _pending_source_description(source: ExcludedSource) -> str:
+        layers = ", ".join(source.source_layers) or "—"
+        handles = ", ".join(source.source_handles) or "—"
+        return f"{source.role}｜圖層 {layers}｜Handle {handles}"
+
+    def _refresh_pending_source_exclusion_controls(self) -> None:
+        workflow = getattr(self, "review_workflow", None)
+        if workflow is None:
+            return
+        draft = workflow.pending_source_exclusion_draft
+        tree = getattr(self, "pending_source_tree", None)
+        if tree is not None:
+            tree.delete(*tree.get_children())
+            self._pending_source_tree_identity_by_iid = {}
+            for index, source in enumerate(draft.sources):
+                item = self._pending_review_item(source.identity)
+                iid = f"pending_source_{index}"
+                self._pending_source_tree_identity_by_iid[iid] = source.identity
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        (
+                            item.display_id
+                            if item is not None
+                            else source.display_id_when_excluded or source.identity
+                        ),
+                        self._pending_source_description(source),
+                        "取消",
+                    ),
+                )
+        frame = getattr(self, "pending_source_frame", None)
+        if frame is not None:
+            if draft.sources:
+                frame.configure(
+                    text=(
+                        f"待排除來源（{len(draft.sources)}，尚未重新辨識）"
+                    )
+                )
+                frame.grid()
+            else:
+                frame.configure(text="待排除來源")
+                frame.grid_remove()
+        planning = bool(
+            getattr(self, "_pending_source_exclusion_planning", False)
+        )
+        apply_button = getattr(self, "pending_source_apply_button", None)
+        if apply_button is not None:
+            apply_button.configure(
+                text=f"重新辨識並套用（{len(draft.sources)}）",
+                state=(
+                    "normal"
+                    if draft.sources and draft.state == "ACTIVE" and not planning
+                    else "disabled"
+                ),
+            )
+        discard_button = getattr(self, "pending_source_discard_button", None)
+        if discard_button is not None:
+            discard_button.configure(
+                state="normal" if draft.sources and not planning else "disabled"
+            )
+        self._update_pending_action_gate()
+
+    def _pending_tree_identity(self) -> str:
+        tree = getattr(self, "pending_source_tree", None)
+        if tree is None:
+            return ""
+        selection = tree.selection()
+        if not selection:
+            return ""
+        return self._pending_source_tree_identity_by_iid.get(selection[0], "")
+
+    def _on_pending_source_selected(self, _event: Any = None) -> None:
+        identity = self._pending_tree_identity()
+        if not identity:
+            return
+        item = self._pending_review_item(identity)
+        if item is None:
+            return
+        if item.member_id:
+            self._select_member(
+                item.member_id,
+                refit=True,
+                clear_problem=True,
+                source="pending_source_list",
+            )
+        else:
+            self._select_unresolved_review_item(
+                item,
+                source="pending_source_list",
+            )
+        self._locate_selected_member()
+
+    def _on_pending_source_tree_click(self, event: Any) -> None:
+        tree = getattr(self, "pending_source_tree", None)
+        if tree is None or tree.identify_column(event.x) != "#3":
+            return
+        iid = tree.identify_row(event.y)
+        identity = self._pending_source_tree_identity_by_iid.get(iid, "")
+        if identity:
+            self._cancel_pending_source(identity)
+
+    def _cancel_pending_source(self, identity: str) -> None:
+        old_handles = set(self._pending_source_handles())
+        try:
+            self.review_workflow.unmark_source_exclusion(identity)
+        except DXFImportError as exc:
+            from tkinter import messagebox
+
+            messagebox.showerror(
+                "取消待排除失敗",
+                str(exc),
+                parent=self.window,
+            )
+            return
+        self._sync_review_workflow_state()
+        self._refresh_pending_source_visuals(old_handles)
+        self._update_source_exclusion_action_state(self._selected_review_item())
+
+    def _discard_pending_source_exclusions(self) -> None:
+        old_handles = set(self._pending_source_handles())
+        self.review_workflow.discard_pending_source_exclusions()
+        self._sync_review_workflow_state()
+        self._refresh_pending_source_visuals(old_handles)
+        self._update_selected_member_panel(rebuild_candidates=False)
+        self.source_exclusion_status_var.set("已捨棄所有待排除來源。")
+
+    def _apply_pending_source_exclusions(self) -> None:
+        from tkinter import messagebox
+
+        draft = self.review_workflow.pending_source_exclusion_draft
+        if not draft.sources or self.result is None:
+            return
+        before_result = self.result
+        before_confirmations = self.review_workflow.confirmed_snapshot()
+        pending_sources = draft.sources
+        initiating_member_ids = tuple(
+            item.member_id
+            for source in pending_sources
+            for item in (self._pending_review_item(source.identity),)
+            if item is not None and item.member_id
+        )
+        self._pending_source_exclusion_planning = True
+        self._refresh_pending_source_exclusion_controls()
+        stage: SourceExclusionPlan | None = None
+        try:
+            stage = self.review_workflow.plan_pending_source_exclusions()
+            impact = self._format_pending_source_exclusion_impact(
+                before_result,
+                before_confirmations,
+                pending_sources,
+                stage,
+            )
+        except Exception as exc:
+            if stage is not None:
+                self.review_workflow.cancel_pending_source_exclusion_plan(stage)
+            error_text = (
+                str(exc)
+                if isinstance(exc, DXFImportError)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            messagebox.showerror(
+                "DXF 來源排除 staging 失敗",
+                f"目前辨識結果與待排除清單完全未變更。\n\n{error_text}",
+                parent=self.window,
+            )
+            return
+        finally:
+            self._pending_source_exclusion_planning = False
+            self._refresh_pending_source_exclusion_controls()
+        if not messagebox.askyesno(
+            "確認重新辨識並套用",
+            impact,
+            parent=self.window,
+        ):
+            self.review_workflow.cancel_pending_source_exclusion_plan(stage)
+            return
+        selected = self._stage_review_item_for_identity(
+            stage,
+            pending_sources[0].identity,
+            excluded=True,
+        )
+        try:
+            self._commit_source_exclusion_stage(
+                stage,
+                selected.key if selected is not None else "",
+                initiating_member_ids=initiating_member_ids,
             )
         except Exception as exc:
             error_text = (
@@ -3437,43 +4407,14 @@ class DXFImportDialog:
                 else f"{type(exc).__name__}: {exc}"
             )
             messagebox.showerror(
-                "DXF 來源排除 staging 失敗",
-                f"目前辨識結果完全未變更。\n\n{error_text}",
-                parent=self.window,
-            )
-            return
-        title = "確認復原 DXF 來源" if restoring else "確認排除 DXF 來源"
-        if not messagebox.askyesno(
-            title,
-            self._format_source_exclusion_impact(
-                item,
-                stage,
-                restoring=restoring,
-            ),
-            parent=self.window,
-        ):
-            return
-        selected = self._stage_review_item_for_identity(
-            stage,
-            identity,
-            excluded=not restoring,
-        )
-        try:
-            self._commit_source_exclusion_stage(
-                stage,
-                selected.key if selected is not None else "",
-                initiating_member_ids=((item.member_id,) if item.member_id else ()),
-            )
-        except DXFImportError as exc:
-            messagebox.showerror(
                 "DXF 來源排除套用失敗",
-                f"目前辨識結果完全未變更。\n\n{exc}",
+                f"目前辨識結果與待排除清單完全未變更。\n\n{error_text}",
                 parent=self.window,
             )
+            self._refresh_pending_source_exclusion_controls()
             return
-        action = "復原" if restoring else "排除"
         self.source_exclusion_status_var.set(
-            f"已{action} {item.display_id}；工程關聯與檢核結果已重新計算。"
+            f"已套用 {len(pending_sources)} 筆來源排除；工程關聯與檢核結果已重新計算。"
         )
 
     def _member_by_id(
@@ -3892,7 +4833,11 @@ class DXFImportDialog:
             row = {
                 **row,
                 "ContactFaceState": (
-                    "正式接觸面"
+                    (
+                        "正式接觸面（人工採用）"
+                        if member.engineering_line_authority == "manual_repair"
+                        else "正式接觸面（自動辨識）"
+                    )
                     if member.has_formal_contact_face
                     else "暫定中心軸（尚未完成接觸面）"
                 ),
@@ -4096,12 +5041,19 @@ class DXFImportDialog:
             and item.role in FORMAL_REVIEW_ROLES
             and member is not None
         )
+        repair_eligible = bool(
+            isinstance(member, Waler)
+            and is_waler_engineering_line_repair_eligible(member)
+        )
         has_candidates = bool(
-            formal and getattr(member, "candidate_points", ())
+            (formal or repair_eligible) and getattr(member, "candidate_points", ())
         )
         cad_supported = isinstance(member, (Waler, Strut, Brace))
         source_supported = bool(
             item is not None and item.role and item.source_handles
+        )
+        has_pending_sources = bool(
+            self.review_workflow.pending_source_exclusion_draft.sources
         )
         repair_supported = not self.corner_brace_repair_disabled_reason(item)
 
@@ -4109,6 +5061,7 @@ class DXFImportDialog:
         self.cad_engineering_line_button.pack_forget()
         self.corner_brace_repair_button.pack_forget()
         self.column_association_repair_button.pack_forget()
+        self.waler_formalization_button.pack_forget()
         if has_candidates:
             self.endpoint_tools_frame.pack(side="left")
         if cad_supported:
@@ -4127,20 +5080,43 @@ class DXFImportDialog:
             self.column_association_repair_button.pack(side="left", padx=(10, 0))
         else:
             self.column_association_repair_button.configure(state="disabled")
-        if has_candidates or cad_supported or repair_supported or column_repair_available:
+        waler_formalization_available = bool(
+            self._selected_waler_formalization_subject_id()
+        )
+        if waler_formalization_available:
+            self.waler_formalization_button.configure(state="normal")
+            self.waler_formalization_button.pack(side="left", padx=(10, 0))
+        else:
+            self.waler_formalization_button.configure(state="disabled")
+        if (
+            has_candidates
+            or cad_supported
+            or repair_supported
+            or column_repair_available
+            or waler_formalization_available
+        ):
             self.geometry_tools_frame.grid()
         else:
             self.geometry_tools_frame.grid_remove()
-        if source_supported:
+        if source_supported or has_pending_sources:
             self.source_tools_frame.grid()
             self.source_exclusion_status_label.grid()
         else:
             self.source_tools_frame.grid_remove()
             self.source_exclusion_status_label.grid_remove()
-        if has_candidates or cad_supported or repair_supported or column_repair_available or source_supported:
+        if (
+            has_candidates
+            or cad_supported
+            or repair_supported
+            or column_repair_available
+            or waler_formalization_available
+            or source_supported
+            or has_pending_sources
+        ):
             frame.grid()
         else:
             frame.grid_remove()
+        self._refresh_pending_source_exclusion_controls()
 
     def _update_candidate_section_visibility(
         self,
@@ -4152,15 +5128,130 @@ class DXFImportDialog:
             return
         visible = bool(
             item is not None
-            and item.status == "recognized"
             and item.role in FORMAL_REVIEW_ROLES
             and member is not None
             and getattr(member, "candidate_points", ())
+            and (
+                item.status == "recognized"
+                or (
+                    item.status == "unresolved"
+                    and isinstance(member, Waler)
+                    and is_waler_engineering_line_repair_eligible(member)
+                )
+            )
         )
         if visible:
             frame.grid()
         else:
             frame.grid_remove()
+
+    @staticmethod
+    def _widget_state(widget: Any) -> str:
+        try:
+            return str(widget.cget("state"))
+        except (AttributeError, TypeError):
+            return str(getattr(widget, "options", {}).get("state", "normal"))
+
+    def _hide_widget_tooltip(self, _event: Any = None) -> None:
+        tooltip = getattr(self, "_tooltip_window", None)
+        if tooltip is not None:
+            try:
+                tooltip.destroy()
+            except Exception:
+                pass
+        self._tooltip_window = None
+
+    def _show_widget_tooltip(self, widget: Any) -> None:
+        text = str(getattr(widget, "_tooltip_text", ""))
+        if not text:
+            return
+        self._hide_widget_tooltip()
+        try:
+            tooltip = self.tk.Toplevel(self.window)
+            tooltip.wm_overrideredirect(True)
+            tooltip.wm_geometry(
+                f"+{widget.winfo_rootx() + 12}+{widget.winfo_rooty() + widget.winfo_height() + 4}"
+            )
+            self.ttk.Label(
+                tooltip,
+                text=text,
+                relief="solid",
+                borderwidth=1,
+                padding=(6, 3),
+            ).pack()
+            self._tooltip_window = tooltip
+        except Exception:
+            self._tooltip_window = None
+
+    def _set_widget_tooltip(self, widget: Any, text: str) -> None:
+        setattr(widget, "_tooltip_text", text)
+        if getattr(widget, "_pending_tooltip_bound", False):
+            return
+        try:
+            widget.bind(
+                "<Enter>",
+                lambda _event, target=widget: self._show_widget_tooltip(target),
+            )
+            widget.bind("<Leave>", self._hide_widget_tooltip)
+            setattr(widget, "_pending_tooltip_bound", True)
+        except (AttributeError, TypeError):
+            pass
+
+    def _pending_gated_widgets(self) -> tuple[Any, ...]:
+        names = (
+            "layer_settings_button",
+            "coordinate_settings_button",
+            "double_support_settings_button",
+            "candidate_pick_start_button",
+            "candidate_pick_end_button",
+            "preview_pick_start_button",
+            "preview_pick_end_button",
+            "candidate_apply_button",
+            "preview_apply_candidate_button",
+            "cad_engineering_line_button",
+            "corner_brace_repair_button",
+            "column_association_repair_button",
+            "waler_formalization_button",
+            "review_confirmation_button",
+            "material_spec_combo",
+            "waler_contact_apply_button",
+            "corner_brace_repair_apply_button",
+            "replace_import_mode_button",
+            "append_import_mode_button",
+            "pause_button",
+            "apply_button",
+        )
+        return tuple(
+            widget
+            for name in names
+            for widget in (getattr(self, name, None),)
+            if widget is not None
+        )
+
+    def _update_pending_action_gate(self) -> None:
+        workflow = getattr(self, "review_workflow", None)
+        if workflow is None:
+            return
+        reason = workflow.pending_mutation_disabled_reason()
+        previous = getattr(self, "_pending_gate_previous_states", None)
+        if previous is None:
+            previous = {}
+            self._pending_gate_previous_states = previous
+        if reason:
+            for widget in self._pending_gated_widgets():
+                key = id(widget)
+                if key not in previous:
+                    previous[key] = (widget, self._widget_state(widget))
+                widget.configure(state="disabled")
+                self._set_widget_tooltip(widget, reason)
+            return
+        for widget, state in previous.values():
+            try:
+                widget.configure(state=state)
+                self._set_widget_tooltip(widget, "")
+            except Exception:
+                pass
+        previous.clear()
 
     def _update_preview_candidate_action_state(self) -> None:
         """Keep candidate commit controls consistent across both windows."""
@@ -4181,7 +5272,11 @@ class DXFImportDialog:
         ):
             button = getattr(self, attribute, None)
             if button is not None:
-                button.configure(state=button_state)
+                options = {"state": button_state}
+                if attribute != "preview_cancel_candidate_button":
+                    options["text"] = "套用選取點"
+                button.configure(**options)
+        self._update_pending_action_gate()
 
     def _rebuild_candidate_tree(self) -> None:
         if not hasattr(self, "candidate_tree_adapter"):
@@ -4293,7 +5388,7 @@ class DXFImportDialog:
                 iid=iid,
                 values=(
                     record.severity.upper(),
-                    record.code,
+                    record.display_type,
                     record.description,
                 ),
                 tags=(record.severity,),
@@ -4349,17 +5444,41 @@ class DXFImportDialog:
         self,
         item: ReviewItem | None,
     ) -> None:
-        button = getattr(self, "source_exclusion_button", None)
         status_var = getattr(self, "source_exclusion_status_var", None)
-        if button is None or status_var is None:
+        buttons = tuple(
+            button
+            for name in (
+                "source_exclusion_button",
+                "preview_source_exclusion_button",
+            )
+            for button in (getattr(self, name, None),)
+            if button is not None
+        )
+        if not buttons and status_var is None:
             return
         reason = self._source_exclusion_disabled_reason(item)
         restoring = item is not None and item.status == "excluded"
-        button.configure(
-            text="復原此來源" if restoring else "排除此 DXF 來源",
-            state="disabled" if reason else "normal",
+        pending = bool(
+            item is not None
+            and not restoring
+            and self.review_workflow.pending_source_exclusion_contains(item)
         )
-        status_var.set(reason)
+        text = (
+            "復原此來源"
+            if restoring
+            else "取消待排除"
+            if pending
+            else "標記待排除"
+        )
+        for button in buttons:
+            button.configure(
+                text=text,
+                state="disabled" if reason else "normal",
+            )
+            self._set_widget_tooltip(button, reason)
+        if status_var is not None:
+            status_var.set(reason)
+        self._refresh_pending_source_exclusion_controls()
 
     @staticmethod
     def _dimension_text(value: float | None) -> str:
@@ -4597,11 +5716,12 @@ class DXFImportDialog:
             state.selected_component_id,
             point_id,
         )
-        self.candidate_detail_var.set(
+        detail = (
             self._candidate_detail_text(candidate)
             if candidate is not None
             else "候選點：—"
         )
+        self.candidate_detail_var.set(detail)
 
     def _on_member_selected(self, _event: Any = None) -> None:
         if self._updating_member_tree or self.member_tree_selection.syncing:
@@ -4614,9 +5734,19 @@ class DXFImportDialog:
             "",
         )
         review_item = getattr(self, "review_item_by_key", {}).get(review_key)
+        repair_member = (
+            self.review_workflow.member_by_id(review_item.member_id)
+            if review_item is not None and review_item.member_id
+            else None
+        )
         if (
             review_item is not None
             and review_item.status in {"unresolved", "excluded"}
+            and not (
+                review_item.status == "unresolved"
+                and isinstance(repair_member, Waler)
+                and is_waler_engineering_line_repair_eligible(repair_member)
+            )
         ):
             self._select_unresolved_review_item(review_item)
             return
@@ -4881,6 +6011,21 @@ class DXFImportDialog:
         if member is None or self.world_result is None:
             self.candidate_action_status_var.set("請先選取構件。")
             return
+        if (
+            isinstance(member, Waler)
+            and member.contact_face_state == "formal"
+            and member.engineering_line_authority == "manual_repair"
+        ):
+            message = (
+                "此圍令已正式化，請使用修改工具的「圍令正式化」重新採用。"
+            )
+            self.candidate_action_status_var.set(message)
+            messagebox.showinfo(
+                "請改用圍令正式化工具",
+                message,
+                parent=message_parent,
+            )
+            return
         state = self.selection_state
         validations = self.review_workflow.validate_candidate_change(
             member.id,
@@ -5002,7 +6147,13 @@ class DXFImportDialog:
             messagebox.showerror("CAD 工程線讀取失敗", str(exc), parent=self.window)
             return
         self.cad_temp_status_var.set(
-            f"已讀取 {member.id} 的 CAD 指定工程線；請確認後按「套用修改」。"
+            (
+                f"已讀取 {member.id} 的 CAD 指定工程線；"
+                "請開啟修改工具的「圍令正式化」，選擇「已讀取的 CAD 線」後採用。"
+                if isinstance(member, Waler)
+                and is_waler_engineering_line_repair_eligible(member)
+                else f"已讀取 {member.id} 的 CAD 指定工程線；請確認後按「套用選取點」。"
+            )
         )
         self._refresh_result_views(
             preview_dirty=(
@@ -5425,6 +6576,8 @@ class DXFImportDialog:
             ):
                 self._rebuild_candidate_tree()
         else:
+            if dirty & RenderDirty.SOURCE_STYLE:
+                self._rebuild_changed_source_styles()
             if dirty & RenderDirty.COMPONENT_LAYER:
                 self._rebuild_engineering_member_layer()
             if dirty & RenderDirty.CANDIDATE_LAYER:
@@ -5447,6 +6600,12 @@ class DXFImportDialog:
                 )
             if dirty & RenderDirty.TEMP_LINE:
                 self._update_temporary_line_overlay()
+            if dirty & (
+                RenderDirty.SOURCE_STYLE
+                | RenderDirty.COMPONENT_LAYER
+                | RenderDirty.CANDIDATE_LAYER
+            ):
+                self._preview_scene_revision = self.review_workflow.revision
         if dirty & RenderDirty.TREE_SELECTION:
             self._sync_tree_selections_from_state()
         if dirty & RenderDirty.HOVER:
@@ -5463,6 +6622,30 @@ class DXFImportDialog:
         self._update_preview_candidate_action_state()
         self.performance_diagnostics.record("render_flush", started_at)
         self._update_performance_diagnostics_display()
+
+    def _rebuild_changed_source_styles(self) -> None:
+        handles = tuple(sorted(self._pending_source_style_handles))
+        self._pending_source_style_handles.clear()
+        if not handles or self.result is None or self.preview_renderer is None:
+            return
+        selected = set(handles)
+        self.preview_renderer.delete_source_handles(handles)
+        self._draw_source_geometry_layer(
+            tuple(
+                geometry
+                for geometry in self._preview_source_geometry(self.result)
+                if geometry.source_handle in selected
+            )
+        )
+        self._draw_source_text_layer(
+            tuple(
+                source_text
+                for source_text in self.result.source_texts
+                if source_text.source_handle in selected
+            )
+        )
+        self._update_source_layer_visibility()
+        self._rebuild_error_source_hit_index()
 
     def _rebuild_preview_scene(self) -> None:
         canvas = getattr(self, "canvas", None)
@@ -5610,6 +6793,11 @@ class DXFImportDialog:
         except self.tk.TclError:
             self.performance_diagnostics.canvas_item_count = 0
         self.performance_diagnostics.record("full_scene", started_at)
+        self._preview_scene_revision = self.review_workflow.revision
+        self._preview_source_geometry_signature = (
+            self._dialog_source_geometry_signature(self.result)
+        )
+        self._pending_source_style_handles.clear()
 
     def _preview_member_styles(
         self,
@@ -5620,7 +6808,13 @@ class DXFImportDialog:
             *(
                 (
                     member,
-                    "#2e7d32" if member.has_formal_contact_face else "#ef6c00",
+                    (
+                        "#1565c0"
+                        if member.engineering_line_authority == "manual_repair"
+                        else "#2e7d32"
+                    )
+                    if member.has_formal_contact_face
+                    else "#ef6c00",
                     4 if member.has_formal_contact_face else 3,
                     None if member.has_formal_contact_face else (6, 4),
                 )
@@ -5658,6 +6852,19 @@ class DXFImportDialog:
             for source in self.result.excluded_sources
             for handle in source.source_handles
         }
+        pending_draft = getattr(
+            getattr(self, "review_workflow", None),
+            "pending_source_exclusion_draft",
+            None,
+        )
+        pending_sources = getattr(pending_draft, "sources", ())
+        if not isinstance(pending_sources, (tuple, list)):
+            pending_sources = ()
+        pending_source_keys = {
+            (source.role, handle)
+            for source in pending_sources
+            for handle in source.source_handles
+        }
         for geometry in geometries:
             displayed_points = [
                 coordinate_system.transform(point) for point in geometry.points
@@ -5680,17 +6887,36 @@ class DXFImportDialog:
                 and (geometry.role, normalized_geometry_handles[0])
                 in excluded_source_keys
             )
+            is_pending = bool(
+                normalized_geometry_handles
+                and (geometry.role, normalized_geometry_handles[0])
+                in pending_source_keys
+            )
             layer = "auxiliary_geometry" if is_auxiliary else "source_geometry"
             color = (
-                "#78909c"
+                "#f9a825"
+                if is_pending
+                else "#78909c"
                 if is_excluded
                 else "#d7dde1"
                 if is_auxiliary
                 else "#b0bec5"
             )
-            line_width = 2 if is_excluded else 1
-            dash = (2, 5) if is_excluded else None if is_auxiliary else (4, 3)
-            if not is_auxiliary and geometry.source_handle in self.focus_handles:
+            line_width = 3 if is_pending else 2 if is_excluded else 1
+            dash = (
+                (8, 4)
+                if is_pending
+                else (2, 5)
+                if is_excluded
+                else None
+                if is_auxiliary
+                else (4, 3)
+            )
+            if (
+                not is_pending
+                and not is_auxiliary
+                and geometry.source_handle in self.focus_handles
+            ):
                 color, line_width = "#1565c0", 4
             options: dict[str, Any] = {"fill": color, "width": line_width}
             if dash is not None:
@@ -6631,6 +7857,13 @@ class DXFImportDialog:
     def _apply(self) -> None:
         from tkinter import messagebox
 
+        if self.review_workflow.pending_mutation_disabled_reason():
+            messagebox.showwarning(
+                "尚有待排除來源",
+                "請先套用或捨棄待排除來源",
+                parent=self.window,
+            )
+            return
         if self.result is None or not self.result.can_import or not self.coordinate_valid:
             return
         member = self._selected_member()
@@ -6669,17 +7902,43 @@ class DXFImportDialog:
         self.review_state = self._build_review_state()
         self.dialog_action = "complete"
         self._save_ui_state()
+        self._close_waler_formalization()
         self.window.destroy()
 
     def _pause(self) -> None:
         """Return to Main without validation or ProjectDataModel mutation."""
 
+        from tkinter import messagebox
+
+        if self.review_workflow.pending_mutation_disabled_reason():
+            messagebox.showwarning(
+                "尚有待排除來源",
+                "請先套用或捨棄待排除來源",
+                parent=self.window,
+            )
+            return
         self.review_state = self._build_review_state()
         self.dialog_action = "pause"
         self._save_ui_state()
+        self._close_waler_formalization()
         self.window.destroy()
 
     def _close_dialog(self) -> None:
+        from tkinter import messagebox
+
+        workflow = getattr(self, "review_workflow", None)
+        if (
+            workflow is not None
+            and workflow.pending_mutation_disabled_reason()
+        ):
+            if not messagebox.askyesno(
+                "捨棄待排除來源",
+                "尚有待排除來源。是否捨棄待排除並關閉？",
+                parent=self.window,
+            ):
+                return
+            self.review_workflow.discard_pending_source_exclusions()
+            self._sync_review_workflow_state()
         if self.allow_pause:
             self._pause()
         else:
@@ -6689,4 +7948,5 @@ class DXFImportDialog:
         self.dialog_action = "cancel"
         self.review_state = {}
         self._save_ui_state()
+        self._close_waler_formalization()
         self.window.destroy()

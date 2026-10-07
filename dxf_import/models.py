@@ -315,6 +315,8 @@ class Waler:
     material_spec: str = ""
     material_spec_source: str = ""
     contact_face_state: str = "formal"
+    engineering_line_authority: str = "automatic"
+    source_width_state: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "world_start", self.start if self.world_start is None else self.world_start)
@@ -326,6 +328,19 @@ class Waler:
                 "Unsupported Waler contact-face state: "
                 f"{self.contact_face_state}"
             )
+        if self.engineering_line_authority not in {"automatic", "manual_repair"}:
+            raise ValueError(
+                "Unsupported Waler engineering-line authority: "
+                f"{self.engineering_line_authority}"
+            )
+        width_state = self.source_width_state or (
+            "unique"
+            if math.isfinite(float(self.source_width)) and self.source_width > 0.0
+            else "unknown"
+        )
+        if width_state not in {"unique", "unknown", "ambiguous"}:
+            raise ValueError(f"Unsupported Waler source-width state: {width_state}")
+        object.__setattr__(self, "source_width_state", width_state)
 
     @property
     def source_type(self) -> str:
@@ -811,6 +826,7 @@ class ProblemRecord:
     role: str
     source_handles: tuple[str, ...]
     member_ids: tuple[str, ...]
+    display_type: str = ""
 
 
 def _normalized_source_handles(values: Sequence[Any]) -> tuple[str, ...]:
@@ -837,8 +853,10 @@ class SourceManualOverride:
     has_material_spec: bool = False
     material_spec: str = ""
     geometry_selection_source: str = ""
+    geometry_coordinate_space: str = ""
     world_start: Point | None = None
     world_end: Point | None = None
+    waler_engineering_line_formalized: bool = False
     has_waler_contact_input: bool = False
     original_backfill_mm: float | None = None
     adopted_backfill_mm: float | None = None
@@ -1090,6 +1108,18 @@ class WalerContactReviewState:
 
 
 @dataclass(frozen=True)
+class BraceAdjustmentBaseline:
+    """Rebuildable pre-adjustment WCS geometry for one formal Brace."""
+
+    brace_id: str
+    source_handles: tuple[str, ...]
+    start: Point
+    end: Point
+    from_waler_id: str
+    to_waler_id: str
+
+
+@dataclass(frozen=True)
 class CornerBraceConnection:
     """Stable DXF-review association used when a Waler contact line moves."""
 
@@ -1130,6 +1160,7 @@ class DXFImportResult:
     beam_crossings: tuple[BeamCrossing, ...] = ()
     double_support_candidates: tuple[DoubleSupportCandidate, ...] = ()
     waler_contact_reviews: tuple[WalerContactReviewState, ...] = ()
+    brace_adjustment_baselines: tuple[BraceAdjustmentBaseline, ...] = ()
     corner_brace_connections: tuple[CornerBraceConnection, ...] = ()
     corner_brace_body_evidence: tuple[CornerBraceBodyGeometryEvidence, ...] = ()
     corner_brace_relationship_assessments: tuple[

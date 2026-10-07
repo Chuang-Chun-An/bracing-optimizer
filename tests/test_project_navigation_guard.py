@@ -19,17 +19,6 @@ from bracing_optimizer.presentation.project_navigation import (
 from main import SupportInputApp
 
 
-class _Variable:
-    def __init__(self, value=""):
-        self.value = value
-
-    def get(self):
-        return self.value
-
-    def set(self, value):
-        self.value = value
-
-
 class ProjectNavigationFixture(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -62,7 +51,6 @@ class ProjectNavigationFixture(unittest.TestCase):
         app.project_dirty = True
         app.project_dirty_reason = "manual edit"
         app.current_project_path = self.project_cases_dir / "current" / "project.json"
-        app.project_case_var = _Variable("selected-case")
         app.dxf_last_import_debug = {"source_path": "source.dxf"}
         app.dxf_workflow_status = DxfWorkflowStatus.REVIEW
         app.dxf_review_session = {"coordinate_mode": "world"}
@@ -80,7 +68,11 @@ class ProjectNavigationFixture(unittest.TestCase):
         app._refresh_project_status_display = Mock()
         app._update_window_title = Mock()
         app._load_default_inventory = Mock(return_value=[])
-        app._selected_project_case_name = Mock(return_value="target")
+        app._project_case_json_files = Mock(
+            return_value=[self.project_cases_dir / "target" / "project.json"]
+        )
+        app._select_project_case_for_open = Mock(return_value="target")
+        app._open_project_target_is_valid = Mock(return_value=True)
         app.load_project_case = Mock()
         app._ensure_project_service = Mock(
             return_value=SimpleNamespace(
@@ -104,7 +96,6 @@ class ProjectNavigationFixture(unittest.TestCase):
             "dxf_workflow": app.dxf_workflow_status,
             "dxf_review_session": copy.deepcopy(app.dxf_review_session),
             "dxf_asset": copy.deepcopy(app.dxf_asset),
-            "ui_selection": app.project_case_var.get(),
         }
 
     def assert_snapshot_unchanged(self, before, app):
@@ -116,6 +107,22 @@ class ProjectNavigationFixture(unittest.TestCase):
 
 
 class ProjectLifecycleCharacterizationTests(ProjectNavigationFixture):
+    def test_window_title_projects_project_name_and_dirty_marker(self):
+        app = self.build_app()
+        app.current_project_path = self.project_cases_dir / "named-case" / "project.json"
+
+        app.project_dirty = False
+        SupportInputApp._update_window_title(app)
+        app.root.title.assert_called_with(
+            f"{SupportInputApp.WINDOW_TITLE} - named-case"
+        )
+
+        app.project_dirty = True
+        SupportInputApp._update_window_title(app)
+        app.root.title.assert_called_with(
+            f"{SupportInputApp.WINDOW_TITLE} - named-case *"
+        )
+
     def test_fixture_observes_state_boundary_and_open_continuation(self):
         app = self.build_app()
         app.project_dirty = False
@@ -136,7 +143,6 @@ class ProjectLifecycleCharacterizationTests(ProjectNavigationFixture):
         self.assertEqual(app.result_items, {})
         self.assertIsNone(app.project_result)
         self.assertIsNone(app.current_project_path)
-        self.assertEqual(app.project_case_var.get(), "")
         self.assertFalse(app.project_dirty)
         app._load_default_inventory.assert_called_once_with()
 
@@ -336,7 +342,10 @@ class ProjectLifecycleCharacterizationTests(ProjectNavigationFixture):
 
         SupportInputApp.load_project_case(app, "target", silent=True)
 
-        app._adopt_hydrated_project.assert_called_once_with(hydrated)
+        app._adopt_hydrated_project.assert_called_once_with(
+            hydrated,
+            dxf_status_report=service.load_project.return_value.dxf_status_report,
+        )
         service.load_project.assert_called_once()
 
     def test_manual_result_edit_commits_inside_existing_project_result_model(self):
@@ -538,12 +547,71 @@ class DirtyNavigationGuardTests(ProjectNavigationFixture):
                 self.assertEqual(app.load_project_case.call_count, expected_calls)
 
         no_target = self.build_app()
-        no_target._selected_project_case_name.return_value = ""
+        no_target._select_project_case_for_open.return_value = None
         no_target._guard_unsaved_project_changes = Mock()
-        with patch("main.messagebox.showwarning"):
-            no_target._load_selected_project_case()
+        no_target._load_selected_project_case()
         no_target._guard_unsaved_project_changes.assert_not_called()
         no_target.load_project_case.assert_not_called()
+
+    def test_open_resolves_valid_target_before_guard_and_load(self):
+        app = self.build_app()
+        events = []
+        app._project_case_json_files = Mock(
+            side_effect=lambda: (
+                events.append("list"),
+                [self.project_cases_dir / "target" / "project.json"],
+            )[1]
+        )
+        app._select_project_case_for_open = Mock(
+            side_effect=lambda *_args, **_kwargs: (
+                events.append("dialog"),
+                "target",
+            )[1]
+        )
+        app._open_project_target_is_valid = Mock(
+            side_effect=lambda _name: (events.append("validate"), True)[1]
+        )
+        app._guard_unsaved_project_changes = Mock(
+            side_effect=lambda: (
+                events.append("guard"),
+                NavigationGuardOutcome.PROCEED,
+            )[1]
+        )
+        app.load_project_case = Mock(
+            side_effect=lambda name: events.append(f"load:{name}")
+        )
+
+        app._load_selected_project_case()
+
+        self.assertEqual(
+            events,
+            ["list", "dialog", "validate", "guard", "load:target"],
+        )
+
+    def test_open_empty_cancel_and_target_race_never_enter_guard(self):
+        cases = ("empty", "cancel", "target-race")
+        for case in cases:
+            with self.subTest(case=case):
+                app = self.build_app()
+                app._guard_unsaved_project_changes = Mock()
+                if case == "empty":
+                    app._project_case_json_files.return_value = []
+                    app._select_project_case_for_open.return_value = None
+                elif case == "cancel":
+                    app._select_project_case_for_open.return_value = None
+                else:
+                    app._open_project_target_is_valid.return_value = False
+
+                with patch("main.messagebox.showwarning"):
+                    app._load_selected_project_case()
+
+                app._guard_unsaved_project_changes.assert_not_called()
+                app.load_project_case.assert_not_called()
+                if case == "empty":
+                    app._select_project_case_for_open.assert_called_once_with(
+                        (),
+                        current_name=None,
+                    )
 
     def test_open_covers_clean_save_discard_cancel_and_failure_cases(self):
         for name, dirty, decision, save_outcome, expected_calls in self.NAVIGATION_CASES:

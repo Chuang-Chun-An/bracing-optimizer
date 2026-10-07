@@ -172,8 +172,10 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         self.assertEqual(app.struts[0]["material_spec"], "H350x350A")
         self.assertEqual(app.inventory[1]["Spec"], "H350x350")
         self.assertEqual(app.walers[0]["material_spec"], "H350x350")
-        self.assertEqual(changes[0]["table_name"], None)
+        self.assertEqual(changes, [])
         self.assertEqual(set(refreshed), {"inventory", "struts"})
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "輸入資料已變更")
 
     def test_cancelled_material_rename_changes_nothing(self):
         app = self.editable_app()
@@ -421,7 +423,9 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         self.assertEqual(app._project_results.result_items, {})
         self.assertEqual(app.solver_memory, {})
         self.assertEqual(app.support_candidate_cache, {})
-        self.assertEqual(dirty, ["輸入資料已變更"])
+        self.assertEqual(dirty, [])
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "輸入資料已變更")
         self.assertEqual(previews, [{"preserve_view": True}])
 
     def test_unreferenced_material_spec_adoption_preserves_results_and_marks_dirty(self):
@@ -457,9 +461,11 @@ class MaterialSpecSettingsTests(unittest.TestCase):
 
         self.assertEqual(app._project_results, original_results)
         self.assertIsNot(app._project_results, original_results)
-        self.assertEqual(dirty, ["輸入資料已變更"])
+        self.assertEqual(dirty, [])
+        self.assertTrue(app.project_dirty)
+        self.assertEqual(app.project_dirty_reason, "輸入資料已變更")
 
-    def test_material_spec_adoption_rolls_back_state_failure_but_not_ui_failure(self):
+    def test_material_spec_adoption_replaces_caches_and_keeps_commit_on_ui_failure(self):
         class FailingClearDict(dict):
             def clear(self):
                 super().clear()
@@ -500,13 +506,16 @@ class MaterialSpecSettingsTests(unittest.TestCase):
         app.solver_memory = FailingClearDict(old=1)
         app.support_candidate_cache = {"old": 1}
 
-        with self.assertRaisesRegex(RuntimeError, "clear failed"):
-            app._adopt_material_spec_edit(invalidating)
+        old_solver_memory = app.solver_memory
+        app._adopt_material_spec_edit(invalidating)
 
-        self.assertIs(app.project_data, original_data)
-        self.assertIs(app._project_results, original_results)
-        self.assertEqual(app.solver_memory, {"old": 1})
-        self.assertEqual(app.support_candidate_cache, {"old": 1})
+        self.assertIs(app.project_data, invalidating.project_data)
+        self.assertIs(app._project_results, invalidating.project_results)
+        self.assertIsNot(app.project_data, original_data)
+        self.assertIsNot(app._project_results, original_results)
+        self.assertEqual(old_solver_memory, {"old": 1})
+        self.assertEqual(app.solver_memory, {})
+        self.assertEqual(app.support_candidate_cache, {})
 
         app = self.editable_app()
         app.project_data.material_specs.append(
@@ -531,6 +540,7 @@ class MaterialSpecSettingsTests(unittest.TestCase):
 
         self.assertIs(app.project_data, staged.project_data)
         self.assertIs(app._project_results, staged.project_results)
+        self.assertTrue(app.projection_stale)
 
     def test_material_spec_table_has_no_length_and_is_persisted_separately(self):
         model = ProjectDataModel(

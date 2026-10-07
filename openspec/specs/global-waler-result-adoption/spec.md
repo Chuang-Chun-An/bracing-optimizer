@@ -1,5 +1,11 @@
 # Global Waler Result Adoption Specification
 
+## 閱讀導航
+
+- **現在必讀（P0）**：「合法全域結果須立即自動採用」；它定義 valid result、operation eligibility 與既有 mutation guard 的共同採用條件。
+- **條件式閱讀（P1）**：處理 commit／refresh error 時讀「全域結果提交必須具備原子性」與「Commit 後 UI refresh 失敗不得撤銷成果」。
+- **可先跳過**：沒有人工修改成果時可先跳過「人工修改成果須於求解前確認覆蓋」。
+
 ## Purpose
 
 定義 Global Waler 最佳化從求解前覆蓋確認、合法結果自動採用，到失敗保留與結果摘要的可靠 workflow，確保全場結果只會完整提交或完全不變。
@@ -24,19 +30,25 @@
 - **THEN** 系統不顯示覆蓋確認並可直接開始求解
 
 ### Requirement: 合法全域結果須立即自動採用
-Global Waler 求解完成且 solution 為 valid 時，系統 SHALL 立即採用該全域結果，不得要求使用者再執行 Apply 或「套用全域結果」操作。
+Global Waler 求解完成、solution 為 valid、registry判定該operation仍可採用，且既有Project mutation guard允許正式state mutation時，系統 SHALL 立即採用該全域結果，不得要求使用者再執行 Apply 或「套用全域結果」操作。若 operation 已因 CAD mutation 失效或取消，或既有ACK unresolved guard拒絕adoption，即使 solution 為 valid，系統 MUST NOT 啟動結果採用流程。
 
 #### Scenario: 合法 solution 完成
-- **WHEN** Global Waler Solver 回傳 valid solution
+- **WHEN** Global Waler Solver 回傳 valid solution、registry判定該operation仍可採用，且既有Project mutation guard允許正式state mutation
 - **THEN** 系統立即啟動既有全域結果採用流程
 - **AND** 使用者不需要再按 Apply
 
 #### Scenario: 自動採用成功
-- **WHEN** valid solution 的 staging 與 commit 均成功
+- **WHEN** 仍可採用的 valid solution 之 staging 與 commit 均成功
 - **THEN** `ProjectResult` 包含本次選定的全部 Waler 結果
 - **AND** 本次涵蓋的舊 Waler 結果被完整取代
 - **AND** 不屬於本次涵蓋範圍的結果保持不變
 - **AND** 成果樹、材料統計與預覽被要求更新
+
+#### Scenario: valid solution 在 CAD mutation 後晚到
+
+- **WHEN** Global Waler Solver 回傳 valid solution，但該 operation 已因 CAD mutation 失去 adoption 資格
+- **THEN** 系統 MUST NOT 啟動 staging 或 commit
+- **AND** `ProjectResult`、calculated time 與 dirty state SHALL NOT 因該 callback 改變
 
 ### Requirement: 全域結果提交必須具備原子性
 系統 MUST 先完整 staging 所有選定 Waler 結果，只有 staging 全部成功後才能 commit；commit 期間發生失敗時 MUST rollback 到提交前的完整成果狀態。

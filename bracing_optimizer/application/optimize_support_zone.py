@@ -7,11 +7,13 @@ dependency; callers decide where it runs and how progress is presented.
 
 from __future__ import annotations
 
+import copy
 from collections import Counter
 from dataclasses import dataclass
 from typing import Callable, MutableMapping
 
 from bracing_optimizer.algorithms import solver_search, support
+from bracing_optimizer.algorithms.cancellation import CancellationToken
 from bracing_optimizer.application.solver_input_builder import SupportZoneInput
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
@@ -34,6 +36,7 @@ class OptimizationProgress:
 class OptimizeSupportZoneResult:
     solution: support.GlobalSolution | None
     diagnostics: solver_search.SolverDiagnostics
+    candidate_cache_updates: dict[object, object]
 
 
 ProgressCallback = Callable[[OptimizationProgress], None]
@@ -60,13 +63,18 @@ class OptimizeSupportZone:
         *,
         on_progress: ProgressCallback | None = None,
         logger: LogCallback | None = None,
+        cancellation_token: CancellationToken | None = None,
     ) -> OptimizeSupportZoneResult:
         """Execute synchronously and return both the solution and diagnostics."""
 
         policy = self.search_policy
         support.set_logger(logger)
         support.random.seed(policy.support_phase1_random_seed)
+        working_cache = copy.deepcopy(dict(self.candidate_cache))
+        staged_cache_updates: dict[object, object] = {}
         try:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             support.log(f"=== 分區 {request.input.zoning} 支撐配置開始 ===")
             support.log(f"搜尋政策：{policy.policy_id} v{policy.policy_version}")
             support.log(
@@ -84,13 +92,30 @@ class OptimizeSupportZone:
                 "candidate_generation",
                 "正在建立材料組合與配置候選……",
             )
-            solution, diagnostics = self._solve(request, on_progress)
+            solution, diagnostics = self._solve(
+                request,
+                on_progress,
+                working_cache,
+                staged_cache_updates,
+                cancellation_token,
+            )
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             return OptimizeSupportZoneResult(
                 solution=solution,
                 diagnostics=diagnostics,
+                candidate_cache_updates=copy.deepcopy(staged_cache_updates),
             )
         finally:
             support.set_logger(None)
+
+    def adopt_candidate_cache_updates(
+        self,
+        result: OptimizeSupportZoneResult,
+    ) -> None:
+        """Commit one adoptable operation's staged Phase 1 cache entries."""
+
+        self.candidate_cache.update(copy.deepcopy(result.candidate_cache_updates))
 
     @staticmethod
     def _emit_progress(
@@ -151,6 +176,9 @@ class OptimizeSupportZone:
         self,
         request: OptimizeSupportZoneRequest,
         on_progress: ProgressCallback | None,
+        working_cache: MutableMapping[object, object],
+        staged_cache_updates: MutableMapping[object, object],
+        cancellation_token: CancellationToken | None,
     ) -> tuple[support.GlobalSolution | None, solver_search.SolverDiagnostics]:
         policy = self.search_policy
         max_steel_combination_count = policy.support_phase1_length_combination_count
@@ -164,6 +192,8 @@ class OptimizeSupportZone:
         )
 
         for config in ordered_configs:
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             self._emit_progress(
                 on_progress,
                 "candidate_generation",
@@ -215,7 +245,7 @@ class OptimizeSupportZone:
                 solver_search_policy_id=policy.policy_id,
                 solver_search_policy_version=policy.policy_version,
             )
-            if cache_key not in self.candidate_cache:
+            if cache_key not in working_cache:
                 support.log(f"產生支撐 {config.support_id} 候選解...")
                 generated_candidates = support.generate_single_support_candidates(
                     config=config,
@@ -238,15 +268,18 @@ class OptimizeSupportZone:
                         min_retained_no_under_4000_candidates
                     ),
                     diagnostics_out=diagnostic_record,
+                    cancellation_token=cancellation_token,
                 )
-                self.candidate_cache[cache_key] = {
+                cache_entry = {
                     "candidates": generated_candidates,
                     "diagnostics": diagnostic_record,
                 }
+                working_cache[cache_key] = cache_entry
+                staged_cache_updates[cache_key] = copy.deepcopy(cache_entry)
                 candidates = generated_candidates
             else:
                 support.log(f"支撐 {config.support_id} 使用本次候選快取。")
-                cache_entry = self.candidate_cache[cache_key]
+                cache_entry = working_cache[cache_key]
                 if isinstance(cache_entry, dict):
                     candidates = cache_entry.get("candidates", [])
                     diagnostic_record = cache_entry.get("diagnostics") or {}
@@ -296,6 +329,8 @@ class OptimizeSupportZone:
                 )
                 for plan in valid_candidates
             ])
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
 
         candidates_by_id = {
             config.support_id: candidates_by_support[index]
@@ -308,6 +343,8 @@ class OptimizeSupportZone:
         candidates_by_unit = []
         try:
             for unit in request.input.units:
+                if cancellation_token is not None:
+                    cancellation_token.raise_if_cancelled()
                 unit_candidates = support.assemble_support_unit_candidates(
                     unit.unit_id,
                     {
@@ -412,6 +449,8 @@ class OptimizeSupportZone:
         stage_scores = []
         final_assessment = None
         for stage_index, stage in enumerate(policy.support_global_search_stages):
+            if cancellation_token is not None:
+                cancellation_token.raise_if_cancelled()
             support.log("")
             support.log(
                 f"[搜尋階段 {stage.name}／"
@@ -425,6 +464,7 @@ class OptimizeSupportZone:
                 material_ratio_targets=request.material_ratio_targets.as_dict(),
                 material_ratio_weight=request.material_ratio_weight,
                 diagnostics_out=phase2_diagnostics,
+                cancellation_token=cancellation_token,
             )
             stage_solution.search_diagnostics = {
                 "adjacency_units": list(
@@ -489,6 +529,8 @@ class OptimizeSupportZone:
                 "初始結果仍可能改善，系統正在進一步搜尋……",
             )
 
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         solution = solver_search.select_best_support_solution(
             solutions,
             precision=policy.score_comparison_precision,
@@ -512,6 +554,8 @@ class OptimizeSupportZone:
             "finalizing",
             "正在整理結果與診斷……",
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         return solution, diagnostics
 
     def _support_phase1_issue_details(self, candidate_statuses):

@@ -2,7 +2,6 @@ import unittest
 import copy
 from dataclasses import replace
 import math
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -48,9 +47,10 @@ from dxf_import.support_pairing import (
     set_double_support_candidate_accepted,
 )
 from dxf_import.validation import build_problem_records, build_review_items
+from tests.sample_dxf_assets import Y29_DXF_PATH
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Y29_DXF_PATH.parent
 
 
 def support_plan(

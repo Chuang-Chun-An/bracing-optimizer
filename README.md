@@ -4,7 +4,7 @@
 
 README 是 repository 入口與閱讀地圖。工程規則、Solver 細節、runtime workflow 與精確需求分別由專責文件維護；本文件不再逐一鏡像所有 class、function 或 call graph。
 
-更新日期：2026-10-01
+更新日期：2026-10-07
 
 ## 1. 快速開始
 
@@ -34,7 +34,7 @@ uv sync --group dev
 .\.venv\Scripts\pyinstaller.exe --noconfirm --clean .\SupportSolver.spec
 ```
 
-輸出位於 `dist/SupportOptimizer/`。`SupportSolver.spec` 會一併放入執行所需的 `data/`、`picture/`、`assets/dxf/`、`cad_builder.lsp`、回歸圖檔及封裝用 fixtures。
+輸出位於 `dist/SupportOptimizer/`。`SupportSolver.spec` 會一併放入執行所需的 `data/`、`picture/`、`assets/dxf/`、`assets/software_history.json`、`cad_builder.lsp`、`sample_dxf/` 下固定三份使用者 DXF 素材，以及 `project_cases/` 下的 `Y05車站第一層支撐`、`Y29車站第一層支撐`。每個預置 Project 初始只含 `project.json` 與 `source/source.dxf`，不附 `project.json.bak`。`software_history.json` 只投影 `docs/DEVELOPMENT_HISTORY.md` 的起始歷史紀錄；正式包不附其他 Project、完整開發歷程文件、測試案例或測試 fixtures。
 
 Repository 內可驗證上述檔案、命令與 Python dependency 設定；Windows、Tkinter、progeCAD 及 PyInstaller 成品的實際可用性仍需在目標電腦確認。
 
@@ -206,7 +206,7 @@ Persistence 採 temporary write、重新讀取／驗證及 atomic replace。細�
 - DXF 匯入
 - CAD 匯入
 
-Project 的新增、開啟、儲存、另存與 DXF 重新連結由主選單及 toolbar 提供。
+Project 的新增、開啟、儲存、另存與 DXF 重新連結由主選單及 toolbar 提供。「說明 → 軟體資訊」可隨時查看 SupportOptimizer 的版本、作者與唯讀的起始開發歷程，不需要先建立或開啟 Project。
 
 ### 6.2 材料設定
 
@@ -245,12 +245,12 @@ Material Spec definition 的 rename、Usage 修改與刪除由 `bracing_optimize
 ### 7.3 Material Spec、庫存與比例
 
 - Material Spec 可留空；系統不因空白而拒絕求解。
-- 有選擇 Material Spec 時，Solver 使用符合 Usage／Spec 的 Inventory rows 與使用者目前設定的 Qty。
-- Material Spec 空白時，現行 fallback 使用該 Usage 的可用料長，並以每種 `99` 根近似無限庫存。
-- 預設 Inventory 的 Qty 可由使用者修改；例如改為 `5` 就以 `5` 進入既有庫存／採購評估，不額外警告使用者不要修改。
-- Support 與 Waler 的 Short／Mid／Long ratio 分開設定，不共用比例。
-- Ratio 只影響 scoring 與結果排序，不是工程 hard constraint。
-- 目前預設 `99` 與比例政策是暫時執行策略；未來接上可靠庫存系統後可替換，但現行採購／庫存評分仍保留。
+- 預設 `data/inventory.json` 的每列 Qty 目前都是 `99`，使用者可以依實際庫存修改。
+- Material Spec 空白時，系統另依該 Usage 的可用料長建立暫時 fallback，每種料長視為 `99` 根；這不等同於預設 inventory row。
+- Waler 自動 Solver 與人工方案編輯都使用目前 Inventory Qty 進行庫存／採購評估。人工方案需求超過 Qty 時會顯示「庫存不足（會以購買數計入分數）」；庫存不足不會使可購買料長變成非法。
+- Support 目前只使用符合 Usage／Material Spec 的 purchasable lengths；Inventory Qty 與 purchase quantity 尚未進入 Support score。
+- Support 與 Waler 的 Short／Mid／Long ratio 分開設定，不共用比例；ratio 只影響 scoring 與結果排序，不是工程 hard constraint。
+- 預設資料的 Qty `99`、空白 Material Spec fallback 與比例政策都是暫時執行策略；未來接上可靠庫存系統後可重新評估。
 
 ## 8. Project 與資料契約
 
@@ -279,6 +279,8 @@ Material Spec definition 的 rename、Usage 修改與刪除由 `bracing_optimize
 精確行為見 [`openspec/specs/project-schema-compatibility/spec.md`](openspec/specs/project-schema-compatibility/spec.md) 與 [`openspec/specs/project-input-row-schema/spec.md`](openspec/specs/project-input-row-schema/spec.md)。
 
 ### 8.3 Project 資料夾
+
+`project_cases/` 是應用程式的可寫使用者資料目錄。Source run 或測試環境會在需要時建立空目錄；正式 onedir 發行包則從 tracked `assets/project_cases/` 精確預置 `Y05車站第一層支撐` 與 `Y29車站第一層支撐`。兩案初始沒有 `project.json.bak`，開啟後可像一般 Project 儲存、另存或刪除；儲存既有 Project 時才由 persistence 建立 `.bak`，刪除後不會在下次啟動自動補回。
 
 ```text
 project_cases/
@@ -335,6 +337,9 @@ support_distribution_uv/
 ├─ tests/                          # unittest regression suite
 ├─ data/                           # 預設材料與庫存資料
 ├─ assets/dxf/                     # DXF output symbols
+├─ assets/project_cases/           # 正式包預置的兩個 Project 快照
+├─ assets/sample_dxf/              # 正式包提供的三份使用者 DXF 素材
+├─ assets/software_history.json    # 起始歷史紀錄的正式包投影
 ├─ cad_builder.lsp                 # progeCAD 輸入端
 ├─ SupportSolver.spec              # PyInstaller onedir 設定
 └─ pyproject.toml                  # Python 與 dependency 設定

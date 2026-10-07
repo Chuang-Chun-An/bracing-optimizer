@@ -25,6 +25,10 @@ DIMSTYLE_NAME = "SUPPORT_SEGMENT"
 JACK_BLOCK_NAME = "SUPPORT_JACK"
 RESULT_WALER_LAYER = "SD_RESULT_WALER"
 RESULT_SUPPORT_LAYER = "SD_RESULT_SUPPORT"
+WARNING_INVALID_RESULT_LAYER = "SD_WARNING_INVALID_RESULT"
+WARNING_TEXT_STYLE = "SD_WARNING_CJK"
+WARNING_FONT_FAMILY = "PMingLiU"
+WARNING_FONT_FILE = "mingliu.ttc"
 PROJECT_WALER_LAYER = "SD_PROJECT_WALER"
 PROJECT_STRUT_LAYER = "SD_PROJECT_STRUT"
 PROJECT_BRACE_LAYER = "SD_PROJECT_BRACE"
@@ -33,6 +37,12 @@ CLEAN_DXF_ACAD_VERSION = "AC1032"
 DRAWING_UNITS = "mm"
 INSUNITS_MILLIMETERS = 4
 WORLD_COORDINATE_TOLERANCE_MM = 0.1
+WARNING_TEXT_OFFSET_MM = 800.0
+WARNING_TEXT_COLLISION_RADIUS_MM = 600.0
+WARNING_TEXT_STACK_SPACING_MM = 500.0
+WARNING_ANCHOR_TOLERANCE_MM = 0.1
+WARNING_TEXT_HEIGHT_MM = 250.0
+WARNING_TEXT_WIDTH_MM = 4000.0
 BACKGROUND_ROLES = (
     "continuous_wall",
     "corner_brace",
@@ -95,6 +105,8 @@ class MemberExportPlan:
     pieces: tuple[ExportPiece, ...]
     gap: float = 0.0
     result_id: str = ""
+    valid: bool = True
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,6 +277,15 @@ class _ExpectedResultEntity:
     point1: tuple[float, float]
     point2: tuple[float, float] | None = None
     display_text: str | None = None
+
+
+@dataclass(frozen=True)
+class _ExpectedWarning:
+    role: str
+    member_id: str
+    result_id: str
+    point: tuple[float, float]
+    display_text: str
 
 
 @dataclass(frozen=True)
@@ -505,6 +526,19 @@ def _ensure_dimstyle(document, options: DXFExportOptions) -> None:
     style.dxf.dimexe = 150.0
 
 
+def _ensure_warning_text_style(document) -> None:
+    style = (
+        document.styles.get(WARNING_TEXT_STYLE)
+        if WARNING_TEXT_STYLE in document.styles
+        else document.styles.new(
+            WARNING_TEXT_STYLE,
+            dxfattribs={"font": WARNING_FONT_FILE},
+        )
+    )
+    style.dxf.font = WARNING_FONT_FILE
+    style.set_extended_font_data(WARNING_FONT_FAMILY)
+
+
 def _ensure_appid(document) -> None:
     if APP_ID not in document.appids:
         document.appids.new(APP_ID)
@@ -684,6 +718,8 @@ def _normalize_plans(plans: Iterable[MemberExportPlan]) -> tuple[MemberExportPla
                 normalized_pieces,
                 gap,
                 str(plan.result_id),
+                bool(plan.valid),
+                tuple(str(reason) for reason in plan.reasons),
             )
         )
     conflicts = [
@@ -696,6 +732,84 @@ def _normalize_plans(plans: Iterable[MemberExportPlan]) -> tuple[MemberExportPla
             "同一構件不可同時匯出多個方案：\n" + "\n".join(conflicts)
         )
     return tuple(normalized)
+
+
+def _warning_text(plan: MemberExportPlan) -> str:
+    role_label = "圍令" if plan.role == "waler" else "支撐"
+    reasons = "\n".join(f"- {reason}" for reason in plan.reasons)
+    return f"{role_label} {plan.member_id}\n不合法：\n{reasons}"
+
+
+def _draw_invalid_warnings(
+    document,
+    plans: Sequence[MemberExportPlan],
+    bindings: Mapping[tuple[str, str], MemberBinding],
+) -> tuple[_ExpectedWarning, ...]:
+    invalid_plans = sorted(
+        (plan for plan in plans if not plan.valid),
+        key=lambda plan: (plan.role, plan.member_id, plan.result_id),
+    )
+    if not invalid_plans:
+        return ()
+
+    modelspace = document.modelspace()
+    occupied: list[tuple[float, float]] = []
+    expected = []
+    for plan in invalid_plans:
+        binding = bindings[(plan.role, plan.member_id)]
+        delta_x = binding.world_end[0] - binding.world_start[0]
+        delta_y = binding.world_end[1] - binding.world_start[1]
+        length = math.hypot(delta_x, delta_y)
+        if length <= 0:
+            raise DXFResultExportError(
+                f"{plan.role} {plan.member_id} 無法建立警告文字 anchor"
+            )
+        left_x = -delta_y / length
+        left_y = delta_x / length
+        midpoint = (
+            (binding.world_start[0] + binding.world_end[0]) / 2.0,
+            (binding.world_start[1] + binding.world_end[1]) / 2.0,
+        )
+        stack_index = 0
+        while True:
+            offset = (
+                WARNING_TEXT_OFFSET_MM
+                + stack_index * WARNING_TEXT_STACK_SPACING_MM
+            )
+            point = (
+                midpoint[0] + left_x * offset,
+                midpoint[1] + left_y * offset,
+            )
+            if all(
+                math.dist(point, existing)
+                >= WARNING_TEXT_COLLISION_RADIUS_MM
+                for existing in occupied
+            ):
+                break
+            stack_index += 1
+        occupied.append(point)
+
+        display_text = _warning_text(plan)
+        entity = modelspace.add_mtext(
+            display_text.replace("\n", r"\P"),
+            dxfattribs={
+                "layer": WARNING_INVALID_RESULT_LAYER,
+                "color": 256,
+                "style": WARNING_TEXT_STYLE,
+                "char_height": WARNING_TEXT_HEIGHT_MM,
+                "width": WARNING_TEXT_WIDTH_MM,
+            },
+        )
+        entity.set_location(point, attachment_point=1)
+        _set_result_xdata(entity, plan, "warning", 1)
+        expected.append(_ExpectedWarning(
+            plan.role,
+            plan.member_id,
+            plan.result_id,
+            point,
+            display_text,
+        ))
+    return tuple(expected)
 
 
 def _segment_key(segment: _BackgroundSegment) -> tuple[Any, ...]:
@@ -871,6 +985,7 @@ def _prepare_background_layers(
             PROJECT_WALER_LAYER.casefold(),
             PROJECT_STRUT_LAYER.casefold(),
             PROJECT_BRACE_LAYER.casefold(),
+            WARNING_INVALID_RESULT_LAYER.casefold(),
         }
     )
     mappings: dict[tuple[str, str], str] = {}
@@ -886,7 +1001,11 @@ def _prepare_background_layers(
                 and len(original) <= 255
                 and validator.is_valid_layer_name(original)
                 and original.casefold()
-                not in {RESULT_WALER_LAYER.casefold(), RESULT_SUPPORT_LAYER.casefold()}
+                not in {
+                    RESULT_WALER_LAYER.casefold(),
+                    RESULT_SUPPORT_LAYER.casefold(),
+                    WARNING_INVALID_RESULT_LAYER.casefold(),
+                }
             )
             if valid:
                 output_layer = original
@@ -1027,6 +1146,12 @@ def _new_clean_document(
             PROJECT_BRACE_LAYER,
             dxfattribs={"color": 5, "linetype": "Continuous"},
         )
+    if any(not plan.valid for plan in plans):
+        document.layers.new(
+            WARNING_INVALID_RESULT_LAYER,
+            dxfattribs={"color": 1, "linetype": "Continuous"},
+        )
+        _ensure_warning_text_style(document)
     return document
 
 
@@ -1263,11 +1388,14 @@ def _validate_project_geometry(
 def _result_key(values: Sequence[Any]) -> tuple[str, str, str, int] | None:
     if len(values) < 6 or values[0] != RESULT_EXPORT_MARKER:
         return None
+    item_type = str(values[4])
+    if item_type not in {"dimension", "jack"}:
+        return None
     try:
         index = int(values[5])
     except (TypeError, ValueError):
         return None
-    return str(values[1]), str(values[2]), str(values[4]), index
+    return str(values[1]), str(values[2]), item_type, index
 
 
 def _validate_results(
@@ -1350,6 +1478,81 @@ def _validate_results(
         if not list(document.blocks.get(JACK_BLOCK_NAME)):
             raise DXFExportValidationError(f"Jack Block內容為空：{JACK_BLOCK_NAME}")
     return dimension_count, jack_count
+
+
+def _validate_invalid_warnings(
+    document,
+    expected: Sequence[_ExpectedWarning],
+) -> None:
+    if not expected:
+        if WARNING_INVALID_RESULT_LAYER in document.layers:
+            raise DXFExportValidationError(
+                "全合法輸出不應建立 invalid warning 圖層"
+            )
+        if WARNING_TEXT_STYLE in document.styles:
+            raise DXFExportValidationError(
+                "全合法輸出不應建立 warning 文字樣式"
+            )
+        return
+
+    if WARNING_INVALID_RESULT_LAYER not in document.layers:
+        raise DXFExportValidationError("缺少 invalid warning 圖層")
+    warning_layer = document.layers.get(WARNING_INVALID_RESULT_LAYER)
+    if abs(int(warning_layer.dxf.color)) != 1:
+        raise DXFExportValidationError("invalid warning 圖層不是有效紅色")
+    if WARNING_TEXT_STYLE not in document.styles:
+        raise DXFExportValidationError("缺少 warning 中文文字樣式")
+    style = document.styles.get(WARNING_TEXT_STYLE)
+    if (
+        str(style.dxf.get("font", "") or "").casefold()
+        != WARNING_FONT_FILE.casefold()
+    ):
+        raise DXFExportValidationError("warning 文字樣式字型參照錯誤")
+    family, _italic, _bold = style.get_extended_font_data()
+    if str(family or "").casefold() != WARNING_FONT_FAMILY.casefold():
+        raise DXFExportValidationError("warning 文字樣式字型家族錯誤")
+
+    actual = {}
+    for entity in document.modelspace():
+        values = _xdata_values(entity)
+        if (
+            len(values) < 6
+            or values[0] != RESULT_EXPORT_MARKER
+            or values[4] != "warning"
+        ):
+            continue
+        key = (str(values[1]), str(values[2]), str(values[3]))
+        if key in actual:
+            raise DXFExportValidationError(
+                f"warning 構件 identity 重複：{key}"
+            )
+        actual[key] = entity
+    if len(actual) != len(expected):
+        raise DXFExportValidationError(
+            f"invalid warning 實際 {len(actual)}／預期 {len(expected)}"
+        )
+    for item in expected:
+        key = (item.role, item.member_id, item.result_id)
+        entity = actual.get(key)
+        if entity is None or entity.dxftype() != "MTEXT":
+            raise DXFExportValidationError(
+                f"warning 遺失或類型錯誤：{key}"
+            )
+        if entity.dxf.layer != WARNING_INVALID_RESULT_LAYER:
+            raise DXFExportValidationError(f"warning 圖層錯誤：{key}")
+        if int(entity.dxf.get("color", 256)) != 256:
+            raise DXFExportValidationError(
+                f"warning entity 未使用 BYLAYER：{key}"
+            )
+        if str(entity.dxf.get("style", "")) != WARNING_TEXT_STYLE:
+            raise DXFExportValidationError(f"warning 文字樣式錯誤：{key}")
+        if entity.plain_text() != item.display_text:
+            raise DXFExportValidationError(f"warning 文字內容錯誤：{key}")
+        if (
+            math.dist(tuple(entity.dxf.insert)[:2], item.point)
+            > WARNING_ANCHOR_TOLERANCE_MM
+        ):
+            raise DXFExportValidationError(f"warning anchor 位置錯誤：{key}")
 
 
 def _validate_export_mode_structure(
@@ -1575,6 +1778,7 @@ def _write_clean_export(
     background: Sequence[_PreparedBackgroundSegment],
     project_geometry: Sequence[_ProjectGeometrySegment],
     expected_results: Sequence[_ExpectedResultEntity],
+    expected_warnings: Sequence[_ExpectedWarning],
     export_mode: DXFExportMode,
 ) -> _CleanValidationResult:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1606,6 +1810,7 @@ def _write_clean_export(
             reread,
             expected_results,
         )
+        _validate_invalid_warnings(reread, expected_warnings)
     except Exception as exc:
         raise _validation_failure(
             f"最終驗證失敗：{exc}",
@@ -1709,12 +1914,18 @@ def export_results_to_dxf(
         bindings,
         options,
     )
+    expected_warnings = _draw_invalid_warnings(
+        document,
+        normalized_plans,
+        bindings,
+    )
     validation = _write_clean_export(
         document,
         output_path,
         prepared_background,
         project_geometry,
         expected_results,
+        expected_warnings,
         export_mode,
     )
     background_counts = tuple(
@@ -1781,6 +1992,14 @@ __all__ = [
     "PROJECT_WALER_LAYER",
     "RESULT_SUPPORT_LAYER",
     "RESULT_WALER_LAYER",
+    "WARNING_ANCHOR_TOLERANCE_MM",
+    "WARNING_FONT_FAMILY",
+    "WARNING_FONT_FILE",
+    "WARNING_INVALID_RESULT_LAYER",
+    "WARNING_TEXT_COLLISION_RADIUS_MM",
+    "WARNING_TEXT_OFFSET_MM",
+    "WARNING_TEXT_STACK_SPACING_MM",
+    "WARNING_TEXT_STYLE",
     "WORLD_COORDINATE_TOLERANCE_MM",
     "build_project_geometry_segments",
     "build_project_member_bindings",

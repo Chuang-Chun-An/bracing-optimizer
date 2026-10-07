@@ -90,6 +90,16 @@ flowchart TB
 
 Optimize use case 回傳 Solver result 與 diagnostics。Presentation／Application 再決定是否將結果採用至 `ProjectResultModel`。
 
+### 2.1 Cooperative cancellation checkpoints
+
+三種 Solver 共用 Algorithms 層的 read-only cancellation token 與 `SolverCancelled` control outcome。Application 擁有 cancellation source；Algorithms 只在 deterministic safe checkpoint 讀取 token，不理解 CAD、Dialog 或 Tkinter：
+
+- Support：每個 config／unit 前後、Phase 1 候選批次、Phase 2 search stage 與 beam expansion 外層邊界。
+- Single Waler：initial population 批次、search stage、generation 與 result／diagnostics 組裝邊界。
+- Global Waler：每個 local Waler 前後與 Exact DP 每個 Waler group 外層邊界；local `OptimizeWaler` 接收同一 token。
+
+token 未設定時只增加只讀 branch，不修改 collection、random state、排序、score、candidate count、Beam Width、search stage 或 seed。偵測取消後以 `SolverCancelled` unwind，不回傳 partial 正式結果；Presentation 將其與一般 Solver failure 分開處理。這是 CAD update 使用的合作式停止機制，不新增使用者取消按鈕、不強制終止 thread，也不等待 worker 才套用 CAD。
+
 ---
 
 ## 3. Support Solver Overview
@@ -234,6 +244,8 @@ Steel order 搜尋使用以下 heuristic：
 
 自動候選生成直接依 Waler 類型限制 layout，完整 layout evaluation 與人工 `SupportPlanEditing` 另共用同一 Shim validator：
 
+- Jack 固定為 `600 mm`。
+- 非零 Shim 只能為 `100、150、200、300 mm`；`0` 表示不建立 Shim piece。
 - 每個 layout 只能有零塊或一塊非零 Shim。
 - Steel／Steel：非零 Shim 必須與 Jack 相鄰。
 - From 端為 RC：Shim 必須位於 From RC 接觸面。
@@ -251,6 +263,8 @@ RC 端的 terminal Shim 與第一段相鄰 Steel boundary，是端部 `1600 mm` 
 每個完整 layout 會建立 `SupportPlan` 並驗證：
 
 - Jack 數量必須剛好為一支。
+- Jack 長度必須為 `600 mm`。
+- 非零 Shim 長度必須為 `100、150、200、300 mm` 之一；`0` 仍表示沒有 Shim piece。
 - 非零 Shim 數量最多一塊，且 placement 必須符合兩端 Waler 類型。
 - Steel length 必須存在於該 Material Spec 的可購買集合。
 - Support gap 必須位於 `0～150 mm`。
@@ -260,7 +274,7 @@ RC 端的 terminal Shim 與第一段相鄰 Steel boundary，是端部 `1600 mm` 
 
 合法方案再計算正式單支分數。
 
-Reason 使用固定優先順序：Jack count、Shim count、Shim placement、gap、forbidden joint、Steel length。Jack count 或 Shim count gate 只簡化 reason，不會中止完整 evaluation 或既有 scoring inputs；`count_forbidden_piece_joints`、invalid penalty 與 score breakdown 仍依修改前的計算路徑執行，因此合法與不合法 candidates 的既有分數及排序不變。
+Reason 使用固定優先順序：Jack count、Jack size、Shim count、Shim size、Shim placement、gap、forbidden joint、Steel length。前四個 gate 只簡化 reason，不會中止完整 evaluation 或既有 scoring inputs；`count_forbidden_piece_joints`、invalid penalty 與 score breakdown 仍完整計算。自動候選只使用上述合法尺寸，因此候選集合、score components、total score 與排序不變；人工或直接呼叫送入錯誤尺寸時，plan 會變為 invalid，且只依既有公式加入 invalid penalty。
 
 ### 4.5 TargetJackRegion
 
@@ -459,10 +473,11 @@ Fallback 是失敗結果的呈現方式，不是合法方案。
 | Component | Classification | Purpose | Current Rule |
 | --- | --- | --- | --- |
 | Jack 數量 | Engineering Hard Constraint | 確保完整 Support layout | 必須剛好 1 支 |
+| Jack／Shim 尺寸 | Engineering Hard Constraint | 使用既有固定尺寸 | Jack `600 mm`；非零 Shim `100／150／200／300 mm` |
 | Support gap range | Engineering Hard Constraint | 限制合法餘量 | `0～150 mm` |
 | Forbidden joint | Engineering Hard Constraint | 避開端部、Column、Beam | 任一違規即 invalid |
 | Steel purchasable length | Engineering Hard Constraint | 禁止不存在的料長 | Steel 必須在允許集合 |
-| RC／Steel Shim placement | Engineering Hard Constraint | 符合端部接觸規則 | 自動生成階段保證 |
+| RC／Steel Shim placement | Engineering Hard Constraint | 符合端部接觸規則 | 候選生成先避免錯誤 placement；`validate_support_layout()` 在自動完整 evaluation 與人工 `SupportPlanEditing` 正式檢查 placement，並同時檢查 Jack 數量／`600 mm`、Shim 數量／`100／150／200／300 mm`、gap、forbidden joint 與 Steel length |
 | Gap preference | Solver Preference；權重為 Current Tuning Parameter | 偏好接近 80 mm | `abs(gap - 80) × 20` |
 | Under-4000 penalty | Solver Preference；權重為 Current Tuning Parameter | 減少小於 4000 mm 的 Steel | 每支 `8,000` |
 | Joint count | Solver Preference；權重為 Current Tuning Parameter | 減少材料接頭 | 每個 joint `1,200` |
@@ -568,34 +583,41 @@ Builder 仍忠實建立包含 RC 的正式 Waler input。進入 Single Waler opt
 
 對 eligible non-RC input，`OptimizeWaler` 再建立 `wales.Config`，搜尋與評分行為不變。
 
+Application 先解析 Waler material context：Material Spec 空白時沿用既有預設料長，且每種以 `99` 支近似無限庫存；具名規格則保留使用者輸入的實際 Qty（例如 `5`），不因其不同於 `99` 而警告或改寫。庫存不足時既有的採購語意仍不變。傳入 core 時，省略 `purchasable_lengths` 才表示使用 core 預設；明確空 sequence 表示沒有任何可購買料長，不得再 fallback。
+
 正式限制包括：
 
 - segment length `1000～10000 mm`。
 - segment 必須存在於 purchasable length 集合。
 - joint 與 forbidden point 距離至少 300 mm。
-- Waler 不使用 adjustment block 或 Shim。
-- Steel segment total 必須位於 `required_length - 200 mm` 到 `required_length` 的閉區間。
+- Steel segments 後可使用零或一塊 `100／150／200／300 mm` 尾端調整塊。
+- `steel total + tail adjustment + Gap = required_length`，且 `0 <= Gap <= 150 mm`。
 
 Waler 標準鋼材料長目前以 500 mm 為級距。每個 segment 必須使用合法的 purchasable standard length，因此從 Waler 起點依序累積標準 segment 後，可能的 joint positions 自然形成 500 mm grid。
 
 Solver 使用此材料規格所形成的離散位置建立搜尋空間。這是「由標準材料級距衍生的搜尋離散化」，不是獨立的 joint-position hard constraint，也不是任意搜尋 tuning。
 
-### 8.2 Steel target 與總長閉區間
+### 8.2 Steel target 與尾端解析
 
 搜尋 Waler segmentation 前，Solver 保留既有 500 mm candidate endpoint：
 
 ```text
 steel target = floor(required length / 500) × 500
-gap = required length - steel target
 ```
 
-Waler 的 `tail_adjustment` 固定為 `0`，pieces 不建立 `shim`。上述 endpoint 計算只保留既有搜尋空間與 candidate count，不單獨保證方案合法；共用 plan evaluator 另以完整 required length 判斷：
+上述 endpoint 只決定既有 Steel 搜尋空間，candidate joint grid、genes 與 candidate count 均不變。Algorithms 的 pure tail resolver 再以 required length 與實際 Steel total 推導 canonical `tail_adjustment`、Gap：
 
 ```text
-required length - 200 <= sum(segments) <= required length
+shortfall = required length - steel length
+if 0 <= shortfall <= 150:
+    tail adjustment = 0
+    gap = shortfall
+else:
+    tail adjustment = 能使 0 <= gap <= 150 的最小非零合法尺寸
+    gap = shortfall - tail adjustment
 ```
 
-下界與上界皆可接受。低於下界產生「鋼材總長不足」，高於 required length 產生「鋼材總長太長」；不再有「尾端調整量不合法」issue。若固定 endpoint 的 gap 超過 200 mm，該搜尋結果會 deterministic invalid，而不是加入 adjustment block 補足。這是 Engineering Hard Constraint，不是 GA score。
+合法尺寸集合為 `0／100／150／200／300 mm`，Gap 上下界均含等號。短差最大 `450 mm` 可完成；超過 `450 mm` 或沒有合法組合時產生 `steel-total-short`，Steel 高於 required length 時仍產生 `steel-total-long`。非零調整塊只在正式 pieces 的全部 Steel 後附加一筆 `("shim", length)`，不形成 joint，也不進 genes、allocation、材料分類或 score。這是 Engineering Hard Constraint，不是 GA preference。
 
 ### 8.3 Material-derived search discretization and feasible path
 
@@ -642,13 +664,16 @@ segments。解碼本身只轉換表示法，不判斷合法性。
 ```text
 0/1 individual
 → decode joints and segments
-→ 共用 evaluator 完整掃描 steel total、joint clearance、segment range 與 purchasable lengths
+→ 共用 tail resolver 解析 adjustment／Gap
+→ 共用 evaluator 完整掃描 tail completion、joint clearance、segment range 與 purchasable lengths
 → exact-length inventory／purchase allocation
 → Short／Mid／Long ratio analysis
 → local score 與 diagnostics payload
 ```
 
 只要有任一 hard issue，evaluator 就不執行 allocation、ratio 或 local score；automatic compatibility projector 仍套用既有 invalid penalty，因此對外排序與 payload 相容。沒有 hard issue 時才執行 exact allocation；若 allocation 防禦性失敗，同樣不產生 score components 或 local score。
+
+明確空的 purchasable-length set 會讓每個 Steel segment 依既有 contract 產生不可購買 issue。這些 invalid candidates 仍使用相同 fitness、sort key、signature、去重與 tie-break 參與搜尋；若最後沒有合法候選，Single Waler 回報 `no_legal_solution`，Global Waler 回傳 invalid solution 與 failed-Waler diagnostics，且不進入 Exact DP。這是正常的無合法方案結果，不拋出 exception。
 
 Hard issues 使用 runtime-only 具名 code 與結構化 facts，並以固定順序完整收集；中文訊息由 automatic／manual projector 各自產生。Issue code 不寫入 Project JSON 或 Solver result persistence。GA repair 只需要可行性布林值，因此呼叫同一 synchronous scanner、第一個 violation 即停止且不建立 issue object；正式 evaluator 則透過 issue sink 收集全部 issues。兩者共用同一組 hard-rule branches。
 
@@ -755,15 +780,22 @@ DEEP 完成後即停止；即使結果仍未穩定，也不再擴大搜尋。
 
 ### 8.11 Candidate merge
 
-每個 GA stage 最多輸出 5 個 local candidates。
+`OptimizeWaler` 有兩個明確的候選保留 profile；它們只控制已評估候選的保留範圍，
+不改變 GA 的生成、工程合法性、allocation、local scoring、stage 預算或 seed。
 
-所有已執行階段的結果會：
+- `SINGLE_TOP_5` 是預設值。每個已執行 stage 最多輸出 5 個 local candidates；跨
+  stage 合併後最終仍最多保留 5 個。
+- `GLOBAL_FINAL_POPULATION` 只由 Global Waler orchestration 明確選用。每個已執行
+  stage 會保留該 stage **最終 population** 中所有合法、完整 solution-signature
+  unique candidates；GA 過程中較早世代已被淘汰的方案不會保留。跨 stage 合併不套用
+  固定 Top N。
 
-1. 以完整 Waler solution signature 去重；signature 包含 ordered segments、
-   joints，以及為 persistence 相容保留的 `tail_adjustment=0` 與衍生 gap。
-2. 相同 signature 保留較低 score。
-3. 依 score 與 deterministic signature 排序。
-4. 最終最多保留 5 個候選。
+兩個 profile 都以完整 Waler solution signature 去重；signature 包含 ordered segments、
+joints、canonical `tail_adjustment` 與 Gap。相同 signature
+保留較低 score，再依 score 與 deterministic signature 排序。Single 對外 rank 仍為
+`1～5`；Global 跨 stage 排名可能大於 5。
+
+Single Waler runtime cache key 以 `waler_tail_adjustment_v2` 作為 schema marker，隔離舊的固定零 adjustment 結果；既有幾何、材料、ratio 與搜尋 policy token 的 tuple shape 不變。這不提升 Project persistence schema。
 
 ---
 
@@ -777,7 +809,7 @@ Single Waler 使用 additive weighted score，分數越低越好。
 | --- | --- | --- | --- |
 | Segment legality | Engineering Hard Constraint | 確保標準材料可施工 | `1000～10000 mm` 且在 purchasable set |
 | Forbidden-point clearance | Engineering Hard Constraint | 避開 Strut／Brace connection | 距離 `< 300 mm` invalid |
-| Steel total | Engineering Hard Constraint | 確保 Waler 鋼材總長落在已確認範圍 | `required - 200 <= steel total <= required`，無 adjustment block／Shim |
+| Tail completion | Engineering Hard Constraint | 以 Steel、單一尾端調整塊與 Gap 完成需求長度 | `steel + adjustment + Gap = required`；Gap `0～150 mm`，最大短差 `450 mm` |
 | Purchase quantity | Solver Preference；權重為 Current Tuning Parameter | 優先使用現有庫存 | 每支購買料 `100,000` |
 | Material ratio | Temporary Solver Heuristic；權重為 Current Tuning Parameter | 平衡 Short／Mid／Long | L1 deviation × `100,000` |
 | Waler ratio target | Temporary Solver Heuristic | 暫時避免偏向單一料長區間 | 預設 `20% / 50% / 30%`，可調整 |
@@ -822,7 +854,10 @@ score
 
 每根 eligible non-RC Waler 必須具有合法的第一名 local candidate，否則全域流程失敗。
 
-每根 eligible non-RC Waler 最多提供 5 個 local candidates。
+Global 明確以 `GLOBAL_FINAL_POPULATION` 呼叫同一個 `OptimizeWaler`。每支 Waler 仍各自
+執行一次完整 local search，不依幾何或輸入等價性共用結果，也不建立跨 Waler cache。
+每個已執行 stage 只收集 final population，跨 stage 依完整 solution signature union
+並重新排定 deterministic local rank，因此送往材料 signature 合併前可有超過 5 個候選。
 
 ### 10.2 Material signature
 
@@ -841,6 +876,9 @@ Material signature 為：
 ```
 
 同一根 Waler 中，具有相同 material signature 的 candidates 會合併。
+
+不同 material signature 全部保留，不另加固定 Top N、beam pruning 或 state truncation。
+因此完成此合併後，Global candidate group 仍可能包含 rank 6 以上候選。
 
 代表候選依序偏好：
 
@@ -879,6 +917,7 @@ Global Waler Solver 使用 deterministic Exact DP。
 
 ```text
 GA 產生有限 local candidates
+→ 已執行 stages 的 final-population union
 → material-signature merge
 → 在保留候選集合內 Exact DP
 ```
@@ -924,6 +963,9 @@ Global Waler Solver 目前沒有 shared inventory depletion。
 - Local candidate 會計算自身庫存與採購。
 - Global selection 不會在選完 W1 後，扣除庫存再計算 W2。
 - 全場組合可能重複使用同一份庫存可用量假設。
+
+Exact DP 仍依既有 `waler_order` 一支一支擴展 candidate group，state、duplicate-state
+merge 與最終 objective ordering 均未因候選池擴大而改變。
 
 Diagnostics 會記錄：
 
@@ -986,7 +1028,7 @@ shared_inventory_optimized = false
 
 人工修改 Waler segments 後會重新建立 joints，並驗證：
 
-- Steel segment total 是否位於 required length 的 200 mm 閉區間。
+- Steel segments 是否可由同一 tail resolver 解析為合法 adjustment 與 `0～150 mm` Gap。
 - Segment 是否位於 `1000～10000 mm`。
 - Segment 是否存在於 purchasable length 集合。
 - Joint 是否避開 forbidden point 300 mm。
@@ -994,7 +1036,7 @@ shared_inventory_optimized = false
 
 `WalerPlanEditing` 與 automatic Solver 呼叫相同的 Algorithms evaluator，並使用同一份 resolved context 與庫存資料。庫存 Qty 不足不使方案 invalid；若 length 可購買，會顯示採購警告並將購買數量納入 score。空白 Material Spec 仍沿用既有 Usage fallback。
 
-合法人工 Waler 方案會取得與自動 Solver 完全相同的 local score components、運算順序與數值型別。人工顯示 projector 依固定順序呈現 core 收集的全部 issues；issue code 僅存在執行期間，不存入 Project JSON 或結果存檔。載入含非零 legacy `tail_adjustment` 的舊結果時不做 migration；下一次人工重算會將 `tail_adjustment` 歸零並移除 Waler `shim`。
+合法人工 Waler 方案會取得與自動 Solver 完全相同的 canonical adjustment、Gap、pieces、local score components、運算順序與數值型別。人工顯示 projector 依固定順序呈現 core 收集的全部 issues；issue code 僅存在執行期間，不存入 Project JSON 或結果存檔。載入含任意尺寸 legacy `tail_adjustment` 的舊結果時不做 migration；下一次人工重算會忽略舊 tail fields，依目前合法尺寸與選擇規則重新推導。
 
 下列搜尋資訊不影響人工合法性：
 
@@ -1042,7 +1084,7 @@ shared_inventory_optimized = false
 - SharedLayoutGroup 使用相同 ordered layout。
 - Waler joint clearance 至少 300 mm。
 - Waler segment 屬於 `1000～10000 mm` 且可購買。
-- Waler 鋼材總長位於 required length 的 200 mm 閉區間，且不使用 adjustment block／Shim。
+- Waler 以 Steel、零或一塊合法尾端調整塊及 `0～150 mm` Gap 精確完成 required length；短差超過 `450 mm` 無解。
 
 ### Solver Preference
 

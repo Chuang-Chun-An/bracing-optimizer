@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 
 from bracing_optimizer.algorithms import support
@@ -258,6 +260,127 @@ class SupportShimValidationCharacterizationTests(unittest.TestCase):
             ["M", "S", "J", "F"],
         )
 
+    def test_jack_and_nonzero_shim_sizes_are_formal_hard_constraints(self):
+        legal_sizes = (
+            ([("steel", 5000), ("jack", 600), ("steel", 5000)], 10680),
+            *(
+                (
+                    [
+                        ("steel", 5000),
+                        ("jack", 600),
+                        ("shim", shim),
+                        ("steel", 5000),
+                    ],
+                    10680 + shim,
+                )
+                for shim in (100, 150, 200, 300)
+            ),
+        )
+        for pieces, total_length in legal_sizes:
+            with self.subTest(pieces=pieces):
+                plan = support.evaluate_single_support(
+                    self._case_config("legal-size", total_length),
+                    pieces,
+                )
+                self.assertTrue(plan.valid, plan.reason)
+
+        zero_shim = support.validate_support_layout(
+            self._case_config("zero-shim", 10680),
+            [
+                ("steel", 5000),
+                ("jack", 600),
+                ("shim", 0),
+                ("steel", 5000),
+            ],
+        )
+        self.assertNotIn(
+            "invalid_shim_length",
+            [issue.code for issue in zero_shim.issues],
+        )
+
+    def test_wrong_jack_size_only_adds_existing_invalid_penalty(self):
+        cfg = self._case_config("jack-size", 10780)
+        pieces = [("steel", 5000), ("jack", 700), ("steel", 5000)]
+
+        plan = support.evaluate_single_support(cfg, pieces)
+
+        self.assertFalse(plan.valid)
+        self.assertEqual(
+            [issue.code for issue in support.validate_support_layout(cfg, pieces).issues],
+            ["invalid_jack_length"],
+        )
+        self.assertEqual(plan.reason, "千斤頂長度不合法: 700 mm（應為 600 mm）")
+        self.assertEqual(
+            plan.breakdown,
+            {
+                "short_penalty": 0.0,
+                "joint_penalty": 2400.0,
+                "gap_penalty": 0.0,
+                "jack_edge_penalty": 0.0,
+                "invalid_penalty": 1_000_000.0,
+            },
+        )
+        self.assertEqual(plan.score, 1_002_400.0)
+
+    def test_wrong_shim_size_only_adds_existing_invalid_penalty(self):
+        cfg = self._case_config("shim-size", 10825)
+        pieces = [
+            ("steel", 5000),
+            ("jack", 600),
+            ("shim", 145),
+            ("steel", 5000),
+        ]
+
+        plan = support.evaluate_single_support(cfg, pieces)
+
+        self.assertFalse(plan.valid)
+        self.assertEqual(
+            [issue.code for issue in support.validate_support_layout(cfg, pieces).issues],
+            ["invalid_shim_length"],
+        )
+        self.assertEqual(plan.reason, "Shim 長度不合法: 145 mm")
+        self.assertEqual(
+            plan.breakdown,
+            {
+                "short_penalty": 0.0,
+                "joint_penalty": 3600.0,
+                "gap_penalty": 0.0,
+                "jack_edge_penalty": 0.0,
+                "invalid_penalty": 1_000_000.0,
+            },
+        )
+        self.assertEqual(plan.score, 1_003_600.0)
+
+    def test_size_issue_gates_follow_deterministic_priority(self):
+        cfg = self._case_config(
+            "priority",
+            20_000,
+            steel_lengths=(5000,),
+            waler_centers=(8100,),
+        )
+        pieces = [
+            ("steel", 4500),
+            ("shim", 145),
+            ("steel", 3500),
+            ("jack", 700),
+        ]
+
+        validation = support.validate_support_layout(cfg, pieces)
+
+        self.assertEqual(validation.reason, "千斤頂長度不合法: 700 mm（應為 600 mm）")
+        self.assertEqual(
+            [issue.code for issue in validation.issues],
+            [
+                "invalid_jack_length",
+                "invalid_shim_length",
+                "invalid_shim_placement",
+                "invalid_gap",
+                "forbidden_joint",
+                "invalid_steel_length",
+                "invalid_steel_length",
+            ],
+        )
+
     def test_shim_count_and_placement_matrix(self):
         cases = [
             (
@@ -482,7 +605,7 @@ class TypedSupportBoundaryTests(unittest.TestCase):
         self.assertEqual(support.count_forbidden_piece_joints(pieces, cfg), 1)
         plan = support.evaluate_single_support(cfg, pieces)
         self.assertFalse(plan.valid)
-        self.assertEqual(plan.score, 7400.0)
+        self.assertEqual(plan.score, 1007400.0)
         self.assertEqual(
             plan.breakdown,
             {
@@ -490,7 +613,7 @@ class TypedSupportBoundaryTests(unittest.TestCase):
                 "joint_penalty": 2400.0,
                 "gap_penalty": 0.0,
                 "jack_edge_penalty": 5000.0,
-                "invalid_penalty": 0.0,
+                "invalid_penalty": 1000000.0,
             },
         )
 
@@ -628,7 +751,41 @@ class RCWalerEndClearanceTests(unittest.TestCase):
             )
             self.assertEqual(len(candidates), 20)
             self.assertTrue(all(plan.valid and not plan.reason for plan in candidates))
+            self.assertTrue(all(
+                [length for kind, length in plan.pieces if kind == "jack"]
+                == [support.JACK_LENGTH]
+                for plan in candidates
+            ))
+            self.assertTrue(all(
+                length in support.SHIM_LENGTHS
+                for plan in candidates
+                for kind, length in plan.pieces
+                if kind == "shim"
+            ))
             candidate_sets.append(candidates)
+
+        ordered_snapshot = [
+            [
+                (
+                    [list(piece) for piece in plan.pieces],
+                    plan.score,
+                    sorted(plan.breakdown.items()),
+                    plan.valid,
+                    plan.reason,
+                )
+                for plan in candidates
+            ]
+            for candidates in candidate_sets
+        ]
+        payload = json.dumps(
+            ordered_snapshot,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(payload).hexdigest(),
+            "78d806db8e5ed46ff67f895d7d2111495983aa488b71ab686df1fd5a3899a6b5",
+        )
 
         solution = support.build_global_solution(candidate_sets[:2])
         self.assertTrue(solution.valid, solution.reason)

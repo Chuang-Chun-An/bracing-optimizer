@@ -28,9 +28,9 @@ from dxf_import.material_recognition import (
 from dxf_import.models import DXFImportError, ExcludedSource, GeometryTolerances
 from dxf_import.review_workflow import DXFReviewWorkflow
 from dxf_import.validation import build_problem_records, build_review_items
+from tests.sample_dxf_assets import Y05_DXF_PATH
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PRE_CHANGE_Y05_L_SHAPE_HANDLES = (
     "1648",
     "1649",
@@ -247,9 +247,7 @@ class DxfHatchWalerCharacterizationTests(unittest.TestCase):
         self.assertEqual(len(tuple(doc.modelspace().query("HATCH"))), 8)
 
     def test_y05_hatches_become_four_independent_rc_walers_without_old_l_shape(self):
-        paths = tuple(REPOSITORY_ROOT.glob("*Y05*.dxf"))
-        self.assertEqual(len(paths), 1, "Repository should contain exactly one Y05 fixture")
-        source_path = paths[0]
+        source_path = Y05_DXF_PATH
         doc = ezdxf.readfile(source_path)
         expected_bounds = {
             "1647": (22039.06742004146, 37800.0, -24000.0, -23200.0),

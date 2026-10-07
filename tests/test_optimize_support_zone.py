@@ -4,6 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from bracing_optimizer.algorithms.cancellation import (
+    CancellationSource,
+    SolverCancelled,
+)
+
 from bracing_optimizer.algorithms import solver_search, support
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 from bracing_optimizer.application.project_data import ProjectDataModel
@@ -24,6 +29,49 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class OptimizeSupportZoneTests(unittest.TestCase):
+    def test_cancelled_operation_does_not_generate_or_commit_cache(self):
+        cache = {("existing",): ["preserved"]}
+        source = CancellationSource()
+
+        plan = support.SupportPlan(
+            support_id="template",
+            pieces=[("steel", 4_000), ("steel", 6_000)],
+            joints=[4_000],
+            gap=0,
+            jack_center=5_000,
+            jack_region_id=2,
+            score=10,
+            valid=True,
+        )
+
+        def cancel_after_generation(*, cancellation_token, **_kwargs):
+            self.assertIs(cancellation_token, source.token)
+            source.cancel()
+            return [plan]
+
+        with (
+            patch(
+                "bracing_optimizer.application.optimize_support_zone.support."
+                "build_support_candidate_cache_key",
+                autospec=True,
+                return_value=("new",),
+            ),
+            patch(
+                "bracing_optimizer.application.optimize_support_zone.support."
+                "generate_single_support_candidates",
+                autospec=True,
+                side_effect=cancel_after_generation,
+            ) as generate,
+        ):
+            with self.assertRaises(SolverCancelled):
+                OptimizeSupportZone(cache).execute(
+                    self.request(),
+                    cancellation_token=source.token,
+                )
+
+        generate.assert_called_once()
+        self.assertEqual(cache, {("existing",): ["preserved"]})
+
     @staticmethod
     def request():
         config = support.SupportConfig(
@@ -103,6 +151,8 @@ class OptimizeSupportZoneTests(unittest.TestCase):
                 self.request(),
                 on_progress=progress.append,
             )
+            self.assertNotIn(("S1", "policy"), cache)
+            use_case.adopt_candidate_cache_updates(first)
             second = use_case.execute(self.request())
 
         self.assertIs(first.solution, solution)
@@ -230,6 +280,7 @@ class OptimizeSupportZoneTests(unittest.TestCase):
                 material_ratio_targets=targets,
                 material_ratio_weight=0,
             ))
+            optimizer.adopt_candidate_cache_updates(first)
             second = optimizer.execute(OptimizeSupportZoneRequest(
                 input=second_input,
                 material_ratio_targets=targets,

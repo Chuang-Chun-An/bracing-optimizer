@@ -3,6 +3,12 @@
 ## Purpose
 本 capability 定義 DXF Import 在各構件完成來源辨識後，如何以同一套幾何與關係語意判定 Waler 的支撐側及最外實體接觸面，使一般 CAD、BIM Block 與 HATCH RC Waler 不因來源畫法不同而產生不同正式工程線。
 
+## 閱讀導航
+
+- **必讀**：Waler 接觸面語意、完整構件 envelope，以及「可靠 Waler envelope 的代表寬度必須使用正交間距」；三者共同定義正式幾何與 `source_width`。
+- **條件式閱讀**：修改 terminal identity、overlap 或 source exclusion 時，閱讀競爭來源與 unique-first precedence Requirements；修改 HATCH／MLINE 時，閱讀完整 envelope 的 HATCH Scenario。
+- **可先跳過**：與本次寬度量測無關的 Project lifecycle、Brace connection 與 downstream diagnostics Scenarios。
+
 ## Requirements
 
 ### Requirement: Waler 接觸面語意不得依賴來源畫法
@@ -207,7 +213,7 @@ Waler、Strut 與 Brace MUST 先各自完成其來源辨識；Waler 接觸面只
 
 ### Requirement: Waler 接觸面必須依 unique-first evidence precedence 判定
 
-Waler 的 contact-face state SHALL 由目前 active candidate relations、完整 envelope 與 unique-first evidence precedence 決定。系統 MUST 先把非退化方向 evidence 分為 `unique` 與 `competing` 兩組：
+除已通過 `dxf-waler-engineering-line-repair` capability 專用驗證與原子提交的人工正式化 decision 外，Waler 的 contact-face state SHALL 由目前 active candidate relations、完整 envelope 與 unique-first evidence precedence 決定。系統 MUST 先把非退化方向 evidence 分為 `unique` 與 `competing` 兩組：
 
 - 若至少存在一筆可靠 unique evidence，接觸側 MUST 只由全部可靠 unique evidence 決定；competing evidence MUST NOT 參與選側。
 - 若可靠 unique evidence 全部指向同一側，系統 SHALL 選出該側最外實體表面作為 formal contact face。方向相反的 competing evidence MUST NOT 推翻此結果或使 Waler 變成 contact-face ambiguous；系統 SHALL 產生 warning 類型的可追溯診斷。
@@ -217,10 +223,14 @@ Waler 的 contact-face state SHALL 由目前 active candidate relations、完整
 
 Unique／competing precedence 是 DXF Recognition Engineering Policy，不是票數權重或 Solver Preference。warning SHALL 為 deterministic、non-blocking，並至少保留 Waler source identity、決定結果的 unique member source identities，以及方向相反而被忽略的 competing member source identities；建議通用 code 為 `WALER_COMPETING_SIDE_EVIDENCE_IGNORED`。相同方向的 competing evidence不需產生此 warning。
 
-當 Waler 因沒有可靠 evidence、authoritative evidence 兩側衝突、envelope ambiguity 或幾何退化而無法完成 finalization 時，系統 SHALL 保留 provisional axis 與完整 envelope 作為 staged recognition／diagnostic facts，且 MUST NOT 將 provisional axis 提交為正式接觸面、Project 或 Solver engineering line。Member identity competition 的 blocker 與 contact-face state MUST 分別維持；formal contact face MUST NOT 解除 identity ambiguity或挑選 connection winner。
+當 Waler 因沒有可靠 evidence、authoritative evidence 兩側衝突、envelope ambiguity 或幾何退化而無法完成自動 finalization 時，系統 SHALL 保留 provisional axis 與完整 envelope 作為 staged recognition／diagnostic facts，且 MUST NOT 自動將 provisional axis 提交為正式接觸面、Project 或 Solver engineering line。只有使用者對 exact provisional Waler 明確執行專用人工正式化、選定有限線通過該 capability 的 validation 且 atomic commit 成功後，該人工線本身才 SHALL 取代目標 Waler 的自動 envelope／side outcome，成為 canonical formal contact face；它不必位於 envelope 外側邊，系統亦 MUST NOT 再依支撐側選擇另一條 outer face。
 
+人工正式化後，unique-first precedence SHALL 只用於以人工線重建的 current terminal evidence之支撐側判斷：由 authoritative member body位於人工線哪一側建立 `support_normal_world`。若 authoritative evidence兩側衝突或完全沒有可靠 evidence，支撐側 SHALL 為 unknown；人工 contact face仍維持 formal，但後續接觸調整 SHALL 依既有 `WALER_SUPPORT_SIDE_UNKNOWN` 阻擋。自動 Waler仍依前述規則選擇支撐側最外實體表面，本人工例外不得改變自動流程。
+
+Member identity competition 的 blocker 與 contact-face state MUST 分別維持；不論 formal contact line 來自自動 finalization 或人工正式化，均 MUST NOT 解除 identity ambiguity或挑選 connection winner。一般 confirmation、Preview selection、顯示狀態及沒有明確正式化意圖的 legacy manual geometry MUST NOT 建立人工 contact-line authority。
 
 #### Scenario: Unique evidence 與 conflicting competing evidence
+
 - **WHEN** Waler A 具有指向上側的可靠 unique evidence，且另有指向下側的可靠 competing evidence
 - **THEN** A SHALL 維持由 unique evidence 決定的上側 formal contact face
 - **AND** A MUST NOT 因 competing evidence 變成 contact-face ambiguous
@@ -257,23 +267,51 @@ Unique／competing precedence 是 DXF Recognition Engineering Policy，不是票
 - **AND** formal contact faces MUST NOT 被用來挑選 A 或 B 作為 connection winner
 
 #### Scenario: 既有 formal fixtures 維持正式結果
+
 - **WHEN** 以目前 Y05、Y1A 與一般 CAD fixtures 執行 Waler contact-face recognition
 - **THEN** 原本 formal 的 Waler SHALL 在 unique-first precedence 下全部維持 formal
 - **AND** 其 selected outer face 與既有唯一 connection identities SHALL 保持幾何等價
 
 #### Scenario: Provisional axis 不得由確認動作升級
-- **WHEN** Waler 的 identity／contact-face blocking ambiguity 仍存在
+
+- **WHEN** Waler 的 identity／contact-face blocking ambiguity 仍存在，且使用者沒有完成專用人工正式化
 - **THEN** 使用者確認、Preview 選取或顯示狀態 MUST NOT 將 provisional axis 升級為正式接觸面
 
+#### Scenario: 專用人工修補建立正式接觸線
+
+- **WHEN** 一支 provisional Waler 的自動 envelope／contact-face outcome 無法唯一提交，但使用者已對 exact source 完成專用人工正式化
+- **THEN** 選定人工線本身 SHALL 成為該 Waler 的 canonical formal contact face，即使它不在 envelope 外側邊
+- **AND** 自動 unique-first outcome MUST NOT 再為同一 Waler 建立另一條正式接觸線
+
+#### Scenario: 人工接觸線同側證據建立 support normal
+
+- **WHEN** 系統已依人工接觸線重建 terminal evidence，且 authoritative member bodies依既有 unique-first precedence全部位於同一側
+- **THEN** 系統 SHALL 建立指向該側的 `support_normal_world`
+- **AND** MUST NOT 將 support side判斷結果用來替換人工 contact face
+
+#### Scenario: 人工接觸線兩側衝突或無證據
+
+- **WHEN** 以人工接觸線重建後的 authoritative evidence分布兩側，或完全沒有可靠 terminal evidence
+- **THEN** `support_normal_world` SHALL 為 unknown，人工 contact face SHALL 維持 formal
+- **AND** 後續背填／寬度調整 MUST 依 `WALER_SUPPORT_SIDE_UNKNOWN` 阻擋，不得猜測方向
+
+#### Scenario: 人工正式接觸線不解除 competing identity
+
+- **WHEN** Waler A 已由人工正式化取得 formal contact line，但某 member terminal 仍同時以 A 與 Waler B 為 competing identities
+- **THEN** 該 terminal identity ambiguity 與任何直接 overlap competition SHALL 維持 blocking
+- **AND** 人工 decision MUST NOT 被用來選擇 A 作為 winner
+
 #### Scenario: 一般非重疊 Waler 維持既有正式結果
+
 - **WHEN** 一支非重疊 Waler 具有唯一 terminal identity 與可靠側向證據
 - **THEN** 系統 SHALL 依既有規則選出支撐側最外實體表面
 - **AND** 本 change MUST NOT 改變其正式接觸面或 connection identity
 
 #### Scenario: Generic unresolved 不證明 overlap competition
+
 - **WHEN** Waler A／B 具有重大重疊 warning，而某 contact-face outcome 是 unresolved，但沒有在同一 finalization context 明確列出 A、B 兩個完整 source identities 為 competitors
 - **THEN** 該 outcome MUST NOT 被用來建立 A／B 的 blocking competition error
-- **AND** A／B 的 formal／provisional state SHALL 仍由各自實際 contact-face resolution outcome 決定
+- **AND** A／B 的 formal／provisional state SHALL 仍由各自實際 contact-face resolution outcome 或有效人工正式化 decision 決定
 
 ### Requirement: 競爭來源變更後必須重建方向與 identity 狀態
 
@@ -294,3 +332,59 @@ Unique／competing precedence 是 DXF Recognition Engineering Policy，不是票
 - **THEN** 系統 SHALL 重新建立 blocking identity ambiguity 與目前 active candidate relations
 - **AND** 每支 Waler SHALL 依 unique-first precedence 重新評估 formal／ambiguous／unresolved contact-face outcome 與 warnings
 - **AND** MUST NOT 沿用排除期間建立的 stale identity、candidate、warning 或正式接觸面
+
+### Requirement: 可靠 Waler envelope 的代表寬度必須使用正交間距
+
+當 Waler 來源辨識已在單一 qualified component scope 內建立兩條最外 longitudinal faces 時，系統 MUST 以這兩條 faces 所在 supporting lines 之間的正交間距作為唯一代表 `source_width`。完全平行時，該值 MUST 為固定的 line-to-line perpendicular distance；在既有 `parallel_angle_tolerance_deg` 內但不完全平行時，系統 MUST 使用對稱正交量測，即分別量取每條 face 中點到另一條 supporting line 的正交距離，再取兩者平均。
+
+此規則屬於 DXF Recognition Engineering Policy。有限 rail 的縱向端點錯位、overhang、斜端長度或端點到另一有限 segment 的距離 MUST NOT 增加或減少代表寬度。系統 MUST 將同一 `source_width` 提供給 Review 顯示、Waler contact review baseline 與既有材料規格辨識，不得由 downstream path 重新推導第二套寬度。
+
+此規則 MUST NOT 改變既有 outer-face qualification、`parallel_angle_tolerance_deg`、`minimum_projection_overlap_ratio`、一般構件最大寬度 gate、contact-face finalization、單線 Waler unknown-width semantics，或材料規格的 `material_width_tolerance_mm = 1.0` 唯一匹配規則。
+
+#### Scenario: 對齊的平行外側線維持原寬度
+- **WHEN** qualified Waler envelope 的兩條平行外側 supporting lines 正交相距 `350.000 mm`，且有限線段端點沿縱向對齊
+- **THEN** 系統 SHALL 產生 `source_width = 350.000 mm`
+- **AND** 既有 envelope、接觸面與材料規格流程 SHALL 維持相容
+
+#### Scenario: 縱向端點錯位不增加寬度
+- **WHEN** qualified Waler envelope 的兩條平行外側 supporting lines 正交相距 `400.000 mm`，但其中一條有限 rail 沿縱向延伸或縮短，使端點不對齊或端部形成斜邊
+- **THEN** 系統 SHALL 產生約 `400.000 mm` 的 `source_width`
+- **AND** MUST NOT 將斜邊長度、longitudinal residual 或有限端點到另一 segment 的距離納入寬度
+
+#### Scenario: 容許角度內的外側線使用對稱正交量測
+- **WHEN** qualified Waler envelope 的兩條外側 faces 不完全平行，但角度差 `<= parallel_angle_tolerance_deg`
+- **THEN** 系統 SHALL 以兩個「face 中點到另一條 supporting line」正交距離的平均作為 `source_width`
+- **AND** MUST NOT 改用有限 segment 最短距離、四端點平均、最小寬度或最大寬度
+
+#### Scenario: 旋轉、端點方向與來源順序不改變寬度
+- **WHEN** 同一 qualified Waler envelope 只改變整體 WCS 旋轉、兩條 faces 的 start／end 表示方向或 source entity iteration order，而幾何保持等價
+- **THEN** `source_width` SHALL 保持數值等價
+- **AND** 對應材料規格辨識結果 SHALL 保持相同
+
+#### Scenario: Y29 W18 使用修正後寬度配對材料
+- **WHEN** 系統辨識 Y29 W18 source handle `69F`，其兩條 longitudinal outer supporting lines 正交相距約 `400.000 mm`，且圍令材料選項同時包含 `H400x400` 與 `H414x405`
+- **THEN** W18 的 `source_width` SHALL 約為 `400.000 mm`，而不是 `404.682 mm`
+- **AND** 既有 `±1.0 mm` 唯一匹配規則 SHALL 自動選擇 `H400x400`
+- **AND** MUST NOT 自動選擇 `H414x405`
+
+#### Scenario: Y29 W19 維持既有寬度與材料
+- **WHEN** 系統以相同正交公式辨識 Y29 W19 source handle `720`，且圍令材料選項包含 `H400x400`
+- **THEN** W19 的 `source_width` SHALL 維持約 `400.000 mm`
+- **AND** 既有 `±1.0 mm` 唯一匹配規則 SHALL 維持自動選擇 `H400x400`
+- **AND** W19 SHALL 維持通過既有 `maximum_component_width_mm = 600.0` gate
+
+#### Scenario: W18／W19 overlap 與 B15 端點歧義不受影響
+- **WHEN** Y29 W18 source `69F` 的 `source_width` 改以正交方式量測，而 W18、W19 source `720` 的 outer faces、provisional axes、contact faces 與 source identities 均未改變
+- **THEN** 系統 SHALL 維持 `69F`／`720` 的 `WALER_SOURCE_OVERLAP` 與相關 `WALER_OVERLAP_COMPETITION` 結果
+- **AND** B15 source `71E` SHALL 維持對 W18／W19 的 `AMBIGUOUS_WALER_CONNECTION`
+- **AND** B15 MUST NOT 因寬度修正而取得正式 endpoint choice
+
+#### Scenario: 單線 Waler 不製造寬度
+- **WHEN** Waler 只有一條可靠正式工程線，且來源幾何無法證明第二條外側 face
+- **THEN** 系統 SHALL 維持既有 unknown-width semantics
+- **AND** MUST NOT 為套用正交量測而複製、offset 或猜測另一條 supporting line
+
+#### Scenario: HATCH 與 MLINE 等價 envelope 不產生回歸
+- **WHEN** HATCH RC 或 MLINE Waler 已提供兩條幾何對齊、正交間距可靠的外側 faces
+- **THEN** 其 `source_width` SHALL 與既有可靠幾何寬度保持等價
+- **AND** HATCH RC material precedence 與 MLINE provenance SHALL 維持不變

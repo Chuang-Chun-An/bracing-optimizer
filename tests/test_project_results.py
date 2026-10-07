@@ -4,6 +4,7 @@ from collections import Counter
 from bracing_optimizer.algorithms import support
 from bracing_optimizer.algorithms.solver_search import SolverDiagnostics
 from bracing_optimizer.application.project_results import (
+    ExportLegality,
     MaterialDetailBuildError,
     MaterialDetailRow,
     ProjectResultModel,
@@ -79,6 +80,74 @@ class ProjectResultModelTests(unittest.TestCase):
         selected_plan = restored["result"]["selected_plan"]
         self.assertEqual(selected_plan["tail_adjustment"], 75)
         self.assertEqual(selected_plan["pieces"][-1], ("shim", 75))
+
+    def test_canonical_waler_tail_survives_project_round_trip(self):
+        source = {
+            "type": "waler",
+            "visible": True,
+            "result": {
+                "waler_id": "W1",
+                "material_spec": "H400",
+                "required_length": 16450,
+                "selected_plan": {
+                    "segments": [8000, 8000],
+                    "steel_length": 16000,
+                    "tail_adjustment": 300,
+                    "gap": 150,
+                    "pieces": [
+                        ("steel", 8000),
+                        ("steel", 8000),
+                        ("shim", 300),
+                    ],
+                    "valid": True,
+                    "legality": {"valid": True},
+                },
+            },
+        }
+
+        payload = ProjectResultModel.serialize_result_item("W1-plan", source)
+        restored = ProjectResultModel.deserialize_result_item(payload)
+        plan = restored["result"]["selected_plan"]
+
+        self.assertEqual(plan["tail_adjustment"], 300)
+        self.assertEqual(plan["gap"], 150)
+        self.assertEqual(
+            plan["pieces"],
+            [("steel", 8000), ("steel", 8000), ("shim", 300)],
+        )
+
+    def test_canonical_adjustment_is_a_detail_but_not_steel_usage(self):
+        model = ProjectResultModel(result_items={
+            "W1-plan": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "material_spec": "H400",
+                    "selected_plan": {
+                        "pieces": [
+                            ("steel", 8000),
+                            ("steel", 8000),
+                            ("shim", 300),
+                        ],
+                        "gap": 150,
+                        "valid": True,
+                        "legality": {"valid": True},
+                    },
+                },
+            },
+        })
+
+        details = model.collect_visible_material_details()
+
+        self.assertEqual(
+            [(row.material_type, row.length) for row in details],
+            [("steel", 8000), ("steel", 8000), ("shim", 300)],
+        )
+        self.assertEqual(
+            model.collect_visible_material_usage(),
+            Counter({("圍令", "H400", 8000): 2}),
+        )
 
     @staticmethod
     def support_solution():
@@ -179,6 +248,161 @@ class ProjectResultModelTests(unittest.TestCase):
             }),
         )
 
+    def test_export_legality_normalizes_support_missing_valid_and_reason_conflict(self):
+        solution = self.support_solution()
+        missing_valid = solution.plans[0]
+        del missing_valid.valid
+        missing_valid.reason = ""
+        solution.plans.append(support.SupportPlan(
+            support_id="S2",
+            pieces=[("steel", 8000)],
+            joints=[],
+            gap=0,
+            jack_center=0,
+            jack_region_id=1,
+            score=0,
+            valid=True,
+            reason="接頭落入禁止區",
+            material_spec="H400",
+        ))
+        model = ProjectResultModel(result_items={
+            "Z1": {
+                "type": "support",
+                "visible": True,
+                "result": solution,
+            },
+        })
+
+        self.assertEqual(
+            model.collect_visible_export_legality(),
+            (
+                ExportLegality(
+                    "Z1",
+                    "support",
+                    "S1",
+                    False,
+                    ("未提供不合法原因",),
+                ),
+                ExportLegality(
+                    "Z1",
+                    "support",
+                    "S2",
+                    False,
+                    ("接頭落入禁止區",),
+                ),
+            ),
+        )
+
+    def test_export_legality_uses_waler_legality_valid_before_plan_valid(self):
+        model = ProjectResultModel(result_items={
+            "W2-方案1": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W2",
+                    "selected_plan": {
+                        "valid": False,
+                        "legality": {
+                            "valid": True,
+                            "violations": ["不應輸出的舊問題"],
+                        },
+                    },
+                },
+            },
+            "W1-方案1": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "selected_plan": {
+                        "valid": True,
+                        "errors": ["fallback 不得蓋過 legality"],
+                        "legality": {
+                            "valid": False,
+                            "violations": [
+                                "鋼材總長不足",
+                                "鋼材總長不足",
+                                " ",
+                                "接頭落入禁止區",
+                            ],
+                        },
+                    },
+                },
+            },
+        })
+
+        self.assertEqual(
+            model.collect_visible_export_legality(),
+            (
+                ExportLegality(
+                    "W1-方案1",
+                    "waler",
+                    "W1",
+                    False,
+                    ("鋼材總長不足", "接頭落入禁止區"),
+                ),
+                ExportLegality("W2-方案1", "waler", "W2", True, ()),
+            ),
+        )
+
+    def test_export_legality_defaults_waler_without_valid_or_reasons_to_invalid(self):
+        model = ProjectResultModel(result_items={
+            "W1-方案1": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "selected_plan": {},
+                },
+            },
+        })
+
+        self.assertEqual(
+            model.collect_visible_export_legality(),
+            (
+                ExportLegality(
+                    "W1-方案1",
+                    "waler",
+                    "W1",
+                    False,
+                    ("未提供不合法原因",),
+                ),
+            ),
+        )
+
+    def test_export_legality_does_not_change_material_scope(self):
+        solution = self.support_solution()
+        solution.plans[0].valid = False
+        solution.plans[0].reason = "待修正"
+        model = ProjectResultModel(result_items={
+            "Z1": {
+                "type": "support",
+                "visible": True,
+                "result": solution,
+            },
+            "W1-方案1": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "material_spec": "H350",
+                    "selected_plan": {
+                        "segments": [9000],
+                        "legality": {"valid": False, "violations": []},
+                    },
+                },
+            },
+        })
+
+        before_details = model.collect_visible_material_details()
+        before_usage = model.collect_visible_material_usage()
+
+        projection = model.collect_visible_export_legality()
+
+        self.assertTrue(all(not row.valid for row in projection))
+        self.assertEqual(model.collect_visible_material_details(), before_details)
+        self.assertEqual(model.collect_visible_material_usage(), before_usage)
+
     def test_material_details_list_each_visible_piece_and_its_owner(self):
         solution = self.support_solution()
         solution.plans.append(support.SupportPlan(
@@ -225,6 +449,8 @@ class ProjectResultModelTests(unittest.TestCase):
                     material_type="steel",
                     material_spec="H350",
                     length=9000,
+                    valid=False,
+                    reasons=("未提供不合法原因",),
                 ),
                 MaterialDetailRow(
                     result_id="W1-plan-1",
@@ -235,6 +461,8 @@ class ProjectResultModelTests(unittest.TestCase):
                     material_type="shim",
                     material_spec="",
                     length=50,
+                    valid=False,
+                    reasons=("未提供不合法原因",),
                 ),
                 MaterialDetailRow(
                     result_id="Z1",

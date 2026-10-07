@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -241,6 +242,45 @@ class ProjectPersistenceTests(unittest.TestCase):
         self.assertEqual(report.status, DxfStatus.RUNTIME_READY)
         self.assertFalse((self.root / "source" / "source.dxf").exists())
         self.assertFalse(self.project_path.exists())
+
+    def test_canonical_waler_tail_survives_project_file_save_and_load(self):
+        canonical_plan = {
+            "segments": [8000, 8000],
+            "steel_length": 16000,
+            "tail_adjustment": 300,
+            "gap": 150,
+            "pieces": [
+                ["steel", 8000],
+                ["steel", 8000],
+                ["shim", 300],
+            ],
+            "valid": True,
+        }
+        project_payload = payload(None, result={
+            "W1-plan": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "required_length": 16450,
+                    "selected_plan": canonical_plan,
+                },
+            },
+        })
+
+        self.manager.save_project(
+            self.project_path,
+            project_payload,
+            active_source=None,
+            existing_asset=None,
+        )
+        restored = json.loads(self.project_path.read_text(encoding="utf-8"))
+        restored_plan = restored["result"]["W1-plan"]["result"][
+            "selected_plan"
+        ]
+
+        self.assertEqual(restored["schema_version"], PROJECT_SCHEMA_VERSION)
+        self.assertEqual(restored_plan, canonical_plan)
 
     def test_geometry_invalid_shared_zoning_round_trips_as_project_data(self):
         project_payload = payload()
@@ -545,6 +585,68 @@ class ProjectPersistenceTests(unittest.TestCase):
 
         self.assertEqual(self.project_path.read_bytes(), old_json)
         self.assertEqual(managed.read_bytes(), old_dxf)
+        self.assertFalse(managed.with_name(managed.name + ".rollback").exists())
+
+    def test_rollback_failure_preserves_recovery_and_next_save_rejects_it(self):
+        first = self.save()
+        old_json = self.project_path.read_bytes()
+        managed = self.project_path.parent / "source" / "source.dxf"
+        old_dxf = managed.read_bytes()
+        rollback = managed.with_name(managed.name + ".rollback")
+        replacement = create_dxf(self.root / "replacement.dxf", offset=4000)
+        replacement_source = self.manager.verified_source(
+            replacement,
+            DxfStatus.RUNTIME_READY,
+        )
+
+        def fail_after_dxf_replace(stage):
+            if stage == "dxf_replaced":
+                raise OSError("simulated json replacement interruption")
+
+        real_replace = os.replace
+
+        def fail_only_rollback(source, target):
+            if Path(source) == rollback and Path(target) == managed:
+                raise OSError("simulated rollback failure")
+            return real_replace(source, target)
+
+        with patch(
+            "bracing_optimizer.infrastructure.project_persistence.os.replace",
+            side_effect=fail_only_rollback,
+        ), self.assertRaises(ProjectPersistenceError) as raised:
+            DxfAssetManager(failure_hook=fail_after_dxf_replace).save_project(
+                self.project_path,
+                payload(import_state(replacement, offset=4000)),
+                active_source=replacement_source,
+                existing_asset=first.dxf_asset,
+            )
+
+        error = raised.exception
+        self.assertEqual(error.stage, "交易回復失敗")
+        self.assertEqual(error.recovery_path, rollback.resolve())
+        self.assertEqual(error.managed_path, managed.resolve())
+        self.assertTrue(rollback.is_file())
+        self.assertEqual(rollback.read_bytes(), old_dxf)
+        self.assertEqual(self.project_path.read_bytes(), old_json)
+
+        before_json = self.project_path.read_bytes()
+        before_managed = managed.read_bytes()
+        before_recovery = rollback.read_bytes()
+        with self.assertRaises(ProjectPersistenceError) as second:
+            self.manager.save_project(
+                self.project_path,
+                payload(import_state(replacement, offset=4000)),
+                active_source=replacement_source,
+                existing_asset=first.dxf_asset,
+            )
+
+        self.assertEqual(second.exception.stage, "儲存前檢查失敗")
+        self.assertEqual(second.exception.recovery_path, rollback.resolve())
+        self.assertEqual(self.project_path.read_bytes(), before_json)
+        self.assertEqual(managed.read_bytes(), before_managed)
+        self.assertEqual(rollback.read_bytes(), before_recovery)
+        self.assertFalse(self.project_path.with_name("project.json.tmp").exists())
+        self.assertFalse(managed.with_name("source.dxf.tmp").exists())
 
     def test_json_staging_failure_never_replaces_the_managed_copy(self):
         first = self.save()

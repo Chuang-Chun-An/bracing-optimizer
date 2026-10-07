@@ -522,6 +522,79 @@ class WalerGlobalApplyTests(unittest.TestCase):
         self.assertIn("W1-方案1", app.result_items)
         self.assertNotIn("W1-單支方案1", app.result_items)
 
+    def test_single_then_rank_six_global_and_rerun_replace_result_ids_cleanly(self):
+        app = self.make_app()
+        app.result_items = {
+            "Z1": {
+                "type": "support",
+                "result": SimpleNamespace(plans=[]),
+                "visible": True,
+            }
+        }
+        app.walers = []
+        app._mark_results_updated = lambda: None
+        app._store_waler_result({
+            "waler_id": "W1",
+            "top_results": [
+                {"segments": [5_000 + index, 7_000 - index]}
+                for index in range(5)
+            ],
+            "required_length": 12_000,
+        })
+        self.assertTrue({f"W1-方案{rank}" for rank in range(1, 6)} <= set(app.result_items))
+
+        first = app._apply_waler_global_result(FakeGlobalResult((
+            make_candidate("W1", 6, [7_000, 5_000], score=16),
+        )))
+
+        self.assertTrue(first.committed)
+        self.assertIn("W1-方案6", app.result_items)
+        self.assertFalse(any(
+            result_id.startswith("W1-方案") and result_id != "W1-方案6"
+            for result_id in app.result_items
+        ))
+        self.assertEqual(
+            app.result_items["W1-方案6"]["result"]["selected_plan"][
+                "global_candidate_rank"
+            ],
+            6,
+        )
+        self.assertEqual(
+            app.result_items["W1-方案6"]["result"]["option_index"],
+            6,
+        )
+        self.assertEqual(
+            app._get_result_tree_info(
+                "W1-方案6",
+                app.result_items["W1-方案6"],
+            )["child_label"],
+            "全域方案6",
+        )
+        export_plans = app._visible_dxf_export_plans()
+        self.assertEqual(len(export_plans), 1)
+        self.assertEqual(export_plans[0].result_id, "W1-方案6")
+        self.assertEqual(
+            tuple(piece.length for piece in export_plans[0].pieces),
+            (7_000.0, 5_000.0),
+        )
+
+        second = app._apply_waler_global_result(FakeGlobalResult((
+            make_candidate("W1", 7, [9_000, 3_000], score=17),
+        )))
+
+        self.assertTrue(second.committed)
+        self.assertNotIn("W1-方案6", app.result_items)
+        self.assertIn("W1-方案7", app.result_items)
+        self.assertEqual(
+            {
+                result_id
+                for result_id, item in app.result_items.items()
+                if item.get("type") == "waler"
+            },
+            {"W1-方案7"},
+        )
+        self.assertIn("Z1", app.result_items)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import tempfile
 import unittest
@@ -16,6 +15,9 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     JACK_BLOCK_NAME,
     RESULT_SUPPORT_LAYER,
     RESULT_WALER_LAYER,
+    WARNING_INVALID_RESULT_LAYER,
+    WARNING_TEXT_OFFSET_MM,
+    WARNING_TEXT_STYLE,
     DXFExportMode,
     DXFAuditIssue,
     DXFAuditSummary,
@@ -27,11 +29,10 @@ from bracing_optimizer.infrastructure.dxf_result_export import (
     export_coordinate_system_from_import_state,
     export_results_to_dxf,
 )
+from tests.sample_dxf_assets import Y1A_DXF_PATH
 
 
-ROOT = Path(__file__).resolve().parents[1]
-SPECIAL_SOURCE = ROOT / "project_cases" / "Y1A站第一層支撐" / "source" / "source.dxf"
-SPECIAL_PROJECT = ROOT / "project_cases" / "Y1A站第一層支撐" / "project.json"
+SPECIAL_SOURCE = Y1A_DXF_PATH
 
 
 def validation_state(*, source_path: str = "") -> dict:
@@ -159,6 +160,29 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             [],
             ExportCoordinateSystem("world"),
             export_mode=DXFExportMode.RESULT_ONLY,
+        )
+
+    def _export_invalid(self, output_path: Path):
+        walers, struts, braces = validation_project_rows()
+        plans = (
+            MemberExportPlan(
+                "W1",
+                "waler",
+                (ExportPiece("steel", 3000),),
+                result_id="W1-invalid",
+                valid=False,
+                reasons=("鋼材總長不足",),
+            ),
+        )
+        return export_results_to_dxf(
+            output_path,
+            plans,
+            walers,
+            struts,
+            braces,
+            ExportCoordinateSystem("world"),
+            export_mode=DXFExportMode.SOURCE_BACKED,
+            background_state=validation_state(),
         )
 
     def _assert_old_output_preserved(self, output_path: Path, original: bytes):
@@ -317,15 +341,13 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         self.assertEqual(RESULT_SUPPORT_LAYER, jacks[0].dxf.layer)
         self.assertEqual((10_000.0, -20_000.0), tuple(dimensions[0].dxf.defpoint2)[:2])
 
-    @unittest.skipUnless(SPECIAL_PROJECT.is_file(), "Y1A project fixture is unavailable")
-    def test_y1a_special_project_exports_clean_without_reading_duplicate_layer_source(self):
-        project = json.loads(SPECIAL_PROJECT.read_text(encoding="utf-8"))
-        state = project["dxf_import_state"]
+    def test_programmatic_project_exports_clean_without_reading_y1a_source(self):
+        state = validation_state(source_path=str(SPECIAL_SOURCE))
         coordinate_system = export_coordinate_system_from_import_state(state)
-        input_data = project["input_data"]
+        walers, struts, braces = validation_project_rows()
         bindings = build_project_member_bindings(
-            input_data["walers"],
-            input_data["struts"],
+            walers,
+            struts,
             coordinate_system,
         )
         waler = bindings[("waler", "W1")]
@@ -344,18 +366,14 @@ class DXFCleanExportValidationTests(unittest.TestCase):
             ),
         )
         output_path = self.temp_path / "Y1A clean result.dxf"
-        source_hash = (
-            hashlib.sha256(SPECIAL_SOURCE.read_bytes()).hexdigest()
-            if SPECIAL_SOURCE.is_file()
-            else None
-        )
+        source_hash = hashlib.sha256(SPECIAL_SOURCE.read_bytes()).hexdigest()
 
         report = export_results_to_dxf(
             output_path,
             plans,
-            input_data["walers"],
-            input_data["struts"],
-            input_data["braces"],
+            walers,
+            struts,
+            braces,
             coordinate_system,
             export_mode=DXFExportMode.SOURCE_BACKED,
             background_state=state,
@@ -376,8 +394,10 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         )
         self.assertEqual(0, len(document.audit().errors))
         self.assertEqual(0, len(document.audit().fixes))
-        if source_hash is not None:
-            self.assertEqual(source_hash, hashlib.sha256(SPECIAL_SOURCE.read_bytes()).hexdigest())
+        self.assertEqual(
+            source_hash,
+            hashlib.sha256(SPECIAL_SOURCE.read_bytes()).hexdigest(),
+        )
 
     def test_first_staged_save_failure_does_not_create_or_overwrite_final(self):
         for existing in (False, True):
@@ -433,6 +453,82 @@ class DXFCleanExportValidationTests(unittest.TestCase):
         self._assert_old_output_preserved(output_path, original)
         self.assertIn("成果座標不符", str(raised.exception))
         self.assertTrue(raised.exception.temporary_path.is_file())
+
+    def test_warning_contract_validation_failures_preserve_existing_final(self):
+        real_save = exporter._save_clean_document
+
+        def warning_entity(document):
+            return next(
+                entity
+                for entity in document.modelspace().query("MTEXT")
+                if entity.dxf.layer == WARNING_INVALID_RESULT_LAYER
+            )
+
+        def change_layer(document, warning):
+            warning.dxf.layer = "0"
+
+        def change_color(document, _warning):
+            document.layers.get(WARNING_INVALID_RESULT_LAYER).dxf.color = 3
+
+        def change_identity(_document, warning):
+            warning.set_xdata(APP_ID, [
+                (1000, exporter.RESULT_EXPORT_MARKER),
+                (1000, "waler"),
+                (1000, "WRONG"),
+                (1000, "W1-invalid"),
+                (1000, "warning"),
+                (1071, 1),
+            ])
+
+        def change_text(_document, warning):
+            warning.text = "錯誤內容"
+
+        def remove_warning(_document, warning):
+            warning.destroy()
+
+        def change_position(_document, warning):
+            warning.dxf.insert = (
+                warning.dxf.insert.x + WARNING_TEXT_OFFSET_MM * 2,
+                warning.dxf.insert.y,
+                0,
+            )
+
+        def change_style(_document, warning):
+            warning.dxf.style = "Standard"
+
+        def change_font(document, _warning):
+            document.styles.get(WARNING_TEXT_STYLE).dxf.font = "arial.ttf"
+
+        mutations = {
+            "layer": change_layer,
+            "color": change_color,
+            "identity": change_identity,
+            "text": change_text,
+            "count": remove_warning,
+            "position": change_position,
+            "style": change_style,
+            "font": change_font,
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(contract=name):
+                output_path = self.temp_path / f"warning-{name}.dxf"
+                original = b"existing-final"
+                output_path.write_bytes(original)
+
+                def inject(document, path, *, mutate=mutate):
+                    mutate(document, warning_entity(document))
+                    return real_save(document, path)
+
+                with mock.patch.object(
+                    exporter,
+                    "_save_clean_document",
+                    side_effect=inject,
+                ):
+                    with self.assertRaises(DXFExportValidationError) as raised:
+                        self._export_invalid(output_path)
+
+                self._assert_old_output_preserved(output_path, original)
+                self.assertTrue(raised.exception.temporary_path.is_file())
 
     def test_result_only_forbidden_layer_does_not_overwrite_final(self):
         output_path = self.temp_path / "result-only-layer-failure.dxf"

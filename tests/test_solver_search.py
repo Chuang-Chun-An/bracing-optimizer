@@ -120,6 +120,23 @@ class SolverSearchResultMergeTests(unittest.TestCase):
 
         self.assertEqual([item["score"] for item in merged], [10, 15])
 
+    def test_waler_result_merge_can_return_all_deterministic_unique_results(self):
+        values = [
+            {
+                "segments": [index, 12_000 - index],
+                "joints": [index],
+                "gap": 0,
+                "score": float(index),
+                "valid": True,
+            }
+            for index in range(1_000, 1_008)
+        ]
+
+        merged = merge_waler_results(values, limit=None)
+
+        self.assertEqual(len(merged), 8)
+        self.assertEqual([item["score"] for item in merged], sorted(item["score"] for item in values))
+
     def test_best_legal_support_solution_is_retained_across_stages(self):
         plan_a = SimpleNamespace(
             support_id="S1", pieces=[("steel", 10000)], joints=[], gap=0,
@@ -142,11 +159,15 @@ class SolverDiagnosticsTests(unittest.TestCase):
             search_stage="ENHANCED",
             legal_solution_found=True,
             affected_component_ids=["S5"],
+            retention_profile="GLOBAL_FINAL_POPULATION",
+            candidate_count_after_cross_stage_solution_merge=12,
         )
         restored = SolverDiagnostics.from_dict(diagnostics.to_dict())
 
         self.assertEqual(restored.search_stage, "ENHANCED")
         self.assertEqual(restored.affected_component_ids, ["S5"])
+        self.assertEqual(restored.retention_profile, "GLOBAL_FINAL_POPULATION")
+        self.assertEqual(restored.candidate_count_after_cross_stage_solution_merge, 12)
         self.assertIsNone(SolverDiagnostics.from_dict(None))
 
     def test_score_stability_uses_relative_improvement(self):

@@ -1,5 +1,6 @@
 import copy
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -237,6 +238,80 @@ class MainProjectEditingTests(unittest.TestCase):
             editor,
         )
 
+    @staticmethod
+    def set_pending_inline_edit(app, table_name, column, value, index=0):
+        tree = app.treeviews[table_name]
+        editor = FakeEditor(value)
+        row_id = f"{table_name}_{index}"
+        app.editing_entry = editor
+        app.editing_context = (tree, row_id, column, editor)
+        return editor
+
+    def test_save_commits_pending_valid_value_into_current_payload(self):
+        app = self.make_app()
+        app.current_project_path = Path("project_cases/current/project.json")
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        app._refresh_project_case_list = Mock()
+        persisted_values = []
+
+        def save(_name):
+            persisted_values.append(app.walers[0]["EndX"])
+            return app.current_project_path
+
+        app.save_project_case = Mock(side_effect=save)
+        editor = self.set_pending_inline_edit(app, "walers", "EndX", "3500")
+
+        with patch("main.messagebox.showinfo"):
+            outcome = app._save_current_project()
+
+        self.assertEqual(outcome.status.value, "saved")
+        self.assertEqual(persisted_values, [3500])
+        self.assertTrue(editor.destroyed)
+        self.assertIsNone(app.editing_entry)
+
+    def test_invalid_pending_value_cancels_save_and_keeps_editor(self):
+        app = self.make_app()
+        app.current_project_path = Path("project_cases/current/project.json")
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        app.save_project_case = Mock()
+        editor = self.set_pending_inline_edit(
+            app,
+            "walers",
+            "EndX",
+            "not-a-number",
+        )
+        before_value = app.walers[0]["EndX"]
+
+        with patch("main.messagebox.showwarning") as warning:
+            outcome = app._save_current_project()
+
+        self.assertEqual(outcome.status.value, "cancelled")
+        self.assertEqual(app.walers[0]["EndX"], before_value)
+        self.assertFalse(app.project_dirty)
+        self.assertFalse(editor.destroyed)
+        self.assertIs(app.editing_entry, editor)
+        app.save_project_case.assert_not_called()
+        warning.assert_called_once()
+
+    def test_save_as_cancel_after_valid_edit_keeps_committed_value_dirty(self):
+        app = self.make_app()
+        app.current_project_path = None
+        app.project_dirty = False
+        app.project_dirty_reason = ""
+        app.save_project_case = Mock()
+        editor = self.set_pending_inline_edit(app, "walers", "EndX", "3600")
+
+        with patch("main.simpledialog.askstring", return_value=None):
+            outcome = app._save_project_as()
+
+        self.assertEqual(outcome.status.value, "cancelled")
+        self.assertEqual(app.walers[0]["EndX"], 3600)
+        self.assertTrue(app.project_dirty)
+        self.assertTrue(editor.destroyed)
+        app.save_project_case.assert_not_called()
+
     def test_unmodified_project_is_compatible_with_confirmed_dxf(self):
         app = self.make_app()
 
@@ -295,6 +370,32 @@ class MainProjectEditingTests(unittest.TestCase):
         self.assertEqual(DXFExportMode.SOURCE_BACKED, export_results.call_args.kwargs["export_mode"])
         self.assertEqual(2, show_info.call_count)
         self.assertIn("Source-backed", show_info.call_args_list[0].args[0])
+
+    def test_dxf_export_plans_use_committed_legality_projection(self):
+        app = self.make_app(with_dxf=False)
+        app._project_results = ProjectResultModel(result_items={
+            "W1-方案1": {
+                "type": "waler",
+                "visible": True,
+                "result": {
+                    "waler_id": "W1",
+                    "selected_plan": {
+                        "pieces": [("steel", 3000)],
+                        "valid": True,
+                        "legality": {
+                            "valid": False,
+                            "violations": ["鋼材總長不足"],
+                        },
+                    },
+                },
+            },
+        })
+
+        plans = app._visible_dxf_export_plans()
+
+        self.assertEqual(len(plans), 1)
+        self.assertFalse(plans[0].valid)
+        self.assertEqual(plans[0].reasons, ("鋼材總長不足",))
 
     def test_only_binding_fields_are_classified_as_dxf_stale_changes(self):
         binding_fields = {

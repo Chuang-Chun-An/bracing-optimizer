@@ -29,6 +29,7 @@ from .models import (
     COMPONENT_ASSOCIATION_CODES,
     AuxiliaryComponent,
     Brace,
+    BraceAdjustmentBaseline,
     Column,
     CoordinateSystem,
     CornerBrace,
@@ -56,6 +57,7 @@ ADJUSTMENT_VALIDATION_CODES = {
     "INVALID_WALER_CONTACT_VALUE",
     "STRUT_WALER_INTERSECTION_FAILED",
     "BRACE_STATION_INVALID",
+    "BRACE_RIGID_TRANSLATION_UNRESOLVED",
     "CORNER_BRACE_CONNECTION_INVALID",
     "CORNER_BRACE_INTERSECTION_FAILED",
     "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
@@ -74,10 +76,34 @@ class StrutAdjustment:
 @dataclass(frozen=True)
 class BraceAdjustment:
     member_id: str
-    endpoint_name: str
-    waler_station_mm: float
+    translation: Point
+    from_old_station_mm: float
+    from_new_station_mm: float
+    to_old_station_mm: float
+    to_new_station_mm: float
+    baseline_start: Point
+    baseline_end: Point
+    proposed_start: Point
+    proposed_end: Point
     old_member: Brace
     new_member: Brace
+
+
+@dataclass(frozen=True)
+class BraceRigidTranslation:
+    """One validated rigid translation from a formal Brace baseline."""
+
+    translation: Point
+    start: Point
+    end: Point
+
+
+class BraceRigidTranslationError(ValueError):
+    """Structured failure for a Brace rigid-translation hard constraint."""
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -161,6 +187,268 @@ def _same_directed_line(
         _distance(first[0], second[0]) <= tolerance
         and _distance(first[1], second[1]) <= tolerance
     )
+
+
+def _cross(first: Point, second: Point) -> float:
+    return first[0] * second[1] - first[1] * second[0]
+
+
+def _station_on_line(line: tuple[Point, Point], point: Point) -> float:
+    axis = _unit(*line)
+    if axis is None:
+        return math.nan
+    return _dot(_vector(line[0], point), axis)
+
+
+def _adjustment_distance_tolerance(tolerances: GeometryTolerances) -> float:
+    return max(1e-6, tolerances.beam_crossing_duplicate_tolerance_mm)
+
+
+def solve_brace_rigid_translation(
+    baseline: BraceAdjustmentBaseline,
+    from_baseline_line: tuple[Point, Point],
+    to_baseline_line: tuple[Point, Point],
+    from_final_line: tuple[Point, Point],
+    to_final_line: tuple[Point, Point],
+    tolerances: GeometryTolerances | None = None,
+) -> BraceRigidTranslation:
+    """Solve and validate the one common WCS translation for a formal Brace."""
+
+    tolerances = tolerances or GeometryTolerances()
+    distance_tolerance = _adjustment_distance_tolerance(tolerances)
+    if (
+        not baseline.from_waler_id
+        or not baseline.to_waler_id
+        or baseline.from_waler_id == baseline.to_waler_id
+    ):
+        raise BraceRigidTranslationError(
+            "identity_invalid",
+            f"{baseline.brace_id} 缺少兩端唯一且不同的正式圍令連接。",
+        )
+    if _length(baseline.start, baseline.end) <= distance_tolerance:
+        raise BraceRigidTranslationError(
+            "baseline_drift",
+            f"{baseline.brace_id} 的斜撐基準線為退化幾何。",
+        )
+    if (
+        _segment_distance(baseline.start, *from_baseline_line)
+        > distance_tolerance
+        or _segment_distance(baseline.end, *to_baseline_line)
+        > distance_tolerance
+    ):
+        raise BraceRigidTranslationError(
+            "baseline_drift",
+            f"{baseline.brace_id} 的斜撐基準端點不在對應圍令有限線段上。",
+        )
+
+    from_baseline_axis = _unit(*from_baseline_line)
+    to_baseline_axis = _unit(*to_baseline_line)
+    from_axis = _unit(*from_final_line)
+    to_axis = _unit(*to_final_line)
+    if any(
+        axis is None
+        for axis in (
+            from_baseline_axis,
+            to_baseline_axis,
+            from_axis,
+            to_axis,
+        )
+    ):
+        raise BraceRigidTranslationError(
+            "baseline_drift",
+            f"{baseline.brace_id} 的圍令基準線或最終線為退化幾何。",
+        )
+    assert from_baseline_axis is not None
+    assert to_baseline_axis is not None
+    assert from_axis is not None
+    assert to_axis is not None
+    parallel_limit = math.sin(
+        math.radians(tolerances.parallel_angle_tolerance_deg)
+    )
+    if (
+        abs(_cross(from_baseline_axis, from_axis)) > parallel_limit
+        or abs(_cross(to_baseline_axis, to_axis)) > parallel_limit
+    ):
+        raise BraceRigidTranslationError(
+            "baseline_drift",
+            f"{baseline.brace_id} 的圍令最終線不再平行於其基準線。",
+        )
+
+    from_normal = (-from_axis[1], from_axis[0])
+    to_normal = (-to_axis[1], to_axis[0])
+    from_offset = _dot(
+        from_normal,
+        _vector(baseline.start, from_final_line[0]),
+    )
+    to_offset = _dot(
+        to_normal,
+        _vector(baseline.end, to_final_line[0]),
+    )
+    determinant = _cross(from_normal, to_normal)
+    if abs(determinant) <= parallel_limit:
+        translation = (
+            from_normal[0] * from_offset,
+            from_normal[1] * from_offset,
+        )
+        if abs(_dot(to_normal, translation) - to_offset) > distance_tolerance:
+            raise BraceRigidTranslationError(
+                "parallel_incompatible",
+                f"{baseline.brace_id} 兩端平行圍令的位移約束不相容。",
+            )
+    else:
+        translation = (
+            (
+                from_offset * to_normal[1]
+                - from_normal[1] * to_offset
+            )
+            / determinant,
+            (
+                from_normal[0] * to_offset
+                - from_offset * to_normal[0]
+            )
+            / determinant,
+        )
+
+    proposed_start = (
+        baseline.start[0] + translation[0],
+        baseline.start[1] + translation[1],
+    )
+    proposed_end = (
+        baseline.end[0] + translation[0],
+        baseline.end[1] + translation[1],
+    )
+    if (
+        _segment_distance(proposed_start, *from_final_line)
+        > distance_tolerance
+        or _segment_distance(proposed_end, *to_final_line)
+        > distance_tolerance
+    ):
+        raise BraceRigidTranslationError(
+            "outside_finite_segment",
+            f"{baseline.brace_id} 剛體平移後的端點超出圍令有限線段。",
+        )
+    if (
+        _distance(
+            _vector(proposed_start, proposed_end),
+            _vector(baseline.start, baseline.end),
+        )
+        > distance_tolerance
+    ):
+        raise BraceRigidTranslationError(
+            "baseline_drift",
+            f"{baseline.brace_id} 的共同平移未保持原始斜撐向量。",
+        )
+    return BraceRigidTranslation(translation, proposed_start, proposed_end)
+
+
+def baseline_for_visible_brace_edit(
+    result: DXFImportResult,
+    brace_id: str,
+    visible_start: Point,
+    visible_end: Point,
+    tolerances: GeometryTolerances | None = None,
+) -> BraceAdjustmentBaseline:
+    """Convert an adjusted-view endpoint pair back to validated baseline WCS."""
+
+    tolerances = tolerances or GeometryTolerances()
+    world_result = apply_coordinate_system(result, CoordinateSystem())
+    brace = next(
+        (item for item in world_result.braces if item.id == brace_id),
+        None,
+    )
+    baseline = next(
+        (
+            item
+            for item in world_result.brace_adjustment_baselines
+            if item.brace_id == brace_id
+        ),
+        None,
+    )
+    waler_by_id = {item.id: item for item in world_result.walers}
+    review_by_id = {
+        item.waler_id: item for item in world_result.waler_contact_reviews
+    }
+    if (
+        brace is None
+        or baseline is None
+        or not brace.has_formal_connection
+        or baseline.source_handles != tuple(brace.source_handles)
+        or baseline.from_waler_id != brace.from_waler
+        or baseline.to_waler_id != brace.to_waler
+        or brace.from_waler not in waler_by_id
+        or brace.to_waler not in waler_by_id
+        or brace.from_waler not in review_by_id
+        or brace.to_waler not in review_by_id
+    ):
+        raise DXFImportError(
+            f"{brace_id} 缺少可驗證的正式兩端連接或 adjustment baseline，無法保存人工端點。"
+        )
+    from_review = review_by_id[brace.from_waler]
+    to_review = review_by_id[brace.to_waler]
+    from_baseline_line = (
+        from_review.baseline_contact_start,
+        from_review.baseline_contact_end,
+    )
+    to_baseline_line = (
+        to_review.baseline_contact_start,
+        to_review.baseline_contact_end,
+    )
+    from_final_line = _world_line(waler_by_id[brace.from_waler])
+    to_final_line = _world_line(waler_by_id[brace.to_waler])
+    try:
+        current_solution = solve_brace_rigid_translation(
+            baseline,
+            from_baseline_line,
+            to_baseline_line,
+            from_final_line,
+            to_final_line,
+            tolerances,
+        )
+        current_start, current_end = _world_line(brace)
+        distance_tolerance = _adjustment_distance_tolerance(tolerances)
+        if (
+            _distance(current_solution.start, current_start) > distance_tolerance
+            or _distance(current_solution.end, current_end) > distance_tolerance
+        ):
+            raise BraceRigidTranslationError(
+                "baseline_drift",
+                f"{brace_id} 目前幾何已偏離 adjustment baseline。",
+            )
+        converted = BraceAdjustmentBaseline(
+            brace_id=brace.id,
+            source_handles=tuple(brace.source_handles),
+            start=(
+                visible_start[0] - current_solution.translation[0],
+                visible_start[1] - current_solution.translation[1],
+            ),
+            end=(
+                visible_end[0] - current_solution.translation[0],
+                visible_end[1] - current_solution.translation[1],
+            ),
+            from_waler_id=brace.from_waler,
+            to_waler_id=brace.to_waler,
+        )
+        converted_solution = solve_brace_rigid_translation(
+            converted,
+            from_baseline_line,
+            to_baseline_line,
+            from_final_line,
+            to_final_line,
+            tolerances,
+        )
+        if (
+            _distance(converted_solution.start, visible_start) > distance_tolerance
+            or _distance(converted_solution.end, visible_end) > distance_tolerance
+        ):
+            raise BraceRigidTranslationError(
+                "baseline_drift",
+                f"{brace_id} 人工端點無法由共同平移重建。",
+            )
+    except BraceRigidTranslationError as exc:
+        raise DXFImportError(
+            f"{exc} 人工修改已取消；不會吸附、截斷或保存（{exc.reason}）。"
+        ) from exc
+    return converted
 
 
 def _member_evidence(
@@ -476,77 +764,131 @@ def build_corner_brace_connections(
     return tuple(connections), tuple(messages)
 
 
+def _formal_brace_baselines(
+    result: DXFImportResult,
+    tolerances: GeometryTolerances,
+) -> tuple[BraceAdjustmentBaseline, ...]:
+    """Capture baselines only for complete formal Brace/Waler pairs."""
+
+    walers = {waler.id: waler for waler in result.walers}
+    distance_tolerance = _adjustment_distance_tolerance(tolerances)
+    baselines: list[BraceAdjustmentBaseline] = []
+    for brace in result.braces:
+        if not brace.has_formal_connection:
+            continue
+        from_waler = walers.get(brace.from_waler)
+        to_waler = walers.get(brace.to_waler)
+        if from_waler is None or to_waler is None:
+            continue
+        if (
+            not from_waler.has_formal_contact_face
+            or not to_waler.has_formal_contact_face
+        ):
+            continue
+        start, end = _world_line(brace)
+        if (
+            _segment_distance(start, *_world_line(from_waler))
+            > distance_tolerance
+            or _segment_distance(end, *_world_line(to_waler))
+            > distance_tolerance
+        ):
+            continue
+        baselines.append(
+            BraceAdjustmentBaseline(
+                brace_id=brace.id,
+                source_handles=tuple(brace.source_handles),
+                start=start,
+                end=end,
+                from_waler_id=brace.from_waler,
+                to_waler_id=brace.to_waler,
+            )
+        )
+    return tuple(baselines)
+
+
 def initialize_waler_contact_review(
     result: DXFImportResult,
     tolerances: GeometryTolerances | None = None,
+    *,
+    rebuild_baselines: bool = False,
 ) -> DXFImportResult:
     """Capture immutable DXF baselines after recognition and connection work."""
 
     tolerances = tolerances or GeometryTolerances()
-    reviews = []
-    for waler in result.walers:
-        normal = support_side_normal(
-            waler, result.struts, result.braces, tolerances
-        )
-        backfill = detect_waler_backfill_from_geometry(
-            result, waler, normal, tolerances
-        )
-        width = (
-            float(waler.source_width)
-            if math.isfinite(float(waler.source_width))
-            and float(waler.source_width) > 0.0
-            else None
-        )
-        reviews.append(
-            WalerContactReviewState(
-                waler_id=waler.id,
-                baseline_contact_start=_world_line(waler)[0],
-                baseline_contact_end=_world_line(waler)[1],
-                support_normal_world=normal,
-                original_backfill_mm=(
-                    backfill.thickness_mm if backfill is not None else None
-                ),
-                adopted_backfill_mm=(
-                    backfill.thickness_mm if backfill is not None else None
-                ),
-                original_waler_width_mm=width,
-                adopted_waler_width_mm=width,
-                waler_outer_start=(
-                    backfill.waler_outer_line[0]
-                    if backfill is not None
-                    else None
-                ),
-                waler_outer_end=(
-                    backfill.waler_outer_line[1]
-                    if backfill is not None
-                    else None
-                ),
-                continuous_wall_inner_start=(
-                    backfill.continuous_wall_inner_line[0]
-                    if backfill is not None
-                    else None
-                ),
-                continuous_wall_inner_end=(
-                    backfill.continuous_wall_inner_line[1]
-                    if backfill is not None
-                    else None
-                ),
-                continuous_wall_source_handle=(
-                    backfill.continuous_wall_source_handle
-                    if backfill is not None
-                    else ""
-                ),
-                backfill_recognition_method=(
-                    "waler_outer_to_continuous_wall_inner"
-                    if backfill is not None
-                    else ""
-                ),
+    reviews = list(result.waler_contact_reviews)
+    if rebuild_baselines or not reviews:
+        reviews = []
+        for waler in result.walers:
+            normal = support_side_normal(
+                waler, result.struts, result.braces, tolerances
             )
-        )
+            backfill = (
+                None
+                if waler.engineering_line_authority == "manual_repair"
+                else detect_waler_backfill_from_geometry(
+                    result, waler, normal, tolerances
+                )
+            )
+            width = (
+                float(waler.source_width)
+                if math.isfinite(float(waler.source_width))
+                and float(waler.source_width) > 0.0
+                else None
+            )
+            reviews.append(
+                WalerContactReviewState(
+                    waler_id=waler.id,
+                    baseline_contact_start=_world_line(waler)[0],
+                    baseline_contact_end=_world_line(waler)[1],
+                    support_normal_world=normal,
+                    original_backfill_mm=(
+                        backfill.thickness_mm if backfill is not None else None
+                    ),
+                    adopted_backfill_mm=(
+                        backfill.thickness_mm if backfill is not None else None
+                    ),
+                    original_waler_width_mm=width,
+                    adopted_waler_width_mm=width,
+                    waler_outer_start=(
+                        backfill.waler_outer_line[0]
+                        if backfill is not None
+                        else None
+                    ),
+                    waler_outer_end=(
+                        backfill.waler_outer_line[1]
+                        if backfill is not None
+                        else None
+                    ),
+                    continuous_wall_inner_start=(
+                        backfill.continuous_wall_inner_line[0]
+                        if backfill is not None
+                        else None
+                    ),
+                    continuous_wall_inner_end=(
+                        backfill.continuous_wall_inner_line[1]
+                        if backfill is not None
+                        else None
+                    ),
+                    continuous_wall_source_handle=(
+                        backfill.continuous_wall_source_handle
+                        if backfill is not None
+                        else ""
+                    ),
+                    backfill_recognition_method=(
+                        "waler_outer_to_continuous_wall_inner"
+                        if backfill is not None
+                        else ""
+                    ),
+                )
+            )
     connections, _messages = build_corner_brace_connections(result, tolerances)
+    brace_baselines = result.brace_adjustment_baselines
+    if rebuild_baselines or not brace_baselines:
+        brace_baselines = _formal_brace_baselines(result, tolerances)
     return replace(
         result,
         waler_contact_reviews=tuple(reviews),
+        brace_adjustment_baselines=brace_baselines,
         corner_brace_connections=connections,
     )
 
@@ -840,60 +1182,136 @@ def plan_waler_contact_adjustment(
     brace_replacements: dict[str, Brace] = {}
     brace_changes: list[BraceAdjustment] = []
     old_waler_start, old_waler_end = _world_line(waler)
-    old_waler_axis = _unit(old_waler_start, old_waler_end)
     new_waler_axis = _unit(new_start, new_end)
-    if old_waler_axis is not None and new_waler_axis is not None:
-        for brace in world_result.braces:
-            start, end = _world_line(brace)
-            affected = []
-            if brace.from_waler == waler_id:
-                affected.append("start")
-            if brace.to_waler == waler_id:
-                affected.append("end")
-            if not affected:
-                continue
-            updated_start, updated_end = start, end
-            stations: list[float] = []
-            for endpoint_name in affected:
-                attachment = start if endpoint_name == "start" else end
-                station = _dot(_vector(old_waler_start, attachment), old_waler_axis)
-                if not (
-                    -baseline_tolerance
-                    <= station
-                    <= _length(old_waler_start, old_waler_end) + baseline_tolerance
-                ):
-                    messages.append(
-                        ValidationMessage(
-                            "error",
-                            "BRACE_STATION_INVALID",
-                            f"{brace.id} 在 {waler_id} 的既有接點位置超出有限線段。",
-                            "brace",
-                            brace.source_handles,
-                        )
-                    )
-                    continue
-                new_attachment = (
-                    new_start[0] + new_waler_axis[0] * station,
-                    new_start[1] + new_waler_axis[1] * station,
-                )
-                if endpoint_name == "start":
-                    updated_start = new_attachment
-                else:
-                    updated_end = new_attachment
-                stations.append(station)
-            if not stations:
-                continue
-            updated = _with_world_line(brace, updated_start, updated_end)
-            brace_replacements[brace.id] = updated
-            brace_changes.append(
-                BraceAdjustment(
-                    brace.id,
-                    "+".join(affected),
-                    stations[0],
-                    brace,
-                    updated,
+    waler_by_id = {item.id: item for item in world_result.walers}
+    review_by_id = {
+        item.waler_id: item for item in world_result.waler_contact_reviews
+    }
+    baseline_by_brace_id = {
+        item.brace_id: item for item in world_result.brace_adjustment_baselines
+    }
+    for brace in world_result.braces:
+        if not brace.has_formal_connection or waler_id not in {
+            brace.from_waler,
+            brace.to_waler,
+        }:
+            continue
+        baseline = baseline_by_brace_id.get(brace.id)
+        from_waler = waler_by_id.get(brace.from_waler)
+        to_waler = waler_by_id.get(brace.to_waler)
+        from_review = review_by_id.get(brace.from_waler)
+        to_review = review_by_id.get(brace.to_waler)
+        if (
+            baseline is None
+            or baseline.source_handles != tuple(brace.source_handles)
+            or baseline.from_waler_id != brace.from_waler
+            or baseline.to_waler_id != brace.to_waler
+            or from_waler is None
+            or to_waler is None
+            or from_review is None
+            or to_review is None
+        ):
+            messages.append(
+                ValidationMessage(
+                    "error",
+                    "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+                    f"{brace.id} 無法確認兩端正式圍令 identity 或 adjustment baseline（identity_invalid）。",
+                    "brace",
+                    brace.source_handles,
                 )
             )
+            continue
+
+        from_baseline_line = (
+            from_review.baseline_contact_start,
+            from_review.baseline_contact_end,
+        )
+        to_baseline_line = (
+            to_review.baseline_contact_start,
+            to_review.baseline_contact_end,
+        )
+        from_current_line = _world_line(from_waler)
+        to_current_line = _world_line(to_waler)
+        from_proposed_line = (
+            (new_start, new_end)
+            if brace.from_waler == waler_id
+            else from_current_line
+        )
+        to_proposed_line = (
+            (new_start, new_end)
+            if brace.to_waler == waler_id
+            else to_current_line
+        )
+        try:
+            current_solution = solve_brace_rigid_translation(
+                baseline,
+                from_baseline_line,
+                to_baseline_line,
+                from_current_line,
+                to_current_line,
+                tolerances,
+            )
+            current_start, current_end = _world_line(brace)
+            if (
+                _distance(current_solution.start, current_start)
+                > baseline_tolerance
+                or _distance(current_solution.end, current_end)
+                > baseline_tolerance
+            ):
+                raise BraceRigidTranslationError(
+                    "baseline_drift",
+                    f"{brace.id} 目前幾何不等於 immutable baseline 與兩端最終圍令的解。",
+                )
+            proposed_solution = solve_brace_rigid_translation(
+                baseline,
+                from_baseline_line,
+                to_baseline_line,
+                from_proposed_line,
+                to_proposed_line,
+                tolerances,
+            )
+        except BraceRigidTranslationError as exc:
+            messages.append(
+                ValidationMessage(
+                    "error",
+                    "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+                    f"{exc}（{exc.reason}）",
+                    "brace",
+                    brace.source_handles,
+                )
+            )
+            continue
+
+        updated = _with_world_line(
+            brace,
+            proposed_solution.start,
+            proposed_solution.end,
+        )
+        brace_replacements[brace.id] = updated
+        brace_changes.append(
+            BraceAdjustment(
+                member_id=brace.id,
+                translation=proposed_solution.translation,
+                from_old_station_mm=_station_on_line(
+                    from_current_line, current_solution.start
+                ),
+                from_new_station_mm=_station_on_line(
+                    from_proposed_line, proposed_solution.start
+                ),
+                to_old_station_mm=_station_on_line(
+                    to_current_line, current_solution.end
+                ),
+                to_new_station_mm=_station_on_line(
+                    to_proposed_line, proposed_solution.end
+                ),
+                baseline_start=baseline.start,
+                baseline_end=baseline.end,
+                proposed_start=proposed_solution.start,
+                proposed_end=proposed_solution.end,
+                old_member=brace,
+                new_member=updated,
+            )
+        )
     proposed_braces = _replace_by_id(world_result.braces, brace_replacements)
 
     corner_by_id = {item.id: item for item in world_result.corner_braces}
@@ -1335,7 +1753,21 @@ def format_adjustment_plan(plan: WalerContactAdjustmentPlan) -> str:
         lines.extend(
             (
                 change.member_id,
-                f"圍令位置：{change.waler_station_mm:.3f} → {change.waler_station_mm:.3f} mm",
+                (
+                    "共同平移："
+                    f"({change.translation[0]:+.3f}, "
+                    f"{change.translation[1]:+.3f}) mm"
+                ),
+                (
+                    "From station："
+                    f"{change.from_old_station_mm:.3f} → "
+                    f"{change.from_new_station_mm:.3f} mm"
+                ),
+                (
+                    "To station："
+                    f"{change.to_old_station_mm:.3f} → "
+                    f"{change.to_new_station_mm:.3f} mm"
+                ),
                 f"長度：{_length(*old_line):.3f} → {_length(*new_line):.3f} mm",
                 f"角度：{_angle_deg(*old_line):.3f}° → {_angle_deg(*new_line):.3f}°",
             )
@@ -1371,16 +1803,20 @@ def format_adjustment_plan(plan: WalerContactAdjustmentPlan) -> str:
 
 __all__ = [
     "BraceAdjustment",
+    "BraceRigidTranslation",
+    "BraceRigidTranslationError",
     "CornerBraceAdjustment",
     "StrutAdjustment",
     "WalerContactAdjustmentPlan",
     "WalerBackfillMeasurement",
     "apply_waler_contact_adjustment",
+    "baseline_for_visible_brace_edit",
     "build_corner_brace_connections",
     "detect_waler_backfill_from_geometry",
     "format_adjustment_plan",
     "initialize_waler_contact_review",
     "plan_waler_contact_adjustment",
     "restore_waler_contact_review_from_debug",
+    "solve_brace_rigid_translation",
     "support_side_normal",
 ]

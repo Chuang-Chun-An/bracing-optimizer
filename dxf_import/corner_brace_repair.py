@@ -48,6 +48,7 @@ from .models import (
     SourceGeometry,
 )
 from .review_confirmation import review_item_is_confirmed
+from .recognition import _lines_duplicate
 from .source_exclusion import canonical_source_identity, normalize_source_handles
 from .validation import validate_duplicate_engineering_members
 from .waler_contact_adjustment import build_corner_brace_connections
@@ -71,6 +72,51 @@ class CornerBraceReferenceEvidence:
     topology: str
 
 
+_ReferenceMatchKey = tuple[str, CornerBraceRepairSubjectKey]
+
+
+def _reference_match_key(
+    reference: CornerBraceRepairReference,
+) -> _ReferenceMatchKey:
+    """Return the stable replay identity without the volatile display ID."""
+
+    return reference.reference_class, reference.subject_key
+
+
+def _reference_evidence_index(
+    evidence: Sequence[CornerBraceReferenceEvidence],
+) -> dict[_ReferenceMatchKey, tuple[CornerBraceReferenceEvidence, ...]]:
+    """Index all current evidence while preserving duplicate-key ambiguity."""
+
+    grouped: dict[_ReferenceMatchKey, list[CornerBraceReferenceEvidence]] = {}
+    for value in evidence:
+        grouped.setdefault(_reference_match_key(value.reference), []).append(value)
+    return {key: tuple(values) for key, values in grouped.items()}
+
+
+def _resolve_saved_references(
+    saved: Sequence[CornerBraceRepairReference],
+    current: Sequence[CornerBraceReferenceEvidence],
+    *,
+    expected_class: str,
+) -> tuple[CornerBraceReferenceEvidence, ...] | None:
+    """Resolve one saved group by stable identity, uniquely and one-to-one."""
+
+    index = _reference_evidence_index(current)
+    resolved: list[CornerBraceReferenceEvidence] = []
+    used_keys: set[_ReferenceMatchKey] = set()
+    for reference in saved:
+        if reference.reference_class != expected_class:
+            return None
+        key = _reference_match_key(reference)
+        matches = index.get(key, ())
+        if key in used_keys or len(matches) != 1:
+            return None
+        used_keys.add(key)
+        resolved.append(matches[0])
+    return tuple(resolved)
+
+
 @dataclass(frozen=True)
 class TargetRepairAnchor:
     """One exact-source point that spatially validates a transferred line."""
@@ -87,6 +133,68 @@ class TargetRepairEvidence:
     direction_hypotheses: tuple[tuple[Point, Point], ...]
     positional_anchors: tuple[TargetRepairAnchor, ...]
     diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _TargetEvidenceIndex:
+    """Per-plan prefilter that never replaces the canonical geometry checks."""
+
+    directions: tuple[tuple[float, tuple[Point, Point]], ...]
+    anchors: tuple[TargetRepairAnchor, ...]
+
+    @staticmethod
+    def _angle(line: tuple[Point, Point]) -> float:
+        vector = _vector(*line)
+        if _length((0.0, 0.0), vector) <= 1e-12:
+            return 0.0
+        return math.degrees(math.atan2(vector[1], vector[0])) % 180.0
+
+    @classmethod
+    def build(cls, evidence: TargetRepairEvidence) -> "_TargetEvidenceIndex":
+        return cls(
+            directions=tuple(
+                sorted(
+                    (
+                        (cls._angle(direction), direction)
+                        for direction in evidence.direction_hypotheses
+                    ),
+                    key=lambda value: (value[0], value[1]),
+                )
+            ),
+            anchors=tuple(evidence.positional_anchors),
+        )
+
+    def direction_candidates(
+        self,
+        line: tuple[Point, Point],
+        tolerance_deg: float,
+    ) -> tuple[tuple[Point, Point], ...]:
+        angle = self._angle(line)
+        return tuple(
+            direction
+            for direction_angle, direction in self.directions
+            if min(
+                abs(direction_angle - angle),
+                180.0 - abs(direction_angle - angle),
+            )
+            <= tolerance_deg
+        )
+
+    def anchor_candidates(
+        self,
+        line: tuple[Point, Point],
+        tolerance_mm: float,
+    ) -> tuple[TargetRepairAnchor, ...]:
+        min_x = min(line[0][0], line[1][0]) - tolerance_mm
+        max_x = max(line[0][0], line[1][0]) + tolerance_mm
+        min_y = min(line[0][1], line[1][1]) - tolerance_mm
+        max_y = max(line[0][1], line[1][1]) + tolerance_mm
+        return tuple(
+            anchor
+            for anchor in self.anchors
+            if min_x <= anchor.point[0] <= max_x
+            and min_y <= anchor.point[1] <= max_y
+        )
 
 
 @dataclass(frozen=True)
@@ -482,20 +590,35 @@ def extract_corner_brace_local_template(
     result: DXFImportResult,
     evidence: CornerBraceReferenceEvidence,
     tolerances: GeometryTolerances | None = None,
+    *,
+    waler_by_id: Mapping[str, Any] | None = None,
+    strut_by_id: Mapping[str, Any] | None = None,
+    relationship_frame: TargetRelationshipFrame | None = None,
 ) -> CornerBraceLocalTemplate | None:
     """Convert one valid automatic primary connection into local values."""
 
     tolerances = tolerances or GeometryTolerances()
     connection = evidence.connection
-    waler = next((value for value in result.walers if value.id == connection.waler_id), None)
-    strut = next((value for value in result.struts if value.id == connection.strut_id), None)
+    waler = (
+        waler_by_id.get(connection.waler_id)
+        if waler_by_id is not None
+        else next(
+            (value for value in result.walers if value.id == connection.waler_id),
+            None,
+        )
+    )
+    strut = (
+        strut_by_id.get(connection.strut_id)
+        if strut_by_id is not None
+        else next(
+            (value for value in result.struts if value.id == connection.strut_id),
+            None,
+        )
+    )
     if waler is None or strut is None:
         return None
-    frame = _relationship_frame(
-        waler,
-        strut,
-        connection.strut_endpoint_name,
-        tolerances,
+    frame = relationship_frame or _relationship_frame(
+        waler, strut, connection.strut_endpoint_name, tolerances
     )
     if frame is None:
         return None
@@ -582,15 +705,27 @@ def _validate_target_evidence(
     line: tuple[Point, Point],
     evidence: TargetRepairEvidence,
     tolerances: GeometryTolerances,
+    *,
+    index: _TargetEvidenceIndex | None = None,
 ) -> tuple[tuple[Point, Point], TargetRepairAnchor] | None:
+    direction_values = (
+        index.direction_candidates(line, tolerances.parallel_angle_tolerance_deg)
+        if index is not None
+        else evidence.direction_hypotheses
+    )
+    anchor_values = (
+        index.anchor_candidates(line, tolerances.connection_tolerance_mm)
+        if index is not None
+        else evidence.positional_anchors
+    )
     directions = tuple(
         value
-        for value in evidence.direction_hypotheses
+        for value in direction_values
         if _angle_difference_deg(line, value) <= tolerances.parallel_angle_tolerance_deg
     )
     anchors = tuple(
         value
-        for value in evidence.positional_anchors
+        for value in anchor_values
         if _segment_distance(value.point, *line) <= tolerances.connection_tolerance_mm
     )
     if not directions or not anchors:
@@ -796,7 +931,7 @@ def _temporary_corner(
     )
 
 
-def _candidate_passes_existing_validation(
+def _candidate_passes_full_validation(
     result: DXFImportResult,
     item: ReviewItem,
     candidate: CornerBraceRepairCandidate,
@@ -824,6 +959,64 @@ def _candidate_passes_existing_validation(
     return not any(member_id in message.member_ids for message in duplicate_messages)
 
 
+def _candidate_passes_local_validation(
+    result: DXFImportResult,
+    item: ReviewItem,
+    candidate: CornerBraceRepairCandidate,
+    tolerances: GeometryTolerances,
+) -> bool:
+    """Validate only the temporary candidate using the canonical predicates.
+
+    ``build_corner_brace_connections`` evaluates each CornerBrace independently,
+    so existing CornerBraces cannot change the temporary member's connection.
+    Duplicate validation likewise only matters for pairs containing that member.
+    Keeping the full-field implementation above gives tests and conservative
+    callers an exact differential oracle.
+    """
+
+    member_id = item.member_id or "__CORNER_BRACE_REPAIR_PREVIEW__"
+    temporary = _temporary_corner(result, item, candidate, member_id)
+    candidate_result = replace(result, corner_braces=(temporary,))
+    connections, messages = build_corner_brace_connections(
+        candidate_result,
+        tolerances,
+    )
+    matching = [
+        connection
+        for connection in connections
+        if connection.corner_brace_id == member_id
+    ]
+    if len(matching) != 1:
+        return False
+    connection = matching[0]
+    if (
+        connection.waler_id != candidate.target_waler_id
+        or connection.strut_id != candidate.target_strut_id
+    ):
+        return False
+    if any(member_id in message.member_ids for message in messages):
+        return False
+
+    temporary_line = _world_line(temporary)
+    for corner in result.corner_braces:
+        if item.member_id is not None and corner.id == item.member_id:
+            continue
+        if _lines_duplicate(temporary_line, _world_line(corner), tolerances):
+            return False
+    return True
+
+
+def _candidate_passes_existing_validation(
+    result: DXFImportResult,
+    item: ReviewItem,
+    candidate: CornerBraceRepairCandidate,
+    tolerances: GeometryTolerances,
+) -> bool:
+    """Production candidate validation with full-field-equivalent semantics."""
+
+    return _candidate_passes_local_validation(result, item, candidate, tolerances)
+
+
 def plan_corner_brace_repair(
     result: DXFImportResult,
     item: ReviewItem,
@@ -847,6 +1040,45 @@ def plan_corner_brace_repair(
         if normalize_source_handles(body.source_handles)
         == subject_key.source_handles
     )
+    waler_by_id = {waler.id: waler for waler in result.walers}
+    strut_by_id = {strut.id: strut for strut in result.struts}
+    walers_by_identity: dict[tuple[str, ...], list[Any]] = {}
+    struts_by_identity: dict[tuple[str, ...], list[Any]] = {}
+    for waler in result.walers:
+        walers_by_identity.setdefault(
+            normalize_source_handles(waler.source_handles), []
+        ).append(waler)
+    for strut in result.struts:
+        struts_by_identity.setdefault(
+            normalize_source_handles(strut.source_handles), []
+        ).append(strut)
+
+    frame_cache: dict[tuple[Any, ...], TargetRelationshipFrame | None] = {}
+
+    def relationship_frame(
+        waler: Any,
+        strut: Any,
+        endpoint_name: str,
+    ) -> TargetRelationshipFrame | None:
+        key = (
+            waler.id,
+            normalize_source_handles(waler.source_handles),
+            _world_line(waler),
+            strut.id,
+            normalize_source_handles(strut.source_handles),
+            _world_line(strut),
+            endpoint_name,
+            tolerances.endpoint_tolerance_mm,
+        )
+        if key not in frame_cache:
+            frame_cache[key] = _relationship_frame(
+                waler,
+                strut,
+                endpoint_name,
+                tolerances,
+            )
+        return frame_cache[key]
+
     if subject_key.target_kind == "unresolved" and len(matching_bodies) == 1:
         body = matching_bodies[0]
         assessments = tuple(
@@ -855,16 +1087,6 @@ def plan_corner_brace_repair(
             if assessment.body_signature == body.signature
             and assessment.hard_valid
         )
-        walers_by_identity: dict[tuple[str, ...], list[Any]] = {}
-        struts_by_identity: dict[tuple[str, ...], list[Any]] = {}
-        for waler in result.walers:
-            walers_by_identity.setdefault(
-                normalize_source_handles(waler.source_handles), []
-            ).append(waler)
-        for strut in result.struts:
-            struts_by_identity.setdefault(
-                normalize_source_handles(strut.source_handles), []
-            ).append(strut)
         relationship_candidates: list[CornerBraceRepairCandidate] = []
         rejected_relationships = 0
         for assessment in assessments:
@@ -968,6 +1190,7 @@ def plan_corner_brace_repair(
                 selection_mode="body_relationship_selection",
             )
     target_evidence = extract_target_repair_evidence(result, subject_key, tolerances)
+    target_evidence_index = _TargetEvidenceIndex.build(target_evidence)
     diagnostics: list[str] = list(target_evidence.diagnostics)
     primary, secondary = eligible_repair_references(
         result,
@@ -981,15 +1204,45 @@ def plan_corner_brace_repair(
     if not primary:
         diagnostics.append("沒有符合條件的自動辨識角撐可作為主要參考。")
 
-    templates: list[tuple[CornerBraceReferenceEvidence, CornerBraceLocalTemplate]] = []
+    template_by_reference: dict[
+        CornerBraceRepairReference,
+        CornerBraceLocalTemplate,
+    ] = {}
     for evidence in primary:
-        template = extract_corner_brace_local_template(result, evidence, tolerances)
+        connection = evidence.connection
+        reference_waler = waler_by_id.get(connection.waler_id)
+        reference_strut = strut_by_id.get(connection.strut_id)
+        reference_frame = (
+            relationship_frame(
+                reference_waler,
+                reference_strut,
+                connection.strut_endpoint_name,
+            )
+            if reference_waler is not None and reference_strut is not None
+            else None
+        )
+        template = (
+            extract_corner_brace_local_template(
+                result,
+                evidence,
+                tolerances,
+                waler_by_id=waler_by_id,
+                strut_by_id=strut_by_id,
+                relationship_frame=reference_frame,
+            )
+            if reference_frame is not None
+            else None
+        )
         if template is not None:
-            templates.append((evidence, template))
+            template_by_reference[evidence.reference] = template
+    templates = tuple(
+        (evidence, template_by_reference[evidence.reference])
+        for evidence in primary
+        if evidence.reference in template_by_reference
+    )
     if primary and not templates:
         diagnostics.append("沒有任何自動主要參考可建立有效的有限局部模板。")
 
-    waler_by_id = {waler.id: waler for waler in result.walers}
     reference_members = {corner.id: corner for corner in result.corner_braces}
     options_by_relationship: dict[
         tuple[str, str],
@@ -1002,7 +1255,7 @@ def plan_corner_brace_repair(
                 waler = waler_by_id.get(waler_id)
                 if waler is None:
                     continue
-                frame = _relationship_frame(waler, strut, endpoint_name, tolerances)
+                frame = relationship_frame(waler, strut, endpoint_name)
                 if frame is None:
                     continue
                 target_angle = _angle_difference_deg(frame.waler_line, frame.strut_line)
@@ -1011,10 +1264,7 @@ def plan_corner_brace_repair(
                         rejected_count += 1
                         continue
                     reference_waler = waler_by_id.get(template.relationship_waler_id)
-                    reference_strut = next(
-                        (value for value in result.struts if value.id == template.relationship_strut_id),
-                        None,
-                    )
+                    reference_strut = strut_by_id.get(template.relationship_strut_id)
                     reference_member = reference_members.get(template.reference.member_id)
                     if reference_waler is None or reference_strut is None or reference_member is None:
                         rejected_count += 1
@@ -1044,6 +1294,7 @@ def plan_corner_brace_repair(
                             transferred,
                             target_evidence,
                             tolerances,
+                            index=target_evidence_index,
                         )
                         if validation is None:
                             rejected_count += 1
@@ -1226,12 +1477,30 @@ def reconstruct_saved_template_candidate(
         excluded_member_id=item.member_id or "",
         tolerances=tolerances,
     )
-    primary_by_reference = {evidence.reference: evidence for evidence in primary}
-    selected_evidence = primary_by_reference.get(selected)
-    if selected_evidence is None:
+    resolved_primary = _resolve_saved_references(
+        provenance.automatic_primary_references,
+        primary,
+        expected_class=PRIMARY_REFERENCE,
+    )
+    resolved_secondary = _resolve_saved_references(
+        provenance.manual_secondary_references,
+        secondary,
+        expected_class=SECONDARY_REFERENCE,
+    )
+    if not resolved_primary or resolved_secondary is None:
         return None
-    if any(reference not in primary_by_reference for reference in provenance.automatic_primary_references):
+    if selected.reference_class != PRIMARY_REFERENCE:
         return None
+    selected_key = _reference_match_key(selected)
+    selected_matches = tuple(
+        evidence
+        for evidence in resolved_primary
+        if _reference_match_key(evidence.reference) == selected_key
+    )
+    if len(selected_matches) != 1:
+        return None
+    selected_evidence = selected_matches[0]
+    current_selected = selected_evidence.reference
     extracted = extract_corner_brace_local_template(result, selected_evidence, tolerances)
     if extracted is None:
         return None
@@ -1304,16 +1573,19 @@ def reconstruct_saved_template_candidate(
     if validation is None:
         return None
     matched_direction, anchor = validation
-    current_secondary = {evidence.reference for evidence in secondary}
-    if any(reference not in current_secondary for reference in provenance.manual_secondary_references):
-        return None
+    current_primary_references = tuple(
+        evidence.reference for evidence in resolved_primary
+    )
+    current_secondary_references = tuple(
+        evidence.reference for evidence in resolved_secondary
+    )
     candidate = CornerBraceRepairCandidate(
         id=_candidate_id(
             transferred[0],
             transferred[1],
             waler.id,
             strut.id,
-            selected,
+            current_selected,
             provenance.transfer_mode,
             provenance.reference_waler_offset_mm,
             provenance.reference_strut_station_mm,
@@ -1324,7 +1596,7 @@ def reconstruct_saved_template_candidate(
         target_waler_id=waler.id,
         target_strut_id=strut.id,
         target_strut_endpoint_name=endpoint_names[0],
-        template_reference=selected,
+        template_reference=current_selected,
         transfer_mode=provenance.transfer_mode,
         reference_waler_offset_mm=provenance.reference_waler_offset_mm,
         reference_strut_station_mm=provenance.reference_strut_station_mm,
@@ -1332,13 +1604,13 @@ def reconstruct_saved_template_candidate(
         target_evidence=target_evidence,
         matched_direction=matched_direction,
         positional_anchor=anchor.point,
-        primary_references=provenance.automatic_primary_references,
-        secondary_references=provenance.manual_secondary_references,
+        primary_references=current_primary_references,
+        secondary_references=current_secondary_references,
         residual_axis=matched_direction,
         proximity_mm=0.0,
         diagnostics=(
             "已依保存的選用模板重建",
-            f"選用模板：{selected.member_id}",
+            f"選用模板：{current_selected.member_id}",
             "移植方式已依保存資料重建",
         ),
     )
@@ -1372,19 +1644,17 @@ def reconstruct_legacy_adopted_candidate(
         excluded_member_id=item.member_id or "",
         tolerances=tolerances,
     )
-    primary_by_reference = {evidence.reference: evidence for evidence in primary}
-    secondary_references = {evidence.reference for evidence in secondary}
-    if (
-        not provenance.automatic_primary_references
-        or any(
-            reference not in primary_by_reference
-            for reference in provenance.automatic_primary_references
-        )
-        or any(
-            reference not in secondary_references
-            for reference in provenance.manual_secondary_references
-        )
-    ):
+    resolved_primary = _resolve_saved_references(
+        provenance.automatic_primary_references,
+        primary,
+        expected_class=PRIMARY_REFERENCE,
+    )
+    resolved_secondary = _resolve_saved_references(
+        provenance.manual_secondary_references,
+        secondary,
+        expected_class=SECONDARY_REFERENCE,
+    )
+    if not resolved_primary or resolved_secondary is None:
         return None
     walers = tuple(
         value
@@ -1428,8 +1698,14 @@ def reconstruct_legacy_adopted_candidate(
     if validation is None:
         return None
     matched_direction, anchor = validation
-    selected = provenance.automatic_primary_references[0]
-    selected_evidence = primary_by_reference[selected]
+    selected_evidence = resolved_primary[0]
+    selected = selected_evidence.reference
+    current_primary_references = tuple(
+        evidence.reference for evidence in resolved_primary
+    )
+    current_secondary_references = tuple(
+        evidence.reference for evidence in resolved_secondary
+    )
     candidate = CornerBraceRepairCandidate(
         id=_candidate_id(
             endpoints[0],
@@ -1455,8 +1731,8 @@ def reconstruct_legacy_adopted_candidate(
         target_evidence=evidence,
         matched_direction=matched_direction,
         positional_anchor=anchor.point,
-        primary_references=provenance.automatic_primary_references,
-        secondary_references=provenance.manual_secondary_references,
+        primary_references=current_primary_references,
+        secondary_references=current_secondary_references,
         residual_axis=matched_direction,
         proximity_mm=0.0,
         diagnostics=("舊版已採用世界座標線檢核",),

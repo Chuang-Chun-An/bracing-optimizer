@@ -14,9 +14,6 @@ from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-PROJECT_FIXTURE = (
-    PROJECT_ROOT / "project_cases" / "Y1A站第一層支撐" / "project.json"
-)
 INVENTORY_FIXTURE = PROJECT_ROOT / "data" / "inventory.json"
 
 
@@ -40,25 +37,80 @@ def _digest(value) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _build_y1a_support_project(inventory) -> ProjectDataModel:
+    walers = [
+        {
+            "WalerID": "W2",
+            "StartX": 0,
+            "StartY": 21300,
+            "EndX": 95600,
+            "EndY": 21300,
+            "material_spec": "",
+        },
+        {
+            "WalerID": "W3",
+            "StartX": 0,
+            "StartY": 0,
+            "EndX": 95600,
+            "EndY": 0,
+            "material_spec": "",
+        },
+    ]
+    support_rows = (
+        ("S1", 3550, "8297.94,8801.94,12497.9,13001.9", "8549.94,12749.9"),
+        ("S2", 13050, "8261.15,8765.03,12534.8,13038.7", "8549.94,12749.9"),
+        ("S3", 19050, "7598.07,8101.94,13197.9,13701.8", "7849.94,13449.9"),
+        ("S4", 25050, "7590.1,8093.97,13205.9,13709.8", "7849.94,13449.9"),
+        ("S5", 31050, "7448.07,7951.94,13347.9,13851.8", "7699.94,13599.9"),
+        ("S6", 36050, "7447.94,7951.94,13347.9,13851.9", "7699.94,13599.9"),
+        ("S7", 42050, "7447.94,7951.94,13347.9,13851.9", "7699.94,13599.9"),
+        ("S8", 48050, "7447.94,7951.94,13347.9,13851.9", "7699.93,13599.9"),
+        ("S9", 53550, "7447.94,7951.94,13347.9,13851.9", "7699.94,13599.9"),
+        ("S10", 59550, "7447.94,7951.94,13347.9,13851.9", "7699.94,13599.9"),
+        ("S11", 65550, "7455.89,7959.89,13340,13844", "7699.94,13599.9"),
+        ("S12", 71550, "7597.94,8101.94,13197.9,13701.9", "7849.94,13449.9"),
+        ("S13", 77550, "7634.77,8138.77,13161.1,13665.1", "7849.94,13449.9"),
+        ("S14", 83550, "8297.94,8801.94,12497.9,13001.9", "8549.94,12749.9"),
+        ("S15", 92050, "8297.94,8801.94,12497.9,13001.9", "8549.94,12749.9"),
+    )
+    struts = [
+        {
+            "StrutID": support_id,
+            "FromWaler": "W3",
+            "ToWaler": "W2",
+            "StartX": x,
+            "StartY": 0,
+            "EndX": x,
+            "EndY": 21300,
+            "material_spec": "",
+            "BeamPositions": beam_positions,
+            "ColumnPositions": column_positions,
+            "TargetJackRegion": 2,
+            "Zoning": "DXF",
+        }
+        for support_id, x, beam_positions, column_positions in support_rows
+    ]
+    return ProjectDataModel(
+        walers=walers,
+        struts=struts,
+        inventory=inventory,
+    )
+
+
 @unittest.skipUnless(
-    PROJECT_FIXTURE.is_file() and INVENTORY_FIXTURE.is_file(),
-    "Y1A Support Solver regression fixtures are unavailable",
+    INVENTORY_FIXTURE.is_file(),
+    "Support Solver inventory is unavailable",
 )
 class SupportShimRealFixtureRegressionTests(unittest.TestCase):
     def test_y1a_full_support_solution_matches_pre_change_snapshot(self):
-        project_payload = json.loads(
-            PROJECT_FIXTURE.read_text(encoding="utf-8")
-        )
         inventory = json.loads(
             INVENTORY_FIXTURE.read_text(encoding="utf-8")
         )["inventory"]
-        project = ProjectDataModel.from_case_data(
-            project_payload["input_data"],
-            default_inventory=inventory,
-        )
+        project = _build_y1a_support_project(inventory)
         zone_input = SupportInputBuilder().build_zone(project, "DXF")
         cache = {}
-        result = OptimizeSupportZone(cache).execute(
+        optimizer = OptimizeSupportZone(cache)
+        result = optimizer.execute(
             OptimizeSupportZoneRequest(
                 input=zone_input,
                 material_ratio_targets=MaterialRatioTargets.normalized(
@@ -69,6 +121,7 @@ class SupportShimRealFixtureRegressionTests(unittest.TestCase):
                 material_ratio_weight=support.SUPPORT_MATERIAL_RATIO_WEIGHT,
             )
         )
+        optimizer.adopt_candidate_cache_updates(result)
 
         candidate_sets = sorted(
             tuple(sorted(

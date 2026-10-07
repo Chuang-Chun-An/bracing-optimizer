@@ -105,6 +105,73 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _canonicalize_repair_reference_payload(value: Any) -> None:
+    if isinstance(value, dict):
+        value["member_id"] = ""
+
+
+def _corner_brace_confirmation_member_payload(member: Any) -> dict[str, Any]:
+    """Keep CornerBrace engineering truth while removing display-only labels."""
+
+    payload = asdict(member)
+    member_id = str(payload.get("id", "") or "")
+    stable_identity = canonical_source_identity(
+        "corner_brace",
+        getattr(member, "source_handles", ()),
+    )
+    payload["id"] = stable_identity
+
+    for point in payload.get("candidate_points", ()):
+        if isinstance(point, dict) and point.get("component_id") == member_id:
+            point["component_id"] = stable_identity
+
+    provenance = payload.get("repair_provenance")
+    if isinstance(provenance, dict):
+        provenance["preferred_display_id"] = ""
+        # This audit digest includes selected-template display metadata.  Its
+        # engineering inputs remain represented by the surrounding payload.
+        provenance["evidence_signature"] = ""
+        for name in (
+            "automatic_primary_references",
+            "manual_secondary_references",
+        ):
+            for reference in provenance.get(name, ()):
+                _canonicalize_repair_reference_payload(reference)
+        selected = provenance.get("selected_template_reference")
+        if selected is not None:
+            _canonicalize_repair_reference_payload(selected)
+        if payload.get("associated_strut_id"):
+            payload["associated_strut_id"] = provenance.get(
+                "target_strut_identity",
+                "",
+            )
+    return payload
+
+
+def _confirmation_member_payload(role: str, member: Any) -> dict[str, Any]:
+    if role == "corner_brace":
+        return _corner_brace_confirmation_member_payload(member)
+    return asdict(member)
+
+
+def _confirmation_problem_payload(
+    item: ReviewItem,
+    problem: Any,
+    stable_identity: str | None,
+) -> dict[str, Any]:
+    payload = asdict(problem)
+    if item.role != "corner_brace" or stable_identity is None:
+        return payload
+    member_id = str(item.member_id or "")
+    if payload.get("component") == member_id:
+        payload["component"] = stable_identity
+    payload["member_ids"] = tuple(
+        stable_identity if value == member_id else value
+        for value in payload.get("member_ids", ())
+    )
+    return payload
+
+
 def review_confirmation_signature(
     result: DXFImportResult,
     item: ReviewItem,
@@ -162,13 +229,24 @@ def review_confirmation_signature(
             key=_canonical_json,
         )
     else:
+        stable_identity = review_confirmation_identity(item)
         problem_data = sorted(
-            (asdict(problem) for problem in item.problems),
+            (
+                _confirmation_problem_payload(
+                    item,
+                    problem,
+                    stable_identity,
+                )
+                for problem in item.problems
+            ),
             key=_canonical_json,
         )
     payload = {
         "role": item.role,
-        "members": [asdict(candidate) for candidate in assembly_members],
+        "members": [
+            _confirmation_member_payload(item.role, candidate)
+            for candidate in assembly_members
+        ],
         "coordinate_system": asdict(result.coordinate_system),
         "waler_contact_review": contact_review,
         "problems": problem_data,

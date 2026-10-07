@@ -7,6 +7,216 @@
 
 <!-- codex-archive-log:start -->
 
+<!-- codex-archive-log:entry-start key="2026-10-07-fix-project-menu-label-and-tab-colors" -->
+### 2026-10-07｜`fix-project-menu-label-and-tab-colors`
+
+- Archive：[openspec/changes/archive/2026-10-07-fix-project-menu-label-and-tab-colors](../openspec/changes/archive/2026-10-07-fix-project-menu-label-and-tab-colors)
+- 完成內容：將 Project cascade 的動態 label 更新改為穩定識別，不再依賴未驗證的固定數字 index。；保證狀態刷新前後頂層選單仍只有一個 Project cascade，且「檔案」與「說明」名稱不被改寫。；為主 Notebook 與巢狀次 Notebook 定義不同 ttk style，採用低彩度藍灰色；選取狀態使用較深底色與白字，次層使用較淡色階，並保留 disabled／focus 可讀性。
+- Capabilities：`main-window-project-controls`
+- 驗證：Artifacts 4/4 done; tasks 12/12 complete; implementation verification passed.
+- Specs：main-window-project-controls synced; openspec validate --specs: 38 passed, 0 failed.
+<!-- codex-archive-log:entry-end key="2026-10-07-fix-project-menu-label-and-tab-colors" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-07-simplify-main-window-project-controls" -->
+### 2026-10-07｜`simplify-main-window-project-controls`
+
+- Archive：[openspec/changes/archive/2026-10-07-simplify-main-window-project-controls](../openspec/changes/archive/2026-10-07-simplify-main-window-project-controls)
+- 完成內容：移除主視窗頂部 Project toolbar，以及其中的 New、Project Combobox、Open、Save、Save As、完整重新投影按鈕與快速狀態文字。；將「檔案」選單整理為：新建專案、開啟專案…、儲存專案、另存新專案…、結束，並提供 `Ctrl+N`、`Ctrl+O`、`Ctrl+S`、`Ctrl+Shift+S`。；Save與Save As新增共用的active-editor completion gate：合法pending值先提交並納入本次payload；不合法時保留editor並取消儲存，不執行任何persistence。
+- Capabilities：`main-window-project-controls`、`unsaved-changes-navigation-guard`
+- 驗證：29/29 tasks complete; strict validation passed; 1787 tests passed, 2 skipped
+- Specs：Synced and verified: main-window-project-controls created; unsaved-changes-navigation-guard updated; openspec validate --specs passed 38/38
+<!-- codex-archive-log:entry-end key="2026-10-07-simplify-main-window-project-controls" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-07-bundle-seeded-project-cases" -->
+### 2026-10-07｜`bundle-seeded-project-cases`
+
+- Archive：[openspec/changes/archive/2026-10-07-bundle-seeded-project-cases](../openspec/changes/archive/2026-10-07-bundle-seeded-project-cases)
+- 完成內容：將目前 `Y05車站第一層支撐` 與 `Y29車站第一層支撐` 的正式內容建立為 tracked release asset 快照。；修改 `SupportSolver.spec`，把兩個案例的 `project.json` 與 `source/source.dxf` 複製到成品 `project_cases/` 的相同 managed layout。；明確禁止將兩個案例的 `project.json.bak`、其他 Project、`test_cases/` 或 `tests/fixtures/` 帶入正式包。
+- Capabilities：`release-package-assets`
+- 驗證：all artifacts complete; 11/11 tasks complete; implementation verification passed
+- Specs：release-package-assets synced; openspec validate --specs --strict passed
+<!-- codex-archive-log:entry-end key="2026-10-07-bundle-seeded-project-cases" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-07-stage-multiple-dxf-source-exclusions" -->
+### 2026-10-07｜`stage-multiple-dxf-source-exclusions`
+
+- Archive：[openspec/changes/archive/2026-10-07-stage-multiple-dxf-source-exclusions](../openspec/changes/archive/2026-10-07-stage-multiple-dxf-source-exclusions)
+- 完成內容：將既有來源排除入口從「立即建立單筆plan」改為「逐筆加入或取消pending exclusion draft」；即使只有一筆也必須先標記，再由「重新辨識並套用」處理，且不保留或新增立即排除入口。標記操作本身不得呼叫full recognition。；Pending draft以canonical source identity正規化及去重，並綁定建立時的Review revision與source fingerprint；每筆加入時仍執行來源存在性、角色、normalized handles及shared-handle安全檢查。；DXF Review新增「重新辨識並套用」入口；無pending時disabled，有pending時顯示數量，並針對整組candidate exclusions只呼叫一次既有canonical staging路徑。
+- Capabilities：`dxf-source-exclusion-workflow`
+- 驗證：All artifacts complete; 35/35 tasks complete; strict change validation passed
+- Specs：Synced dxf-source-exclusion-workflow main spec; strict main-spec validation passed (37/37)
+<!-- codex-archive-log:entry-end key="2026-10-07-stage-multiple-dxf-source-exclusions" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-07-stabilize-corner-brace-repair-reference-identity" -->
+### 2026-10-07｜`stabilize-corner-brace-repair-reference-identity`
+
+- Archive：[openspec/changes/archive/2026-10-07-stabilize-corner-brace-repair-reference-identity](../openspec/changes/archive/2026-10-07-stabilize-corner-brace-repair-reference-identity)
+- 完成內容：CornerBrace repair reference以stable source identity／subject key作為主要對齊依據；依順序產生的member ID不再是exact match的必要條件。；Stable match必須唯一；零筆或多筆match不得依幾何距離、display ID或first match自行挑選。；Match成功後仍依目前result重驗reference geometry、唯一CornerBrace-to-Waler／Strut connection、primary／secondary eligibility、confirmation、provenance及既有candidate validation。
+- Capabilities：`dxf-corner-brace-repair-tool`
+- 驗證：All 4 artifacts complete; 27/27 tasks complete; 1722 tests passed, 1 skipped; strict change validation passed
+- Specs：Synced dxf-corner-brace-repair-tool MODIFIED requirement; 19/19 scenarios matched; main specs validation 37 passed, 0 failed
+<!-- codex-archive-log:entry-end key="2026-10-07-stabilize-corner-brace-repair-reference-identity" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-07-add-software-information-dialog" -->
+### 2026-10-07｜`add-software-information-dialog`
+
+- Archive：[openspec/changes/archive/2026-10-07-add-software-information-dialog](../openspec/changes/archive/2026-10-07-add-software-information-dialog)
+- 完成內容：在主視窗增加「說明」選單，並提供「軟體資訊」命令。；新增獨立、可重複開啟的軟體資訊視窗，集中顯示產品名稱、版本、作者與開發歷程。；建立不依賴 Tkinter 的產品資訊模型／provider，讓 UI 與測試共用同一份顯示資料。
+- Capabilities：`release-package-assets`、`software-information-presentation`
+- 驗證：all artifacts done; 18/18 tasks complete; implementation verification passed
+- Specs：synced: release-package-assets modified; software-information-presentation created; main specs validation 37 passed
+<!-- codex-archive-log:entry-end key="2026-10-07-add-software-information-dialog" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-add-waler-tail-adjustment-block" -->
+### 2026-10-06｜`add-waler-tail-adjustment-block`
+
+- Archive：[openspec/changes/archive/2026-10-06-add-waler-tail-adjustment-block](../openspec/changes/archive/2026-10-06-add-waler-tail-adjustment-block)
+- 完成內容：將 `100／150／200／300 mm` 定義為 Waler 可用的單一尾端調整塊尺寸，`0` 代表不配置。；將 Waler 完成長度契約改為 `steel_length + tail_adjustment + gap = required_length`，Gap 合法閉區間為 `0～150 mm`。；定義 deterministic 選擇順序：短差在 `0～150 mm` 時 `tail_adjustment = 0`、Gap 等於短差；短差大於 `150 mm` 時，選擇能使 `0 <= Gap <= 150 mm` 的最小調整塊。
+- Capabilities：`waler-plan-evaluation`
+- 驗證：All artifacts complete; 25/25 tasks complete; strict change validation passed.
+- Specs：Synced waler-plan-evaluation to main specs; openspec validate --specs passed (36/36).
+<!-- codex-archive-log:entry-end key="2026-10-06-add-waler-tail-adjustment-block" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-optimize-dxf-source-exclusion-workflow" -->
+### 2026-10-06｜`optimize-dxf-source-exclusion-workflow`
+
+- Archive：[openspec/changes/archive/2026-10-06-optimize-dxf-source-exclusion-workflow](../openspec/changes/archive/2026-10-06-optimize-dxf-source-exclusion-workflow)
+- 完成內容：維持現有單一 `ReviewItem` 來源排除入口與確認流程，不新增多選或 batch state。；CornerBrace replay 採方案 D：只加速單次 `plan_corner_brace_repair()`。候選 validation 使用相同工程規則，只計算暫時角撐自身的 connection，並以相同 duplicate predicate逐一比較既有角撐；同次呼叫另預建 Waler／Strut lookup、template、relationship frame與方向／anchor索引。；所有方案 D 暫存資料在單次 plan 結束後丟棄，不跨 repair 共用，不建立 dependency footprint或 repair input fingerprint，也不沿用舊 repair outcome。
+- Capabilities：`dxf-source-exclusion-workflow`
+- 驗證：36/36 tasks complete; OpenSpec strict validation passed; 602 focused tests passed; full suite 1672 tests passed with 1 skipped
+- Specs：Synced dxf-source-exclusion-workflow main spec with 6 requirements and 23 scenarios; openspec validate --specs passed 36/36
+<!-- codex-archive-log:entry-end key="2026-10-06-optimize-dxf-source-exclusion-workflow" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-expand-global-waler-candidate-pool" -->
+### 2026-10-06｜`expand-global-waler-candidate-pool`
+
+- Archive：[openspec/changes/archive/2026-10-06-expand-global-waler-candidate-pool](../openspec/changes/archive/2026-10-06-expand-global-waler-candidate-pool)
+- 完成內容：為 `OptimizeWaler` 定義明確的 Single／Global candidate retention profile，預設仍是 Single Top 5。；Global profile 收集每個實際執行 stage 最終 population 中所有合法且完整 solution signature 不重複的候選。；跨已執行 stages 合併候選、依既有 deterministic local ordering 排定可能大於 5 的 rank。
+- Capabilities：`global-waler-candidate-pool`、`waler-plan-evaluation`
+- 驗證：24/24 tasks complete, artifacts complete, strict validation passed
+- Specs：synced and verified, openspec validate --specs 35 passed and 0 failed
+<!-- codex-archive-log:entry-end key="2026-10-06-expand-global-waler-candidate-pool" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-separate-waler-positioning-from-formal-adoption" -->
+### 2026-10-06｜`separate-waler-positioning-from-formal-adoption`
+
+- Archive：[openspec/changes/archive/2026-10-06-separate-waler-positioning-from-formal-adoption](../openspec/changes/archive/2026-10-06-separate-waler-positioning-from-formal-adoption)
+- 完成內容：候選點區與Preview不新增正式化按鈕；兩處只保留一般幾何選點操作。；在 DXF Review「修改工具」新增「圍令正式化」，顯示／啟用方式比照「中間柱關聯修補」：只依目前選取的唯一 repair-eligible Waler決定入口，不在顯示階段建立plan。；專用視窗提供互斥的「線的來源」單選：預設「點位清單」，並顯示合法起終點、預選目前`selected_start_point_id`／`selected_end_point_id`；只有目標member存在最新CAD pair時才enable「已讀取的CAD線」。
+- Capabilities：`dxf-waler-engineering-line-repair`
+- 驗證：All artifacts complete; 22/22 tasks complete; strict validation passed
+- Specs：Synced to main specs and openspec validate --specs passed
+<!-- codex-archive-log:entry-end key="2026-10-06-separate-waler-positioning-from-formal-adoption" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-resolve-provisional-waler-manually" -->
+### 2026-10-06｜`resolve-provisional-waler-manually`
+
+- Archive：[openspec/changes/archive/2026-10-06-resolve-provisional-waler-manually](../openspec/changes/archive/2026-10-06-resolve-provisional-waler-manually)
+- 完成內容：為具有唯一 source identity 的 provisional Waler 提供明確的「採用為正式圍令」修補操作。；允許使用既有候選點配對或 CAD 指定工程線作為人工正式線來源，並使用一致的驗證與原子提交語意。；將已採用人工線設為該 Waler 的正式工程線兼接觸線，記錄人工裁決 provenance，並重建所有依賴正式 Waler geometry 的衍生結果。
+- Capabilities：`dxf-waler-contact-face-recognition`、`dxf-waler-engineering-line-repair`、`paused-dxf-review-source-relink`
+- 驗證：All artifacts complete; 32/32 tasks complete; full DXF suite 874 passed, 1 skipped; strict change validation passed.
+- Specs：Synced: dxf-waler-contact-face-recognition modified; dxf-waler-engineering-line-repair created; paused-dxf-review-source-relink updated; openspec validate --specs passed (34/34).
+<!-- codex-archive-log:entry-end key="2026-10-06-resolve-provisional-waler-manually" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-06-clarify-dxf-review-diagnostics" -->
+### 2026-10-06｜`clarify-dxf-review-diagnostics`
+
+- Archive：[openspec/changes/archive/2026-10-06-clarify-dxf-review-diagnostics](../openspec/changes/archive/2026-10-06-clarify-dxf-review-diagnostics)
+- 完成內容：為 DXF Review 問題建立一致的使用者可見投影：中文類型、白話說明、可執行的處理建議。；主要問題清單與選取項目明細使用同一份投影，不再把原始 diagnostic code 當作主要類型文字。；將內部英文與程式狀態詞改成工程人員可直接理解的繁體中文；保留必要的正式構件 ID、來源 handle、量測值與阻擋狀態。
+- Capabilities：`dxf-review-engineering-data-presentation`
+- 驗證：All artifacts complete; 16/16 tasks complete; strict change validation and full DXF regression passed.
+- Specs：Synced to main spec dxf-review-engineering-data-presentation; openspec validate --specs passed.
+<!-- codex-archive-log:entry-end key="2026-10-06-clarify-dxf-review-diagnostics" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-05-calculate-waler-width-orthogonally" -->
+### 2026-10-05｜`calculate-waler-width-orthogonally`
+
+- Archive：[openspec/changes/archive/2026-10-05-calculate-waler-width-orthogonally](../openspec/changes/archive/2026-10-05-calculate-waler-width-orthogonally)
+- 完成內容：將可靠 Waler envelope 的代表寬度定義為兩條已選外側 supporting lines 的正交間距。；讓縱向端點錯位、斜端長度及有限 segment overhang 不再改變同一外側 rail pair 的寬度。；新增 Y29 W18 source `69F` regression，固定約 `400.000 mm` 的寬度，以及在目前材料規格中改為匹配 `H400x400`、不再匹配 `H414x405` 的結果。
+- Capabilities：`dxf-waler-contact-face-recognition`
+- 驗證：All artifacts complete; all 11 tasks complete; strict change validation passed.
+- Specs：Synced dxf-waler-contact-face-recognition main spec; openspec validate --specs passed.
+<!-- codex-archive-log:entry-end key="2026-10-05-calculate-waler-width-orthogonally" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-05-rigidly-translate-braces-on-waler-adjustment" -->
+### 2026-10-05｜`rigidly-translate-braces-on-waler-adjustment`
+
+- Archive：[openspec/changes/archive/2026-10-05-rigidly-translate-braces-on-waler-adjustment](../openspec/changes/archive/2026-10-05-rigidly-translate-braces-on-waler-adjustment)
+- 完成內容：對每支受影響的一般 Brace，使用兩端最終 Waler 有限線段聯立求解共同平移，而非只更新被編輯端。；將 Brace baseline 方向與長度列為 Engineering Hard Constraint；調整後兩端差向量必須與 baseline 幾何等價。；即使只編輯一端 Waler，也同步更新 Brace 另一端接點及兩端 Waler station。
+- Capabilities：`dxf-waler-contact-adjustment`
+- 驗證：17/17 tasks complete; OpenSpec strict validation and full test suite passed (1,572 tests, 1 skipped).
+- Specs：Synced dxf-waler-contact-adjustment main spec; openspec validate --specs passed.
+<!-- codex-archive-log:entry-end key="2026-10-05-rigidly-translate-braces-on-waler-adjustment" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-05-separate-release-and-regression-assets" -->
+### 2026-10-05｜`separate-release-and-regression-assets`
+
+- Archive：[openspec/changes/archive/2026-10-05-separate-release-and-regression-assets](../openspec/changes/archive/2026-10-05-separate-release-and-regression-assets)
+- 完成內容：從 `SupportSolver.spec` 移除 `project_cases/`、`test_cases/` 及其他 regression-only 資產的發行複製。；將下列三份 DXF 定義為正式使用者素材，統一輸出至成品 `sample_dxf/`：；以明確 allowlist 與 package contract test 保證三份素材完整存在，且不會因來源目錄新增檔案而自動擴大發行內容。
+- Capabilities：`release-package-assets`
+- 驗證：18/18 tasks complete; OpenSpec strict validation passed
+- Specs：Synced release-package-assets main spec (4 requirements, 9 scenarios)
+<!-- codex-archive-log:entry-end key="2026-10-05-separate-release-and-regression-assets" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-reconcile-post-audit-documentation" -->
+### 2026-10-04｜`reconcile-post-audit-documentation`
+
+- Archive：[openspec/changes/archive/2026-10-04-reconcile-post-audit-documentation](../openspec/changes/archive/2026-10-04-reconcile-post-audit-documentation)
+- 完成內容：新增 `dxf-corner-brace-repair-tool` MODIFIED delta，限縮 template requirement、provenance 與 replay 全稱文字，明確分開兩種 mode；只修正規格文字，runtime 行為不變。；更新 `docs/WORKFLOW.md`，同時描述 reference-template 與 body-relationship repair。；修正 README Qty 摘要，明確指出 Support Qty／purchase 尚未進入 score。
+- Capabilities：`dxf-corner-brace-repair-tool`
+- 驗證：9/9 tasks complete; change strict validation passed
+- Specs：Synced dxf-corner-brace-repair-tool; openspec validate --specs passed
+<!-- codex-archive-log:entry-end key="2026-10-04-reconcile-post-audit-documentation" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-retire-unused-dxf-legacy-functions" -->
+### 2026-10-04｜`retire-unused-dxf-legacy-functions`
+
+- Archive：[openspec/changes/archive/2026-10-04-retire-unused-dxf-legacy-functions](../openspec/changes/archive/2026-10-04-retire-unused-dxf-legacy-functions)
+- 完成內容：Audit `_legacy_corner_brace_candidates_from_group`、`_associate_components_to_struts_legacy`、`_select_waler_inner_lines`。；驗證 repository executable code、package exports、dynamic attribute lookup、PyInstaller entry、維護腳本與 tests 均無 consumer。；三者全部通過 gate 後，只移除這三個 private function definitions，並修正 live docstring 的 dangling name reference。
+- Capabilities：無 spec-level capability
+- 驗證：All artifacts complete; all 15/15 tasks complete; strict validation passed.
+- Specs：No delta specs (skip_specs: true).
+<!-- codex-archive-log:entry-end key="2026-10-04-retire-unused-dxf-legacy-functions" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-cancel-stale-solves-on-cad-update" -->
+### 2026-10-04｜`cancel-stale-solves-on-cad-update`
+
+- Archive：[openspec/changes/archive/2026-10-04-cancel-stale-solves-on-cad-update](../openspec/changes/archive/2026-10-04-cancel-stale-solves-on-cad-update)
+- 完成內容：新增三種 Solver 共用的 runtime snapshot handle、operation identity、thread-safe cancellation token、stale adoption gate 與 cancelled outcome；handle 從 snapshot 建立起即受 registry 管理，而不是等 worker start 才登記。；在 Support、Single Waler 與 Global Waler 的既有安全搜尋邊界加入 cancellation checkpoint；未取消路徑必須維持相同結果與排序。；讓有效且非 no-op 的 CAD add／update 在 Project mutation 前 invalidate 所有已登記且未關閉的 Solver snapshot handle，並取消其中的 running worker，但不等待 worker 才套用更新。
+- Capabilities：`global-waler-result-adoption`、`solver-cad-update-cancellation`
+- 驗證：Artifacts complete (4/4); tasks complete (21/21); strict change validation passed
+- Specs：Synced to main specs: global-waler-result-adoption modified; solver-cad-update-cancellation created; main-spec validation passed
+<!-- codex-archive-log:entry-end key="2026-10-04-cancel-stale-solves-on-cad-update" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-mark-invalid-results-in-exports" -->
+### 2026-10-04｜`mark-invalid-results-in-exports`
+
+- Archive：[openspec/changes/archive/2026-10-04-mark-invalid-results-in-exports](../openspec/changes/archive/2026-10-04-mark-invalid-results-in-exports)
+- 完成內容：建立共用成果匯出 projection，正規化每個 member plan 的 `valid` 與 ordered reasons。；Excel 材料明細加入「是否合法」與「不合法原因」欄位；合法方案原因保持空白。；DXF 新增專用 invalid-result warning layer，以紅色文字在對應構件附近標示構件編號與原因。
+- Capabilities：`dxf-result-export`、`excel-result-export`
+- 驗證：All artifacts complete; 10/10 tasks complete; change strict validation passed.
+- Specs：Synced to main specs; openspec validate --specs --strict passed (30 specs).
+<!-- codex-archive-log:entry-end key="2026-10-04-mark-invalid-results-in-exports" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-align-solver-validation-contracts" -->
+### 2026-10-04｜`align-solver-validation-contracts`
+
+- Archive：[openspec/changes/archive/2026-10-04-align-solver-validation-contracts](../openspec/changes/archive/2026-10-04-align-solver-validation-contracts)
+- 完成內容：修改 Waler material context，保留未提供與明確空可購買集合的語意差異。；明確空集合使有 Steel segment 的 Waler plan 產生 non-purchasable issues，且不進行 allocation／score。；明確空集合進入自動求解時仍以既有 invalid-candidate penalty 作為 fitness；Single／Global 無合法方案時回傳既有失敗結果與 diagnostics，不以 exception 表示正常的不可行結果。
+- Capabilities：`support-shim-joint-validation`、`waler-plan-evaluation`
+- 驗證：11/11 tasks complete; strict change validation, main-spec validation, verification review, targeted tests, and 1500-test full suite passed.
+- Specs：Synced support-shim-joint-validation and waler-plan-evaluation delta specs; openspec validate --specs passed (29/29).
+<!-- codex-archive-log:entry-end key="2026-10-04-align-solver-validation-contracts" -->
+
+<!-- codex-archive-log:entry-start key="2026-10-04-harden-project-state-transactions" -->
+### 2026-10-04｜`harden-project-state-transactions`
+
+- Archive：[openspec/changes/archive/2026-10-04-harden-project-state-transactions](../openspec/changes/archive/2026-10-04-harden-project-state-transactions)
+- 完成內容：定義 Project load、Support／Single result adoption、CAD input mutation 與 Material Spec mutation 的一致 transaction outcome，並禁止 commit 呼叫 setter、trace、callback、filesystem 或 collection mutation。；將結果失效、metadata、cache replacement 與 dirty finalization 納入 staged state；projection 失敗後鎖住修改，新增完整重新投影入口。；CAD mutation 已 commit 但 ACK 失敗時停止監聽並阻止 save，直到 pending event 被明確處理；相同 event ID 不得重複套用。
+- Capabilities：`project-state-transaction-consistency`
+- 驗證：All 4 artifacts complete; all 14 tasks complete; full suite 1488 passed, 1 skipped; strict change validation passed.
+- Specs：Synced project-state-transaction-consistency to main specs; openspec validate --specs passed (29 specs).
+<!-- codex-archive-log:entry-end key="2026-10-04-harden-project-state-transactions" -->
+
 <!-- codex-archive-log:entry-start key="2026-10-01-reconcile-repository-documentation" -->
 ### 2026-10-01｜`reconcile-repository-documentation`
 
@@ -292,34 +502,34 @@
 | **2026/05/29** | 索取 CAD 圖面並開始確認工程規則；確認千斤頂彼此至少 **600 mm（心到心）**。 |
 | **2026/06/11** | 已有新的支撐配置成果，約副理討論程式進度。 |
 | **2026/07/14** | 開始思考將圍令材料配置與橫向支撐拼接兩個最佳化問題整合，逐漸形成「全域配置＋單支可行拼接」的分層架構。 |
-| **2026/07/15　【Git】** | **`11ee6e7` — Initial commit**。第一次將專案正式放入 Git 版本控制。這可以視為 Git 上可追溯的起始版本；實際開發則早於此日期。 |
+| **2026/07/15　【Git｜v1.0.0】** | **`11ee6e7` — Initial commit**。第一次將專案正式放入 Git 版本控制。這可以視為 Git 上可追溯的起始版本；實際開發則早於此日期。 |
 | **2026/07/20–23** | 持續與副理討論新版支撐程式，並交換最新檔案及 Y01 CAD 資料。 |
 | **2026/07/21** | 以 W1、總長 95,500 mm 等實際資料測試圍令最佳化，整理庫存、接頭禁區與評分條件。 |
-| **2026/07/27　【Git】** | **`61b6d67` —「Solver第一版」**。這是第一個很明確的功能里程碑：支撐／圍令最佳化已經形成可以獨立稱為 Solver 的版本；commit 中也已包含材料庫存資料及打包設定。 |
-| **2026/07/29　【Git】** | **`3b9b53f` — `CAD_builder update`**。CAD 輸入正式成為重大版本功能；同期開發 progeCAD ↔ Python 的資料橋接。Git 版本與對話紀錄時間吻合。 |
+| **2026/07/27　【Git｜v1.0.0】** | **`61b6d67` —「Solver第一版」**。這是第一個很明確的功能里程碑：支撐／圍令最佳化已經形成可以獨立稱為 Solver 的版本；commit 中也已包含材料庫存資料及打包設定。 |
+| **2026/07/29　【Git｜v1.0.0】** | **`3b9b53f` — `CAD_builder update`**。CAD 輸入正式成為重大版本功能；同期開發 progeCAD ↔ Python 的資料橋接。Git 版本與對話紀錄時間吻合。 |
 | **2026/07/29–30** | 測試 CAD Bridge 及公司電腦執行環境，遇到 Python 在其他電腦無法正常執行的問題。 |
 | **2026/08/05–07** | 開始由「人工點 CAD」往「直接讀 DXF」發展；研究 DXF、`ezdxf`、Layer、Entity 與工程模型辨識。 |
 | **2026/08/07–10** | 以 Y1A 人工配置與 Solver 比較，持續調查材料比例、候選池、Jack 位置、Phase 1 Cache、TopN 等問題；DXF 辨識亦逐步加入人工確認、候選點等機制。 |
-| **2026/08/12　【Git】** | **`8dac57c` —「增加DXF匯入功能」**。這是一個很大的產品版本分界：輸入不再主要依靠手動／CAD Bridge，而開始能直接從 DXF 批次建立工程模型。 |
+| **2026/08/12　【Git｜v1.0.0】** | **`8dac57c` —「增加DXF匯入功能」**。這是一個很大的產品版本分界：輸入不再主要依靠手動／CAD Bridge，而開始能直接從 DXF 批次建立工程模型。 |
 | **2026/08/12–13** | 繼續處理 DXF 專案管理，包括 `dxf_import_state`、DXF 管理副本、重新連結、相對路徑及來源檔驗證。 |
-| **2026/08/14　【Git】** | **`ce7b2ed` —「新增DXF匯出功能」**。資料流程從「匯入 DXF → Solver」延伸成「匯入 → 最佳化 → 再輸出 DXF」，開始形成完整的工程資料閉環。 |
+| **2026/08/14　【Git｜v1.0.0】** | **`ce7b2ed` —「新增DXF匯出功能」**。資料流程從「匯入 DXF → Solver」延伸成「匯入 → 最佳化 → 再輸出 DXF」，開始形成完整的工程資料閉環。 |
 | **2026/08/13–16** | 持續處理 DXF 匯出相容性、Audit／XRecord、Clean DXF 等問題，同時開始整理打包方式與給同事測試的執行版本。 |
-| **2026/08/17　【Git】** | **`5851d43` —「介面小調整」**。功能趨於完整後，開始集中整理使用者操作介面。 |
-| **2026/08/17　【Git】** | **`6dcfc6a` —「第一版介面定稿」**。可視為第一版產品介面的正式基準點。之後即使功能、架構仍持續修改，整體操作形式已大致確立。 |
+| **2026/08/17　【Git｜v1.0.0】** | **`5851d43` —「介面小調整」**。功能趨於完整後，開始集中整理使用者操作介面。 |
+| **2026/08/17　【Git｜v1.0.0】** | **`6dcfc6a` —「第一版介面定稿」**。可視為第一版產品介面的正式基準點。之後即使功能、架構仍持續修改，整體操作形式已大致確立。 |
 | **2026/08 下旬** | 開發重心逐漸轉向專案儲存、材料管理、操作體驗、測試與程式架構整理。 |
 | **2026/08/28–30 起** | 開始進行較系統性的 Architecture Review 與漸進式重構，包括 Domain、Application、Presentation、ProjectService、Input Builder、DI 等議題。 |
 | **2026/09/02** | 將「支撐最佳化」投入資訊部活動／提案。 |
 | **2026/09/04** | 副理提出至 680C 進行程式使用說明，開始進入實際發布準備。 |
 | **2026/09/08–09** | 處理公司電腦 Defender／ASR 阻擋打包程式問題，經資訊部協助後解決執行限制。 |
 | **2026/09/09–10** | 完成舊版操作文件、LSP 實機測試與第一版發布前準備。 |
-| **2026/09/10** | **680C 第一版發布／使用說明。** |
-| 2026/09/12【Git】 | b98aa33 —「第一版_架構調整版」。第一版發布後開始進行較正式的架構整理，逐步建立 domain / algorithms / application / infrastructure / presentation 等責任邊界。 |
-| 2026/09/15【Git】 | 56b74cd —「第一版_waler背填、錯誤辨識」。第一版架構調整後繼續補強 Waler 與 DXF 辨識相關功能。 |
-| 2026/09/17【Git】 | 0cfbb20 —「第二版_DXF介面調整」。DXF Import / Review 已由單純匯入功能逐漸發展成完整子系統，包含辨識、Review、人工修正、Validation、Preview 等流程。 |
+| **2026/09/10【v1.0.0】** | **680C 第一版（v1.0.0）發布／使用說明。** |
+| 2026/09/12【Git｜v1.0.0】 | b98aa33 —「第一版_架構調整版」。第一版發布後開始進行較正式的架構整理，逐步建立 domain / algorithms / application / infrastructure / presentation 等責任邊界。 |
+| 2026/09/15【Git｜v1.0.0】 | 56b74cd —「第一版_waler背填、錯誤辨識」。第一版架構調整後繼續補強 Waler 與 DXF 辨識相關功能。 |
+| 2026/09/17【Git｜v2.0.0】 | 0cfbb20 —「第二版_DXF介面調整」。DXF Import / Review 已由單純匯入功能逐漸發展成完整子系統，包含辨識、Review、人工修正、Validation、Preview 等流程。 |
 | 2026/09/17 | 參與 Vibe Coding / AI Agent 開發工作流相關學習，開始系統性研究 SDD（Spec Driven Development）、AGENTS.md、Agent 工作規範、Skill 與 Context Engineering；開發方式開始由「直接要求 AI 改 Code」轉向「需求 → 分析 → 規格 → 設計 → 計畫 → 實作 → 驗證」。   AI Agent 工作流整理 |
 | 2026/09/17–18 | 重新檢視 AGENTS.md 定位，逐條建立 AI 開發規則：修改前先理解現況、先提出方案、重大技術選擇由使用者確認、Clean Code、分層測試、文件修改需確認、Git 由使用者自行操作等。 |
 | 2026/09/17–18 | 進行第二輪 Architecture Audit。不以檔案大小判斷技術債，而是重新繪製 System Architecture、Component、Dependency、DXF Data Flow、Solver Flow、Persistence Flow 等 As-Is 圖，辨識出 DXF Review workflow、main.py workflow、UI → Algorithms 等主要責任問題。 |
-| 2026/09/18【Git】 | 8d1c218 —「第二版_架構調整」。依 Architecture Audit 逐步處理 UI / Application 邊界，重點不是重寫 Solver，而是把 workflow ownership 從 UI 收回適當層級。 |
+| 2026/09/18【Git｜v2.0.0】 | 8d1c218 —「第二版_架構調整」。依 Architecture Audit 逐步處理 UI / Application 邊界，重點不是重寫 Solver，而是把 workflow ownership 從 UI 收回適當層級。 |
 | 2026/09/18 後 | Phase 1～4 架構整理完成後進行 Final Architecture Audit；結果判定已無 High architecture debt，當時 663 項測試中 662 通過、1 項因缺外部 fixture 跳過，因此停止繼續重構，轉入 SDD 文件建設。   AI Agent 工作流整理 |
 | 2026/09 下旬 | 正式建立長期 SDD 文件體系：AGENTS.md 管 AI 工作方式；ARCHITECTURE.md 管責任與依賴；DOMAIN.md 管工程語意；SOLVER.md 管求解器；WORKFLOW.md 管 runtime 流程。DOMAIN.md 也開始明確區分 Engineering Hard Constraint、Solver Preference、Heuristic 與 Implementation Detail。   AI Agent 工作流整理 |
 | 2026/09 下旬 | SOLVER.md 正式建立，開始把 Support Phase 1 / Phase 2、Waler Solver、Global Waler、Search Policy、Diagnostics 等由「存在於程式與對話裡的知識」轉為長期文件。   AI Agent 工作流整理 |
@@ -331,7 +541,14 @@
 | 2026/09/25 | 延伸 BIM / DXF 辨識能力：BIM Brace Block Recognition、Brace Axis → Waler Extension、HATCH RC Waler Recognition、Waler-constrained BIM Strut Recognition。 |
 | 2026/09/26 | 對 Brace → Waler extension 補上更嚴格範圍限制，開始呈現「先做 capability，再用後續 change 修正邊界」的 OpenSpec 演進方式。 |
 | 2026/09/27 | 新增 Corner Brace Repair Tool、Contextual BIM Joist Recognition、BIM Strut Center Selection Repair 等 change；DXF 辨識已由一般幾何辨識逐漸延伸到 BIM 匯出圖面的特殊結構辨識。 |
-| 2026/09/28【Git】 | 4d5e722 —「第二版_Y05匯入修正」。目前 GitHub 最新 commit。相較 9/18「第二版_架構調整」，這次一次整合大量 SDD/OpenSpec 成果、Y05 DXF/BIM 辨識修正、新 Domain/Application 元件與 regression tests；Git 中已可看到 19 個 archived OpenSpec changes。 |
+| 2026/09/28【Git｜v2.0.0】 | 4d5e722 —「第二版_Y05匯入修正」。目前 GitHub 最新 commit。相較 9/18「第二版_架構調整」，這次一次整合大量 SDD/OpenSpec 成果、Y05 DXF/BIM 辨識修正、新 Domain/Application 元件與 regression tests；Git 中已可看到 19 個 archived OpenSpec changes。 |
+| 2026/09/29 | 集中補強 DXF／BIM 辨識與 Review 操作：納入托梁與斜撐連接、圍令直接連接構件資料、中間柱歧義關聯修補及暫定雙路支撐候選；同時強化斜撐與角撐本體辨識，建立嚴格大於 250 mm 的寬度規則，並改善構件寬度顯示與角撐修補預覽。 |
+| 2026/09/30 | 收斂 DXF Review 的幾何判定與人工修補流程：分離圍令側向證據與端點身分、要求斜撐兩端各自唯一連接不同圍令、加入圍令重疊診斷，並重整角撐遮蔽辨識契約；同步改善中間柱修補入口、問題識別文字及 Preview 錯誤構件點選。 |
+| 2026/10/01 | 完成一輪核心契約整理：統一自動 Solver 與人工編輯使用的 Waler plan evaluation，集中 Support Shim／接頭驗證；正式移除舊 Strut 欄位正規化並定義 Project schema 相容政策。另新增手動 Project 的 result-only DXF 匯出、將 Material Spec 編輯移入 Application layer、支援斜切斜撐外框辨識，並全面校正 repository 文件。 |
+| 2026/10/04 | 強化執行期可靠性與狀態一致性：建立 Project load、結果採用、CAD 與材料異動的 transaction 契約；CAD 更新會取消過期 Solver 並阻止 stale result 採用。Excel／DXF 匯出開始明確標示不合法成果，Solver 對空材料集合與無合法方案的處理亦完成對齊；同時移除確認無使用者的 DXF legacy functions 並修正文檔。 |
+| 2026/10/05 | 修正圍令寬度為外側線的正交間距，避免斜端與端點錯位造成錯誤材料匹配；圍令調整時改以剛體平移同步更新斜撐兩端關係。打包方面將正式發行素材與 regression fixtures 分離，只以 allowlist 納入三份使用者 DXF 範例。 |
+| 2026/10/06 | 擴充圍令求解與 DXF Review：Waler 支援 100／150／200／300 mm 尾端調整塊，Global Waler 可保留跨 stage 的完整合法候選池；新增 provisional Waler 的專用正式化流程，可由候選點或 CAD 工程線人工採用。另將 Review 診斷改為一致的繁體中文說明，並在不改變工程規則下加速來源排除與角撐修補規劃。 |
+| 2026/10/07 | 完成主視窗與發行內容整理：移除頂部 Project toolbar，將專案操作集中至「檔案」選單並補上快捷鍵與儲存前編輯檢查；修正 Project 狀態誤改「檔案」選單的問題，並以藍灰色區分主、次頁籤。新增軟體資訊視窗，將 Y05／Y29 正式案例納入發行包。DXF Review 同步支援批次暫存來源排除，並以穩定來源身分修正 CornerBrace repair reference 對齊。 |
 
 ## AI 對話統計（截至 2026/09/28 早上）
 

@@ -136,11 +136,13 @@ Codex 透過 `.agents/skills/openspec-archive-change/SKILL.md` 完成 archive mo
 | Live DXF Review state | `DXFReviewWorkflow` | WCS result、projected result、ReviewItems、manual decisions 與 coordinate state |
 | Paused DXF Review state | Main／Application session | Live session 關閉後的 serialized resume state |
 | Durable DXF state | Project payload／persistence | 保存後的 workflow status、resume state 與 managed asset metadata |
+| Solver snapshot／execution lifecycle | Application `SolverOperationRegistry` | 從 input snapshot 建立到 Dialog 關閉的 open／running／stale／closed state、execution identity 與 cancellation source |
 
 Runtime-only state 包含：
 
 - Support candidate cache。
 - Single Waler Solver memory。
+- Solver operation handles、execution identities 與 cancellation tokens。
 - Same-session DXF `world_result` cache。
 - UI selection、viewport 與 editor draft。
 - `project_dirty` indicator。
@@ -168,6 +170,21 @@ Committed current state 是已由 Main 採用的：
 Solver operation 的 Running、temporary candidate 或 worker state，不是 `ProjectResultModel` 本身的 destructive state transition。
 
 在新結果 commit 前，既有 committed result 保持不變。
+
+Project load、Support／Single Waler result adoption、Material Spec 與 CAD
+mutation 依序分成 `stage → commit → projection`：stage 完成所有可能失敗的
+validation、copy、serialization、summary、metadata、cache 與 DXF state 建立；
+commit 只做 plain reference／scalar assignments，不呼叫 property setter、Tk
+variable、callback、filesystem 或 collection mutation；projection 才刷新 widgets、
+Preview 與狀態顯示。
+
+commit 後若 projection 失敗，正式 state 不 rollback。Main 設定
+`projection_stale` 並阻止 Project／result／Material Spec／Solver／CAD mutation 與
+save；此時主選單會在「專案」與「說明」之間暫時顯示「⚠ 重新整理畫面」，
+使用者只能先執行此恢復命令。正常狀態不顯示該選單項目。只有五張輸入表、Results
+Tree、材料摘要、Preview、Project／DXF／CAD status、selection 與 action state
+全部成功重建才解除 guard；既有「更新圖面」與 CAD「重新顯示狀態」都不是完整
+恢復入口。
 
 ### 2.3 DXF lifecycle status
 
@@ -244,13 +261,17 @@ flowchart TD
 
 | Item | Current behavior |
 | --- | --- |
-| Trigger | 使用者選擇另一個 Project |
-| Target validation | 先確認現有 project-case selector 有有效目標；無目標時不開啟 guard |
+| Trigger | 使用者從「檔案 → 開啟專案…」開啟單選對話框；清單每次由 repository 現況建立，取消對話框不改變任何正式 state |
+| Target validation | 沒有專案時先提示並結束；選取後先重新確認目標檔仍存在，再進入 navigation guard，因此空清單、取消或目標失效都不開啟 dirty prompt |
 | Dirty prompt | `Save / Discard / Cancel`；Save 只在回報 `saved` 後繼續 |
 | Temporary state | 經驗證的 payload、DXF asset report 與完整 `HydratedProject` |
 | Commit | navigation guard 允許後才 load；Main 一次採用 Project input、results、DXF state 與 workflow status |
-| Side effects | 清除 runtime Solver caches；刷新 UI；清除 dirty |
+| Side effects | 以全新 runtime Solver cache references 與 `dirty=false`／空 reason 同次 commit；之後刷新 UI |
 | Failure／Cancel | Save As 取消、Save 失敗、guard Cancel 或 Load failure 都不採用新 state；目前 Project 與 committed results 保留 |
+
+正式 Windows onedir 成品的可寫 `project_cases/` 初始預置 `Y05車站第一層支撐` 與 `Y29車站第一層支撐`；每案只含 `project.json` 與 managed `source/source.dxf`。兩案由 tracked release asset 快照在 build 時逐檔建立，不從 repository root 的 runtime `project_cases/` 取材。Source run、測試環境或其他未預置案例的合法部署仍在 repository 不存在時建立空目錄。
+
+預置案例沒有特殊 runtime 身份：Open、Save、Save As 與 Delete 都沿用一般 managed Project 行為。初始成品不含 `project.json.bak`；第一次儲存既有案例時才由 persistence 建立上一版備份。使用者刪除預置案例後，系統不在同次執行或下次啟動自動補回。
 
 Load 會恢復 result visibility 與 paused Review state，但不恢復 runtime Solver cache。
 
@@ -312,11 +333,78 @@ Dialog outcome 主要為 `pause` 或 `complete`。完成 Review 不等於 Dialog
 
 Waler、Strut 與 Brace 先各自完成 source recognition；Waler recognition 保留 source-supported provisional axis、完整 component envelope、outer faces 與 provenance，不在此階段以全域 endpoint 距離投票選接觸面。Importer 在 Column source recognition 完成後、建立 Joist context 前，使用已完成的 immutable member facts 建立 terminal-to-Waler identity，再由 provisional 交會點朝 member 本體的方向判定支撐側，選擇該側 envelope 的最外實體表面。
 
+可靠 Waler envelope 的實體寬度，以兩條 qualified outer faces 各自中點到另一條 supporting line 的正交距離取對稱平均；一般 LINE、closed outline 與 qualified MLINE 的 candidate 寬度 gate、final envelope 及 `WalerEnvelopeFacts.source_width` 使用同一量測語意。完整 envelope 建立後，`source_width` 是 Review baseline、材料自動配對與顯示的唯一正式寬度，不在下游重算。HATCH RC 仍保留 `auto_hatch` 材料優先權；單線 Waler 仍為 unknown width。這項正交公式只用於 physical rail width 與對應最大寬度 gate；duplicate、nearby、overlap 及 finite geometry qualification 繼續使用有限線段距離，不因此放寬或改變 topology／contact-face authority。
+
 一輪辨識先建立 canonical terminal relations，再以這些 relations 完成 Waler contact face，最後才建立 runtime-only Brace member verdict。唯一候選標為 `unique`，同一 ambiguity set 內的 best 與 competitors 都標為 `competing`；兩者共用同一份 provisional 交點、body direction 與來源 provenance，不另建幾何 truth。Waler 判側採 unique-first：只要有可靠 `unique` evidence 就忽略相反的 `competing` side authority並留下 warning；沒有可靠 `unique` 時才使用 `competing` evidence，同側可完成正式接觸面，兩側衝突才是 contact-face ambiguity。Brace／Strut 正式 endpoint 與 connection 始終只消費 `unique` relations。member verdict 不回頭改變 contact-face outcome，依賴方向固定為 `terminal relations → Waler contact face → unique-only member verdict`，避免循環判定。
 
 同一份 staged contact resolution 同時提交正式 Waler line、contextual Strut endpoint 與完整 Brace connection；CandidatePoint、association、diagnostics、CornerBrace refinement 及 Joist context 只消費已提交結果，不各自重算內外側。一般 Strut 保留既有逐端 direct relation，BIM contextual Strut 保留已選 source identity；Brace 仍使用 250 mm direct／600 mm outward-extension eligibility，但只有兩端各自唯一、連到不同 Waler、兩個 selected contact faces 都為 formal、來源軸與兩面都有合法有限交點且提交後長度合法時，才一次提交兩端 geometry 與 pair identities。任一條件失敗時整支 Brace unresolved，不保留部分正式 geometry 或 connection。若兩個 terminal relations 在數值精度內無法區分，系統回報 blocking ambiguity，不以 Waler ID、handle、幾何候選點或 collection order 打破平手。
 
 完整 envelope 無法唯一建立、authoritative evidence set 沒有可靠方向、或同一 authority level 的可靠 evidence 同時指向兩側時，系統建立 blocking Review problem。Terminal identity ambiguity 仍是獨立的 blocking member problem，但不再單獨迫使已有一致 side evidence 的 Waler 降為 provisional。Provisional axis 只供 preview／diagnostic，不代替正式接觸面；流程不使用全域 framing centroid、row order、source entity order或最先出現的平行線強行選側。Source Exclusion／Restore、manual replay、confirmation invalidation 與 Pause／Resume 均從目前 source facts 重新建立 resolution，不保存第二份 Project／Solver schema。
+
+#### Provisional Waler 人工正式化
+
+當 Waler 已形成 Review member、但自動 contact-face／envelope 無法唯一提交時，STEP4
+只從 DXF Review「修改工具」的「圍令正式化」進入正式採用。工具固定綁定目前選取的
+repair-eligible Waler，並以互斥的「線的來源」選擇「點位清單」或「已讀取的 CAD 線」；
+預設使用點位清單及目前線的起終點。只有同一 member 已由一般「從 CAD 指定工程線」
+讀入完整 CAD pair 時，CAD 選項才可用，且不需要先按一般「套用選取點」。工具本身不
+讀取 CAD event，只有一個「採用正式圍令」按鈕，並顯示：「此線將作為圍令接觸面
+（支撐頂到的面），不是圍令中心線」。任何通過既有 candidate-line validation 的有限線
+都可採用，不要求位於原 envelope 外側邊。
+
+主 Review 與 Preview 的「選起點／選終點」「套用選取點」維持一般幾何編輯：對
+provisional Waler 只更新暫定線，絕不建立 `manual_repair` authority。已是 formal／
+`manual_repair` 的 Waler 執行一般套用時，在 validation 與任何 workflow mutation 前拒絕，
+並提示改用「圍令正式化」；automatic formal Waler 與其他角色仍沿用一般流程。
+
+只有按下「採用正式圍令」才依工具內來源建立 revision／fingerprint／exact source identity
+綁定的 staged plan：點位清單使用 `manual_candidate_points`，CAD pair 使用 `cad_manual`。
+開啟工具後若同 member 的 CAD pair 已更新，舊視窗必須以「CAD 線已更新，請重新開啟
+圍令正式化」拒絕，不建立 plan，也不改變 live Review state。commit 才一次替換 WCS
+result、projection、diagnostics、confirmation 與 candidate state；取消、validation 失敗、
+stale plan 或 commit 失敗均保持舊正式線與完整 live state 不變。人工線成為該 Waler 唯一
+正式接觸線，authority 記為 `manual_repair`；只移除同一
+exact identity 的 envelope／contact-face ambiguous 或 unresolved blocker，其他來源、複合
+handles、overlap、connection 與 association 問題仍依重建結果保留。寬度只沿用 recognition
+已產生的正交 `WalerEnvelopeFacts.source_width`：唯一值為 `unique`，沒有可靠值為
+`unknown`，不同值為 `ambiguous`；人工線本身不量測寬度，也不猜材料，人工材料選擇不受
+影響。
+
+正式化會先捨棄 provisional-axis 的 terminal relations，再以人工接觸線重建 Strut／Brace
+連接、association、Waler contact review 與 formal Brace adjustment baseline。支撐構件本體
+全部位於人工線同側時，`support_normal_world` 指向該側；兩側衝突或沒有可靠構件時為
+unknown。unknown 不撤銷人工正式接觸線，但後續背填／寬度調整以
+`WALER_SUPPORT_SIDE_UNKNOWN` 原子阻擋；已知側的 Brace 則沿用既有剛體平移規則。
+
+明確 intent 以 version 2 `manual_overrides` 的 optional
+`waler_engineering_line_formalized` 保存，不提升 schema version。Same-fingerprint
+Pause／Resume、exact source restore 與 Source Exclusion 後復原都從 fresh recognition result
+重新驗證並重播專用操作；來源被排除期間 decision 不生效。內容不同的 compatible recovery
+不轉移 authority：exact Waler subject 只列 `requires_review`，來源消失、role 改變或被幾何
+rebind 到另一 identity 時列 `disabled`。本流程不提供「取消人工正式化」；選錯時再次用同一
+專用動作採用另一條合法線，新的 atomic decision 取代舊線。
+
+#### Waler 尺寸調整與 Brace baseline
+
+一般正式 Brace 在 Waler 背填／寬度調整時，不固定單端接點，也不逐端增量修改。Review
+先保存 adjustment 前的 runtime-only WCS baseline，再用兩端 final Waler finite lines 聯立求
+共同平移；成功結果同時更新兩端，保持 Brace 向量、長度與角度。平行不相容、identity
+或 baseline drift、退化幾何及 infinite-line 解落在 finite segment 外都產生 blocking
+diagnostic，整個 Waler／Strut／Brace／CornerBrace／derived-state proposal 不提交。
+
+人工 Brace endpoint override 使用既有 version 2 `manual_overrides`，並以 optional
+`geometry_coordinate_space = "baseline_wcs"` 表示同一絕對 WCS 中尚未套用 Waler adjustment
+的座標，不提升 Review state 或 Project schema。使用者在已調整畫面選點時，workflow 先由
+immutable baseline 與兩端 final Waler 算出目前共同平移 `t`，只保存 `clicked - t`；換算點
+若不在對應 baseline Waler finite segment，整次修改原子拒絕，不 clamp、吸附或硬存。
+
+Recognition、Source Exclusion／Restore、debug restore、Pause／Resume 與 manual replay 固定
+依下列順序重建：`recognition → baseline-WCS manual geometry replay → formal baseline build →
+Waler dimension replay → downstream rebuild`。舊 Brace override 若沒有座標語意標記，只在
+有效共同平移為零時安全視為 baseline WCS；存在非零 adjustment 時跳過該人工 geometry 並
+列入既有 `ManualReplayReport.needs_review`，可獨立重驗的 Waler 尺寸 decision 仍繼續 replay。
+Project row 始終只輸出調整後的一組 Brace endpoints，runtime baseline 不成為第二份正式
+geometry、Solver input 或 persistence schema。
 
 #### BIM Block Strut／Brace role-aware recognition
 
@@ -356,11 +444,31 @@ HATCH candidate 保留完整中心軸、實際寬度及兩條縱向外表面，�
 
 幾何等價的外框 LINE／POLYLINE 只保留為 immutable preview／diagnostic evidence，不再進入一般 Waler group merge。此 runtime claim 在 HATCH recognized、failed、ambiguous 或被排除時都會由原始 boundary 重建，因此排除 HATCH 不會讓同一外框換 identity 重新出現；無法證明等價的幾何不會被吞掉。Source Exclusion／Restore、Pause／Resume、fingerprint safety 與 completed import lifecycle 均繼續以 HATCH handle 作為 durable source identity，不新增 Project persistence schema。
 
-STEP4 提供明確觸發的 CornerBrace repair，處理 BIM 遮擋後只剩局部殘線、或自動辨識已有正式角撐但軸線不正確的情況。此工具不放寬 automatic recognizer：Workflow 只從 exact target source geometry 擷取可靠方向與 positional anchor，再由 compatible automatic-primary 的唯一 CornerBraceConnection 取得 Waler offset、Strut inward station 與 endpoint topology，依 target finite Waler／Strut local frame 執行 `same_side` 或 `mirrored` transfer。Transferred endpoints 必須通過 target direction／anchor、有限構件、duplicate、minimum-length 與既有 connection validation；reference fixed length 只供 Preview、provenance 與 diagnostic comparison，不參與求點、等長修正或 eligibility。Manual repaired secondary 只能提供 consistency evidence，不能成為 geometry template。
+STEP4 提供明確觸發的 CornerBrace repair，處理 BIM 遮擋後只剩局部殘線、或自動辨識已有正式角撐但軸線不正確的情況。此工具不放寬 automatic recognizer，並依 evidence 分成兩種模式：`reference_template` 由 compatible automatic-primary template 轉移局部配置；`body_relationship_selection` 則以已唯一辨識的 body 與候選工程關係建立修補，不使用 template。
 
-每個可預覽 candidate 唯一保存 target Waler／Strut relationship、selected automatic template、transfer mode 與 local values。Recognized replace 可呈現多組各自完整的 relationship candidates；unresolved create 只有全體 hard-eligible candidates 指向同一 relationship 時才能進入 Preview。零候選只顯示拒絕原因，唯一或多個候選都必須經使用者明確 Apply 才會原子更新 Review state。
+兩種模式都必須保存 exact target 與 relationship identity、先 Preview，再由使用者明確 Apply 才原子更新 Review state。候選 eligibility、hard validation、provenance 與 replay 的精確規則以 [`dxf-corner-brace-repair-tool` main spec](../openspec/specs/dxf-corner-brace-repair-tool/spec.md) 為準；本 Workflow 只摘要操作與 state lifecycle，不另建 acceptance rules。
 
-已套用 repair 會以 optional payload 保存於既有 version 2 `manual_overrides`，不提升 Review state version。新格式 same-fingerprint Pause／Resume 以保存的 selected template、transfer mode、Waler offset 與 Strut station 重建等價 candidate，並核對 adopted world line；不得改選目前最近 reference。缺少 template fields 的 legacy version 2 payload 只驗證既有 adopted world line、target identities 與 saved references，不套用新 ranking。任一 selected template、target relationship、local transfer 或工程線無法重建時只回報 needs-review。內容不同的 compatible recovery 不轉移 repair geometry 或 template decision：exact role/source subject 保留為 `requires_review`，來源消失或 role 改變則為 `disabled`，兩者都不能成為後續 repair reference。Cancel、關閉 Preview、stale plan 或 commit failure 均不修改 live Review truth。
+已套用 repair 會以 optional payload 保存於既有 version 2 `manual_overrides`，不提升 Review state version，並依 `selection_mode` 保存及重驗各模式所需 evidence。Same-fingerprint Pause／Resume 不得靜默切換模式、改選 template 或改選 target relationship；任一必要 evidence 無法重建時只回報 needs-review。內容不同的 compatible recovery 不轉移 repair geometry 或 selection decision：exact role/source subject 保留為 `requires_review`，來源消失或 role 改變則為 `disabled`，兩者都不能成為後續 repair reference。Cancel、關閉 Preview、stale plan 或 commit failure 均不修改 live Review truth。
+
+`reference_template`在same-fingerprint replay重新定位selected、primary與manual-secondary references時，以`(reference_class, CornerBraceRepairSubjectKey)`要求目前eligible evidence恰好一筆且整組一對一對齊；recognition產生的`CB*`顯示ID只供呈現、diagnostic與audit，不是工程identity。零筆、多筆、duplicate saved key或class不符一律安全拒絕，不用舊顯示ID、距離、順序或first match補值。成功後candidate與新provenance使用目前references，再重驗template局部尺寸、geometry、唯一connection、eligibility、target Waler／Strut canonical source identities與candidate validation。Legacy adopted-line replay共用同一reference matcher，但仍使用保存的world line，不重新ranking或改選template。
+
+CornerBrace confirmation key仍是role與normalized source handles；signature只對CornerBrace排除top-level member ID、nested repair-reference member ID、preferred display ID及其audit digest等純display metadata，source、geometry、repair／relationship evidence、warnings與problems仍必須影響signature。其他role的confirmation語意不變。Preferred repaired CornerBrace ID繼續作staged replay的命名衝突guard：ID被不同source占用或重播結果不同時不commit並列`needs_review`，不得靜默改名或轉移repair。上述行為不新增Review state或Project schema；changed-content compatible recovery邊界維持不變。
+
+#### Staged Source Exclusion 的 transaction 與 projection lifecycle
+
+使用者從主視窗「修改工具 → 來源」或 Preview「目前選取」逐筆標記／取消待排除來源；兩個入口共用 `DXFReviewWorkflow` 擁有的同一份 immutable pending draft。單筆排除也必須先標記，再按一次「重新辨識並套用（N）」，沒有立即排除入口。paired BIM Joist 等 source-atomic assembly 仍依 canonical source identity 合併成一筆 decision，不拆成半套來源。
+
+Pending draft 只保存本次尚未提交的 normalized `ExcludedSource` intent、base revision、source fingerprint 與 generation，不改正式 result、problems、ReviewItems、confirmations、revision 或 Project dirty state，也不執行 recognition／manual replay。Draft active 期間可繼續 selection、inspection、filter、zoom 與 pan；會改寫 Review truth 的 coordinate、layer recognition、manual repair、confirmation、restore、Pause 與 Complete 等操作由同一 action gate 阻擋，Dialog 按鈕停用並提示「請先套用或捨棄待排除來源」。關閉視窗必須明確選擇捨棄後才沿用既有 close path。
+
+使用者套用時，Workflow 將目前 committed exclusions 與整份 pending draft 正規化成單一 final candidate set，建立一份完整 `SourceExclusionPlan`：只重新執行一次 importer／recognition，依現有順序 replay 全部 Waler、材料、工程線與 CornerBrace 人工決策，再建立 final problems、ReviewItems、revalidated confirmations、獨立 `CandidatePointStore` 與 UI-neutral mutation effects。Aggregate impact 只呈現這份 final plan 的合併結果，不顯示逐筆中間模型；取消 impact 會失效該 plan 但保留 draft，讓使用者取消個別項目後重新建立 plan。Plan 綁定 base revision、fingerprint、draft generation、pending identities 與單次 token；mark、unmark、revision 或 source 改變後不能提交舊 plan。
+
+CornerBrace replay 保持逐筆 sequential 與 secondary-reference deferred pass。效能優化只存在於單次 `plan_corner_brace_repair()`：候選 connection 只對 temporary CornerBrace 建立，duplicate 使用相同 predicate 與既有 CornerBraces 逐一比較；Waler／Strut lookup、template、relationship frame 與方向／anchor index 也只在該次 call 內存活。所有候選、eligibility、ranking、diagnostics、provenance 與 replay outcome 必須和舊 full-field validation oracle 等價；不跨 repair 共用 projection、cache 或 outcome。
+
+Commit 先重驗 revision、fingerprint、draft generation、pending identities、token 與 plan invariants，再用整份預建物件作 reference／scalar state swap並只增加一次 revision；成功後以 plain assignment 清空 draft。live assignment 後不執行可能失敗的 derived rebuild，非預期 assignment 例外以提交前 snapshot rollback並保留 draft供重試。持久化仍只寫既有 normalized committed excluded sources、manual decisions 與 confirmations，不保存 pending draft、plan、render effects、candidate store 或 debug cache。
+
+Mark／unmark 只更新兩個入口、主視窗待排除清單與橘色 pending source overlay，不移除 formal member 或重建 hit index。成功 commit 後，Dialog 清除 pending overlay／count，並將 mutation effects 映射為正式 excluded source-style、engineering member、candidate、selection 與 detail dirty layers。source geometry signature、scene revision、handle index及 viewport dependency 都安全時，只以 `PreviewScene.source_handle_items` 更新 changed handles並重建必要 derived layers；任一條件無法證明時改走 full-scene fallback。兩條路徑都保留仍有效的 viewport，並使舊 revision／generation 的 source hit index失效；不存在的 selection／focus不得繼續命中。
+
+Developer debug JSON 是以 workflow revision 為 key 的 Presentation-only lazy cache。Panel 隱藏時一般 commit只標 dirty，不呼叫 `to_debug_dict()`、`json.dumps()`或 widget insert；開啟／刷新時才由目前 committed snapshot產生，完成後再核對 revision。序列化或 widget 更新失敗只留下可重試的 Presentation error，不 rollback 已提交的工程 state。本流程不引入 geometry extraction cache、background worker或新的 persistence schema。
 
 ### 5.3 Pause
 
@@ -368,7 +476,7 @@ STEP4 提供明確觸發的 CornerBrace repair，處理 BIM 遮擋後只剩局�
 | --- | --- |
 | Trigger | 使用者暫停或關閉尚未完成的 Review 視窗 |
 | Temporary state | Live `DXFReviewWorkflow` |
-| Validation | Pause 不要求 Review 已完整通過 |
+| Validation | Pause 不要求 Review 已完整通過；但 pending source exclusions 必須先套用或明確捨棄 |
 | Commit | 驗證 source fingerprint，保存 serialized state 與 same-session cache，workflow 設為 `REVIEW` |
 | Side effects | 標記 dirty，關閉 live Review session |
 | Persistence | Paused Review 可隨 Project 保存 |
@@ -403,6 +511,10 @@ flowchart TD
 Resume source 可來自 managed DXF 或 saved original path。
 
 同一執行階段若 fingerprint、cached `world_result` 與 layer classification 相符，可重用 WCS result。重新啟動後則重新 recognition，再 replay serialized decisions。
+
+重新 recognition 的 Resume 會依上述固定順序與目前 canonical facts 重算 Brace；因此結果
+可能不同於舊版曾採用的單端移動、旋轉或伸縮位置。現階段不新增專用 Resume UI 提示；
+無法安全 replay 的舊人工 Brace endpoints 透過既有 `needs_review` 摘要回報。
 
 來源不存在或 fingerprint 不符時，使用者可進入 REVIEW 專用 Source Recovery。候選檔可解析且 SHA-256 與 saved `source_fingerprint` 完全相同時，維持原有快速路徑：只更新 source reference，不執行重新辨識或額外確認，維持 `REVIEW` 並接回既有 Resume path。
 
@@ -488,13 +600,19 @@ Input invalidation 會直接清除不再可信的 results，而不是保留 stal
 
 Material Spec definition 的 rename、Usage edit 與 delete 使用 Application staging：Main 將目前 row identity 與 proposed value 交給 `MaterialSpecEditing`，Application 在完整保留 persisted 及 runtime-only state 的 `ProjectDataModel` deep copy 上驗證並修改。被引用的 rename 第一次回傳 reference summary 要求既有確認；使用者接受後，Main 以相同 expected identity 與 reference summary 第二次呼叫，Application 重新驗證後才產生 staged Project／result state。取消、驗證失敗、stale request 或 staging exception 均保留原 Project、results 與 caches。
 
-Main 成功採用 staged models 時，依 Application outcome 清除必要 caches、更新材料摘要、標記 dirty 並刷新 UI。被引用的 rename 清除 result／cache；未被引用 definition 的修改與刪除保留 result 但仍標記 dirty。正式 state swap 或 cache adoption 失敗會 rollback；commit 完成後的純 UI refresh failure 不回滾已採用 state。此流程不改 DXF binding、材料政策、Solver 規則、Project schema 或 UI layout。
+Main 成功採用 staged models 時，先建立 replacement cache references，並把 Project、results、caches 與 dirty state 同次 commit；之後才更新材料摘要與 UI。被引用的 rename 清除 result／cache；未被引用 definition 的修改與刪除保留 result 但仍標記 dirty。stage failure 保留全部舊 state；commit 後的 UI projection failure 保留完整新 state 並設定 `projection_stale`。此流程不改 DXF binding、材料政策、Solver 規則或 Project schema。
 
 ## 7. Solver Operations
 
 本章只描述 operation flow；搜尋與評分詳見 `SOLVER.md`。
 
 共同原則：計算尚未成功 commit 前，既有 `ProjectResultModel` 不變。
+
+Main 在 input builder 成功建立 snapshot 時立即登記 operation handle，Dialog 不會在 Run 時重複登記。Run 只會為仍為 open 的 handle 建立 execution identity；worker、progress 與 completion callback 都攜帶同一 execution。正式 result、diagnostics、calculated time、dirty、Support candidate cache 與 Single Waler memory 必須同時通過 registry 的 `adoptable` disposition及 Main 既有 `_ensure_mutation_allowed()` guard，才可提交。
+
+有效 CAD mutation 使 open／running handles stale；open Dialog 立即停用 Run，running worker 在安全 checkpoint 合作式停止，completion 只 cleanup。stale Dialog 顯示「請關閉後重新開啟 Solver」、保持 Run disabled且不自動重跑。Single／Global Waler 的 busy lease 在舊 worker `finally` 前保持占用；重新開啟時顯示「前一次計算正在停止，請稍後再試」。一般 running close request 仍只阻擋關閉，不設定 cancellation token。
+
+ACK unresolved 不阻止開啟 Dialog或按 Run；這類新 operation 在 registry 仍可為 adoptable，但 completion 會被既有 mutation guard擋下，顯示「計算完成，但CAD ACK尚未完成，結果未採用」。此時不寫入任何正式 output，Run 依既有行為恢復可用，也不自動重跑。
 
 ### 7.1 Support Optimization
 
@@ -599,6 +717,7 @@ flowchart LR
 
 - Solver 開始時不先清除舊 result。
 - Solver failure 不清除舊 result。
+- CAD mutation 先到時，stale completion 不採用 result、diagnostics 或 runtime cache；completion 先 commit 時，後續 CAD input invalidation 會清除該舊 result 與 cache。
 - Support／Single 在 running 時會拒絕關閉；Solver failure 或 completion callback 未成功 commit 時，舊 result 保留。
 - Global Waler failure／invalid solution／staging failure／commit failure 時，包含 historical RC result 在內的舊 result 全部保留。
 - 原本沒有 result 時，failure／discard 後才仍是 No Result。
@@ -649,12 +768,13 @@ flowchart TD
     Validate --> Map[Map WCS to Project coordinates]
     Map --> StageRow[Stage add or update row]
     StageRow --> StageDxf[Stage binding sync or stale state]
-    StageDxf --> Commit[Commit Project row + DXF state]
+    StageDxf --> Invalidate[Invalidate open / running Solver snapshots<br/>Cancel running executions]
+    Invalidate --> Commit[Commit Project row + DXF state]
     Commit --> Ack[ACK event]
-    Ack --> Post[Invalidate results / dirty / refresh]
+    Ack --> Post[Project committed state to UI]
     Validate -->|Failure| Retain[Retain event]
     Map -->|Failure| Retain
-    Ack -->|Failure| Rollback[Rollback row + DXF state]
+    Ack -->|Failure| Unresolved[Keep mutation<br/>Stop monitor / block save]
 ```
 
 ### 10.3 Staging and commit
@@ -666,15 +786,17 @@ CAD event 使用 WCS；mapper 依 Project `CoordinateSystem` 轉成 Project coor
 - Binding 可以唯一、安全同步且 compatibility 通過時，採用 staged binding。
 - Binding 無法可靠同步時，Project change 仍可成功，但標示 stale。
 
-Project row／DXF state 先 commit，再 ACK event。ACK 失敗時，Add 移除、Update 恢復舊 row、DXF state 恢復，event 保留。
+Project row、result invalidation、cache invalidation、DXF state 與 dirty outcome 先以 plain references commit，再 ACK event。確定為有效且非 no-op 的 add／update 後、正式 commit 前，Main 先使所有已登記且尚未關閉的 Solver snapshots stale，並只對 running executions設定 cancellation token；不等待 worker結束。ACK filesystem operation 失敗時不 rollback 已提交 mutation；Main 記錄 unresolved event ID、停止 CAD polling、阻止 save並保留 event。相同 event ID 再次出現時不得重複套用。使用者以「重新處理待確認事件」完成 ACK或以 `SUPCLEAR` 明確處理 pending event 後，仍須在必要時完成完整重新投影，才恢復 monitor 與 save。已 stale 的 Solver operation及已設定的 cancellation token不會因 ACK failure恢復。
 
-ACK 成功後才清除 results／caches、dirty、選取 row、刷新 Preview 與顯示訊息。
+ACK 成功後才進行 Tree selection、Preview 與狀態訊息等 UI projection；projection 失敗保留 mutation 並啟用 `projection_stale` guard。
 
 ### 10.4 Invalid and cancel events
 
 Invalid event 不 ACK，Project／results 不變，event 保留供修正或 `SUPCLEAR`。
 
 Cancel event 驗證後 ACK，Project 不變。
+
+幾何 no-op update 直接 ACK。Invalid、cancel與 no-op 都不接觸 Solver registry，不停用尚未執行 Dialog 的 Run，也不取消 running worker。
 
 ## 11. Export
 
@@ -687,6 +809,8 @@ Export 是 terminal output，不修改 Project input／results，也不改變 di
 | Preview Image | 目前完整 Preview 與輸出倍率 | Image 寫出成功 | 恢復 figure／viewport；Project state 不變 |
 
 同一 member 有多個 visible plans 時，Excel／DXF Result Export 會拒絕匯出。
+
+人工編輯後已 committed 的 invalid Support／Waler result 仍可匯出，不新增確認或阻擋。`ProjectResultModel` 先從 committed payload 建立逐構件、唯讀的 export legality projection；Excel 與 DXF exporter 只呈現這份 projection，不重新執行 Solver 或工程合法性判斷。Excel 材料明細在既有欄位後加入「是否合法」與「不合法原因」，同一構件的每筆材料列使用相同狀態。DXF 對每個 invalid member 在紅色 `SD_WARNING_INVALID_RESULT` 圖層建立一筆鄰近 MTEXT，並以引用新細明體的 `SD_WARNING_CJK` 文字樣式保存繁體中文警告；雙路支撐的兩支實體 Strut 分別標示。全部匯出構件合法時不建立 warning 圖層或文字樣式。兩種輸出仍先重讀驗證 temporary file，驗證成功後才替換 destination。
 
 DXF Result Export 建立乾淨的新 DXF，不修改原始 DXF。模式只依 `dxf_import_state` 是否存在判定，不依 `dxf_workflow_status`：欄位不存在或值為 `None` 的手動 Project 使用 result-only，把 Project 座標直接視為 WCS，只建立實際有結果的成果圖層，不輸出背景或 `SD_PROJECT_*`；state 存在時使用 source-backed，沿用既有背景、Project geometry 與圖層行為。空 Mapping `{}` 或其他不完整 state 回報座標錯誤，不 fallback。Binding stale 目前不直接阻止 source-backed export，但必須有足夠的 Project → WCS metadata。
 
@@ -735,11 +859,22 @@ Presentation 儲存流程以明確 outcome 區分 `saved`、`cancelled` 與 `fai
 
 Save 失敗時不清除 dirty；既有正式 Project／managed DXF 保留或恢復。
 
+Project JSON 的 persistence 行為維持 `.tmp` 寫入與驗證、atomic replace 及
+`.bak` 備份。`.rollback` 只屬於 managed DXF：舊 managed DXF 成功復原後可
+清除；若復原失敗，typed `ProjectPersistenceError` 會帶出 recovery file 與
+managed DXF 的絕對路徑，且 `finally` 不刪除 recovery file。下一次 save 若在
+目標位置發現既有 `.rollback`，會在建立任何 temp、替換 JSON／DXF 或改變
+runtime dirty state 前拒絕，避免覆蓋第一次事故的救援檔。
+
 ### 12.3 Load
 
-Load 先建立完整 `HydratedProject`，再由 Main 一次採用所有正式 state。
+Load 先建立完整 `HydratedProject`、DXF report、path、全新 cache references、
+`dirty=false` 與空 dirty reason，再由 Main 一次採用所有正式 state。
 
 Load failure 不取代目前 Project 或 committed results。
+
+若採用後的 UI projection 失敗，完整的新 Project 仍是正式 state 且維持 clean；
+Main 設定 `projection_stale`，直到完整重新投影成功。
 
 ## 13. DXF Relink
 
@@ -799,7 +934,7 @@ Support editor no-op initialization 不會修改 result、calculated time、pers
 | Single Waler | Worker Top 5 | Success callback | 舊 result 保留 |
 | Global Waler | Worker global solution／staged result mapping | Valid completion callback 立即 atomic commit | Solver／staging／commit failure 時舊 result 保留；refresh failure 不回滾已提交成果 |
 | Manual edit | Staged recalculation | 每次成功 recalculation 後立即 | 格式失敗不更新；可保存 invalid result |
-| CAD add／update | Staged row／DXF state | Row/state commit 後 ACK | ACK 失敗 rollback |
+| CAD add／update | Staged row／DXF state | Solver snapshots失效後 commit row／DXF state／result與cache invalidation／dirty，再 ACK | ACK 失敗保留 committed mutation並進入既有 unresolved guard；不 rollback |
 | Export | Temporary output | Validated file replace | 不取代 destination |
 | Save | Temporary JSON／DXF | Official files replace | 正式檔案保留或恢復；dirty 保留 |
 | Relink | Candidate／compatibility state | Accepted state adopted | Rejected／cancelled 不修改 state |

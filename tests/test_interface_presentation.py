@@ -8,14 +8,68 @@ from main import SupportInputApp, SupportSolverDialog, WalerSolverDialog
 from bracing_optimizer.application.optimize_waler import OptimizeWaler, OptimizeWalerRequest
 from bracing_optimizer.application.project_data import ProjectDataModel
 from bracing_optimizer.application.project_results import ProjectResultModel
+from bracing_optimizer.application.solver_operation_registry import (
+    SnapshotState,
+    SolverKind,
+    SolverOperationRegistry,
+)
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.algorithms.solver_search import (
     DEFAULT_SEARCH_POLICY,
     SolverDiagnostics,
 )
+from bracing_optimizer.presentation.result_formatters import (
+    format_waler_score_breakdown,
+)
 
 
 class InterfacePresentationTests(unittest.TestCase):
+    def test_waler_tail_details_show_adjustment_between_steel_and_gap(self):
+        text = format_waler_score_breakdown({
+            "segments": [8000, 8000],
+            "steel_length": 16000,
+            "tail_adjustment": 300,
+            "gap": 150,
+            "required_length": 16450,
+            "score": None,
+        })
+
+        lines = text.splitlines()
+        self.assertLess(lines.index("標準鋼材總長：16000 mm"), lines.index("尾端調整塊：300 mm"))
+        self.assertLess(lines.index("尾端調整塊：300 mm"), lines.index("現場處理餘量：150 mm（允許 0～150 mm）"))
+
+    def test_waler_preview_draws_adjustment_then_gap_at_member_tail(self):
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.walers = [{
+            "WalerID": "W1",
+            "StartX": 0,
+            "StartY": 0,
+            "EndX": 16450,
+            "EndY": 0,
+        }]
+        app.ax = Mock()
+        app._draw_segment_length_label = Mock()
+
+        app._draw_single_waler_solution_overlay({
+            "waler_id": "W1",
+            "selected_plan": {
+                "segments": [8000, 8000],
+                "joints": [8000],
+                "tail_adjustment": 300,
+                "gap": 150,
+            },
+        })
+
+        label_lengths = [
+            call.args[4]
+            for call in app._draw_segment_length_label.call_args_list
+        ]
+        self.assertEqual(label_lengths, [8000, 8000, 300, 150])
+        shim_plot = app.ax.plot.call_args_list[2]
+        gap_plot = app.ax.plot.call_args_list[3]
+        self.assertEqual(shim_plot.args[:2], ([16000.0, 16300.0], [0.0, 0.0]))
+        self.assertEqual(gap_plot.args[:2], ([16300.0, 16450.0], [0.0, 0.0]))
+
     @staticmethod
     def make_global_waler_preflight_app(*, manually_modified):
         app = SupportInputApp.__new__(SupportInputApp)
@@ -93,6 +147,13 @@ class InterfacePresentationTests(unittest.TestCase):
             self.assertIn("MaterialRatioTargets.normalized", source)
         self.assertNotIn("support.normalize_material_ratio_targets", support_source)
 
+    def test_waler_dialog_tail_preview_uses_shared_resolver_and_150_gap(self):
+        source = inspect.getsource(WalerSolverDialog.__init__)
+
+        self.assertIn("wales.resolve_waler_tail", source)
+        self.assertIn("wales.WALER_MAX_GAP", source)
+        self.assertNotIn("允許 0～200 mm", source)
+
     def test_solver_workers_use_ui_queue_instead_of_tk_after(self):
         support_worker = inspect.getsource(SupportSolverDialog._solver_thread)
         waler_worker = inspect.getsource(WalerSolverDialog._solver_thread)
@@ -109,6 +170,10 @@ class InterfacePresentationTests(unittest.TestCase):
         self.assertNotIn("刪除方案", results_source)
         for label in ("新增鋼材", "刪除鋼材", "上移", "下移"):
             self.assertIn(label, editor_source)
+        self.assertIn('columns = ("segment_index", "length")', editor_source)
+        self.assertNotIn('columns = ("segment_index", "kind", "length")', editor_source)
+        self.assertIn("if parsed <= 0:", editor_source)
+        self.assertIn("if parsed not in allowed_steel_lengths:", editor_source)
         self.assertIn("manual_modified", editor_source)
         self.assertIn("_apply_waler_plan_segments", editor_source)
 
@@ -232,6 +297,122 @@ class InterfacePresentationTests(unittest.TestCase):
 
         self.assertEqual(selection_class.call_args.args[1], ["W1"])
         solver_class.assert_not_called()
+
+    def test_single_waler_snapshot_is_registered_during_selection_and_reused(self):
+        inputs = {
+            "W1": SimpleNamespace(
+                waler_id="W1",
+                material_spec="H400x400",
+                purchasable_lengths=(5_000,),
+            )
+        }
+        app = self.make_single_waler_preflight_app(inputs)
+        registry = SolverOperationRegistry()
+        handles = []
+        real_register = registry.register_snapshot
+
+        def register(kind):
+            handle = real_register(kind)
+            handles.append(handle)
+            return handle
+
+        registry.register_snapshot = Mock(side_effect=register)
+        app._ensure_solver_operation_registry = Mock(return_value=registry)
+
+        def select():
+            self.assertEqual(registry.status(handles[0]).state, SnapshotState.OPEN)
+            return "W1"
+
+        with patch("main.WalerSelectionDialog") as selection_class:
+            selection_class.return_value.open.side_effect = select
+            with patch("main.WalerSolverDialog") as solver_class:
+                app._open_waler_solver()
+
+        registry.register_snapshot.assert_called_once_with(SolverKind.SINGLE_WALER)
+        self.assertIs(
+            solver_class.call_args.kwargs["snapshot_handle"],
+            handles[0],
+        )
+        self.assertIs(
+            solver_class.call_args.kwargs["operation_registry"],
+            registry,
+        )
+        self.assertIsNone(registry.status(handles[0]))
+
+    def test_single_waler_selection_cancel_closes_registered_snapshot(self):
+        inputs = {
+            "W1": SimpleNamespace(
+                waler_id="W1",
+                material_spec="",
+                purchasable_lengths=(),
+            )
+        }
+        app = self.make_single_waler_preflight_app(inputs)
+        registry = SolverOperationRegistry()
+        app._ensure_solver_operation_registry = Mock(return_value=registry)
+        handles = []
+        real_register = registry.register_snapshot
+        registry.register_snapshot = Mock(
+            side_effect=lambda kind: (
+                handles.append(real_register(kind)) or handles[-1]
+            )
+        )
+
+        with patch("main.WalerSelectionDialog") as selection_class:
+            selection_class.return_value.open.return_value = None
+            app._open_waler_solver()
+
+        self.assertIsNone(registry.status(handles[0]))
+
+    def test_global_waler_passes_one_registered_snapshot_to_dialog(self):
+        app = self.make_global_waler_preflight_app(manually_modified=False)
+        registry = SolverOperationRegistry()
+        app._ensure_solver_operation_registry = Mock(return_value=registry)
+
+        with patch("main.WalerGlobalSolverDialog") as dialog_class:
+            app._open_waler_global_solver()
+
+        handle = dialog_class.call_args.kwargs["snapshot_handle"]
+        self.assertIs(dialog_class.call_args.kwargs["operation_registry"], registry)
+        self.assertIsNone(registry.status(handle))
+
+    def test_support_passes_one_registered_snapshot_to_dialog(self):
+        app = SupportInputApp.__new__(SupportInputApp)
+        app.root = object()
+        app.project_data = ProjectDataModel(
+            struts=[{"StrutID": "S1", "Zoning": "Z1"}]
+        )
+        app.validate_data = Mock(return_value=True)
+        app.show_result = Mock()
+        support_input = SimpleNamespace(
+            zoning="Z1",
+            configs=(
+                SimpleNamespace(
+                    support_id="S1",
+                    material_spec="",
+                    steel_lengths=(5_000,),
+                ),
+            ),
+        )
+        builder = Mock()
+        builder.build_zone.return_value = support_input
+        app._ensure_solver_input_builders = Mock(
+            return_value=(builder, Mock())
+        )
+        app.support_candidate_cache = {}
+        app.make_support_optimizer = Mock(return_value=object())
+        app._store_support_solution = Mock()
+        registry = SolverOperationRegistry()
+        app._ensure_solver_operation_registry = Mock(return_value=registry)
+
+        with patch("main.ZoningSelectionDialog") as selection_class:
+            selection_class.return_value.open.return_value = "Z1"
+            with patch("main.SupportSolverDialog") as dialog_class:
+                app._open_support_solver()
+
+        handle = dialog_class.call_args.kwargs["snapshot_handle"]
+        self.assertIs(dialog_class.call_args.kwargs["operation_registry"], registry)
+        self.assertIsNone(registry.status(handle))
 
     def test_single_waler_all_rc_returns_without_dialog_or_state_change(self):
         inputs = {
@@ -748,6 +929,11 @@ class InterfacePresentationTests(unittest.TestCase):
         export_call = app.excel_result_exporter.export.call_args
         self.assertEqual(export_call.args[0], "C:/output.xlsx")
         self.assertEqual(export_call.args[1][0].member_id, "W1")
+        self.assertFalse(export_call.args[1][0].valid)
+        self.assertEqual(
+            export_call.args[1][0].reasons,
+            ("未提供不合法原因",),
+        )
         self.assertEqual(export_call.kwargs["project_name"], "未命名專案")
         showinfo.assert_called_once()
 

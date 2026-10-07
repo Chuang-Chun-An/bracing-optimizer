@@ -32,6 +32,8 @@ DETAIL_HEADERS = (
     "材料規格",
     "長度(mm)",
     "數量",
+    "是否合法",
+    "不合法原因",
 )
 SUMMARY_HEADERS = (
     "材料用途",
@@ -228,6 +230,8 @@ def _write_detail_sheet(
             _display_material_spec(row.material_spec),
             length,
             quantity,
+            "合法" if row.valid else "不合法",
+            None if row.valid else "\n".join(row.reasons),
         ])
 
     _style_header(
@@ -244,23 +248,24 @@ def _write_detail_sheet(
         for cell in data_row:
             cell.font = BODY_FONT
             cell.alignment = Alignment(vertical="center")
-        for column in (1, 2, 5, 6, 7, 10):
+        for column in (1, 2, 5, 6, 7, 10, 11):
             data_row[column - 1].alignment = Alignment(
                 horizontal="center",
                 vertical="center",
             )
         data_row[8].alignment = Alignment(horizontal="right", vertical="center")
         data_row[9].alignment = Alignment(horizontal="right", vertical="center")
+        data_row[11].alignment = Alignment(vertical="center", wrap_text=True)
         data_row[8].number_format = "#,##0.##"
         data_row[9].number_format = "#,##0.##"
 
-    widths = (8, 12, 18, 22, 14, 12, 14, 22, 14, 10)
+    widths = (8, 12, 18, 22, 14, 12, 14, 22, 14, 10, 12, 36)
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width
     _add_table(
         worksheet,
         name="MaterialDetailsTable",
-        reference=f"A4:J{last_data_row}",
+        reference=f"A4:{get_column_letter(len(DETAIL_HEADERS))}{last_data_row}",
     )
     _configure_printing(worksheet, column_count=len(DETAIL_HEADERS))
     return material_quantity, last_data_row
@@ -356,7 +361,7 @@ def _write_summary_sheet(
 def _validate_staged_workbook(
     staged_path: Path,
     *,
-    expected_detail_rows: int,
+    expected_details: Sequence[MaterialDetailRow],
     expected_summary_rows: int,
 ) -> None:
     try:
@@ -376,10 +381,24 @@ def _validate_staged_workbook(
             )
             if detail_headers != DETAIL_HEADERS or summary_headers != SUMMARY_HEADERS:
                 raise ExcelResultExportError("Excel 欄位結構驗證失敗。")
-            if detail_sheet.max_row != expected_detail_rows + 4:
+            if detail_sheet.max_row != len(expected_details) + 4:
                 raise ExcelResultExportError("Excel 材料明細筆數驗證失敗。")
             if summary_sheet.max_row != max(4, expected_summary_rows + 4):
                 raise ExcelResultExportError("Excel 材料彙總筆數驗證失敗。")
+            for row_index, expected in enumerate(expected_details, start=5):
+                actual_validity = detail_sheet.cell(row_index, 11).value
+                actual_reasons = detail_sheet.cell(row_index, 12).value
+                expected_validity = "合法" if expected.valid else "不合法"
+                expected_reasons = (
+                    None if expected.valid else "\n".join(expected.reasons)
+                )
+                if (
+                    actual_validity != expected_validity
+                    or actual_reasons != expected_reasons
+                ):
+                    raise ExcelResultExportError(
+                        "Excel 合法性欄位內容驗證失敗。"
+                    )
         finally:
             workbook.close()
     except ExcelResultExportError:
@@ -446,7 +465,7 @@ class ExcelResultExporter:
             workbook.close()
             _validate_staged_workbook(
                 staged_path,
-                expected_detail_rows=len(details),
+                expected_details=details,
                 expected_summary_rows=len(summaries),
             )
             os.replace(staged_path, destination)

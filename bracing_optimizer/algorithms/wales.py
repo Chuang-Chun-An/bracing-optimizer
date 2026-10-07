@@ -13,6 +13,7 @@ from bracing_optimizer.domain.material_rules import (
     classify_length as classify_material_length,
 )
 from bracing_optimizer.algorithms.solver_search import DEFAULT_SEARCH_POLICY
+from bracing_optimizer.algorithms.cancellation import CancellationToken
 
 evaluate_count = 0
 evaluate_total_time = 0.0
@@ -22,7 +23,9 @@ allocate_total_time = 0.0
 DEBUG = False
 logger = print
 
-WALER_MAX_GAP = 200
+WALER_MAX_GAP = 150
+WALER_TAIL_ADJUSTMENTS = (0, 100, 150, 200, 300)
+WALER_MAX_TAIL_SHORTFALL = max(WALER_TAIL_ADJUSTMENTS) + WALER_MAX_GAP
 
 ISSUE_STEEL_TOTAL_SHORT = "steel-total-short"
 ISSUE_STEEL_TOTAL_LONG = "steel-total-long"
@@ -33,17 +36,25 @@ ISSUE_SEGMENT_NOT_PURCHASABLE = "segment-not-purchasable"
 ISSUE_ALLOCATION_UNAVAILABLE = "allocation-unavailable"
 
 
+@dataclass(frozen=True)
+class WalerTailResolution:
+    """Canonical completion of one Waler Steel endpoint."""
+
+    steel_length: int
+    tail_adjustment: int
+    gap: int
+
+
 def resolve_waler_steel_target(
     required_length: int,
     *,
     steel_step: int = 500,
 ) -> Tuple[int, int]:
-    """Return the unchanged GA endpoint and its uncovered Waler shortfall.
+    """Return the unchanged GA endpoint and its raw Waler shortfall.
 
-    Waler has no adjustment block.  Candidate generation retains its existing
-    fixed-step endpoint so search policy and candidate counts do not change;
-    the plan evaluator decides whether the resulting shortfall is within the
-    inclusive 0..200 mm engineering range.
+    Candidate generation retains its existing fixed-step endpoint so search
+    policy and candidate counts do not change.  Tail completion is resolved
+    separately by :func:`resolve_waler_tail`.
     """
 
     normalized_required = int(round(required_length))
@@ -53,6 +64,61 @@ def resolve_waler_steel_target(
         raise ValueError("steel_step must be positive")
     steel_length = (normalized_required // steel_step) * steel_step
     return steel_length, normalized_required - steel_length
+
+
+def resolve_waler_tail(
+    required_length: int,
+    *,
+    steel_length: Optional[int] = None,
+    adjustment_options: Tuple[int, ...] = WALER_TAIL_ADJUSTMENTS,
+    max_gap: int = WALER_MAX_GAP,
+    steel_step: int = 500,
+) -> Optional[WalerTailResolution]:
+    """Resolve one deterministic Steel + adjustment + Gap completion.
+
+    A shortfall already within ``max_gap`` never uses an adjustment block.
+    Otherwise the smallest non-zero adjustment that leaves a legal Gap wins.
+    ``None`` is a normal engineering no-solution result.
+    """
+
+    normalized_required = int(round(required_length))
+    normalized_max_gap = int(round(max_gap))
+    normalized_step = int(round(steel_step))
+    normalized_adjustments = tuple(
+        int(round(value)) for value in adjustment_options
+    )
+
+    if normalized_required < 0:
+        raise ValueError("required_length must not be negative")
+    if normalized_max_gap < 0:
+        raise ValueError("max_gap must not be negative")
+    if normalized_step <= 0:
+        raise ValueError("steel_step must be positive")
+    if not normalized_adjustments or 0 not in normalized_adjustments:
+        raise ValueError("adjustment_options must include zero")
+    if any(value < 0 for value in normalized_adjustments):
+        raise ValueError("adjustment_options must not contain negative values")
+
+    if steel_length is None:
+        normalized_steel = (
+            normalized_required // normalized_step
+        ) * normalized_step
+    else:
+        normalized_steel = int(round(steel_length))
+        if normalized_steel < 0:
+            raise ValueError("steel_length must not be negative")
+
+    shortfall = normalized_required - normalized_steel
+    if shortfall < 0:
+        return None
+    if shortfall <= normalized_max_gap:
+        return WalerTailResolution(normalized_steel, 0, shortfall)
+
+    for adjustment in sorted(set(normalized_adjustments) - {0}):
+        gap = shortfall - adjustment
+        if 0 <= gap <= normalized_max_gap:
+            return WalerTailResolution(normalized_steel, adjustment, gap)
+    return None
 
 
 def debug_print(*args) -> None:
@@ -92,7 +158,7 @@ class Config:
     max_piece_length: int = 10000
     joint_clearance_to_support: int = 300
     candidate_joint_step: int = 500
-    purchasable_lengths: List[int] = field(default_factory=list)
+    purchasable_lengths: Optional[List[int]] = None
     max_gap: int = WALER_MAX_GAP
     steel_target_length: int = field(init=False)
     tail_adjustment: int = field(init=False)
@@ -123,11 +189,22 @@ class Config:
     tournament_k: int = 4
 
     def __post_init__(self) -> None:
-        self.steel_target_length, self.tail_gap = resolve_waler_steel_target(
+        tail_resolution = resolve_waler_tail(
             self.total_length,
+            max_gap=self.max_gap,
             steel_step=self.candidate_joint_step,
         )
-        self.tail_adjustment = 0
+        if tail_resolution is None:
+            self.steel_target_length, raw_shortfall = resolve_waler_steel_target(
+                self.total_length,
+                steel_step=self.candidate_joint_step,
+            )
+            self.tail_adjustment = 0
+            self.tail_gap = raw_shortfall
+        else:
+            self.steel_target_length = tail_resolution.steel_length
+            self.tail_adjustment = tail_resolution.tail_adjustment
+            self.tail_gap = tail_resolution.gap
 
         if not self.candidate_joint_points:
             self.candidate_joint_points = generate_candidate_joint_points(
@@ -136,12 +213,14 @@ class Config:
                 self.candidate_joint_step,
             )
 
-        if not self.purchasable_lengths:
+        if self.purchasable_lengths is None:
             self.purchasable_lengths = list(range(
                 self.min_piece_length,
                 self.max_piece_length + 1,
                 self.candidate_joint_step,
             ))
+        else:
+            self.purchasable_lengths = list(self.purchasable_lengths)
 
     # 輸出
     top_n: int = 5
@@ -152,9 +231,9 @@ class WalerPlanIssue:
     """Runtime-only issue identity and normalized facts."""
 
     code: str
-    facts: Tuple[Tuple[str, int], ...] = ()
+    facts: Tuple[Tuple[str, object], ...] = ()
 
-    def fact(self, name: str) -> Optional[int]:
+    def fact(self, name: str) -> Optional[object]:
         return next((value for key, value in self.facts if key == name), None)
 
 
@@ -165,6 +244,8 @@ class WalerPlanEvaluation:
     valid: bool
     segments: Tuple[int, ...]
     joints: Tuple[int, ...]
+    tail_adjustment: Optional[int]
+    gap: Optional[int]
     issues: Tuple[WalerPlanIssue, ...]
     assignments: Optional[Tuple[Dict, ...]]
     total_waste: Optional[int]
@@ -214,10 +295,17 @@ def is_joint_allowed(point: int, cfg: Config) -> bool:
     return True
 
 
-def _waler_issue(code: str, **facts: int) -> WalerPlanIssue:
+def _waler_issue(code: str, **facts: object) -> WalerPlanIssue:
+    normalized_facts = []
+    for name, value in facts.items():
+        if isinstance(value, (tuple, list)):
+            normalized_value: object = tuple(int(item) for item in value)
+        else:
+            normalized_value = int(value)
+        normalized_facts.append((name, normalized_value))
     return WalerPlanIssue(
         code=code,
-        facts=tuple((name, int(value)) for name, value in facts.items()),
+        facts=tuple(normalized_facts),
     )
 
 
@@ -233,10 +321,31 @@ def _scan_waler_plan_issues(
 
     normalized_required = int(round(required_length))
     actual_steel_length = sum(segments)
-    minimum_steel_length = max(0, normalized_required - 200)
+    maximum_complete_shortfall = max(WALER_TAIL_ADJUSTMENTS) + cfg.max_gap
+    minimum_steel_length = max(
+        0,
+        normalized_required - maximum_complete_shortfall,
+    )
     has_issue = False
 
-    if actual_steel_length < minimum_steel_length:
+    if actual_steel_length > normalized_required:
+        has_issue = True
+        if issue_sink is None:
+            return True
+        issue_sink(
+            _waler_issue(
+                ISSUE_STEEL_TOTAL_LONG,
+                required_length=normalized_required,
+                actual_steel_length=actual_steel_length,
+            )
+        )
+    elif resolve_waler_tail(
+        normalized_required,
+        steel_length=actual_steel_length,
+        adjustment_options=WALER_TAIL_ADJUSTMENTS,
+        max_gap=cfg.max_gap,
+        steel_step=cfg.candidate_joint_step,
+    ) is None:
         has_issue = True
         if issue_sink is None:
             return True
@@ -245,17 +354,9 @@ def _scan_waler_plan_issues(
                 ISSUE_STEEL_TOTAL_SHORT,
                 required_length=normalized_required,
                 minimum_steel_length=minimum_steel_length,
-                actual_steel_length=actual_steel_length,
-            )
-        )
-    elif actual_steel_length > normalized_required:
-        has_issue = True
-        if issue_sink is None:
-            return True
-        issue_sink(
-            _waler_issue(
-                ISSUE_STEEL_TOTAL_LONG,
-                required_length=normalized_required,
+                maximum_complete_shortfall=maximum_complete_shortfall,
+                legal_adjustments=WALER_TAIL_ADJUSTMENTS,
+                max_gap=cfg.max_gap,
                 actual_steel_length=actual_steel_length,
             )
         )
@@ -609,6 +710,13 @@ def evaluate_waler_plan(
         if required_length is None
         else int(round(required_length))
     )
+    tail_resolution = resolve_waler_tail(
+        resolved_required_length,
+        steel_length=sum(normalized_segments),
+        adjustment_options=WALER_TAIL_ADJUSTMENTS,
+        max_gap=cfg.max_gap,
+        steel_step=cfg.candidate_joint_step,
+    )
     issues = _collect_waler_plan_issues(
         normalized_joints,
         normalized_segments,
@@ -625,6 +733,12 @@ def evaluate_waler_plan(
             valid=False,
             segments=tuple(normalized_segments),
             joints=tuple(normalized_joints),
+            tail_adjustment=(
+                None
+                if tail_resolution is None
+                else tail_resolution.tail_adjustment
+            ),
+            gap=None if tail_resolution is None else tail_resolution.gap,
             issues=tuple(issues),
             assignments=None,
             total_waste=None,
@@ -650,6 +764,8 @@ def evaluate_waler_plan(
             valid=False,
             segments=tuple(normalized_segments),
             joints=tuple(normalized_joints),
+            tail_adjustment=tail_resolution.tail_adjustment,
+            gap=tail_resolution.gap,
             issues=tuple(issues),
             assignments=None,
             total_waste=None,
@@ -694,6 +810,8 @@ def evaluate_waler_plan(
         valid=not issues,
         segments=tuple(normalized_segments),
         joints=tuple(normalized_joints),
+        tail_adjustment=tail_resolution.tail_adjustment,
+        gap=tail_resolution.gap,
         issues=tuple(issues),
         assignments=tuple(allocation["assignments"]),
         total_waste=allocation["total_waste"],
@@ -743,6 +861,8 @@ def evaluate_individual(
             "individual": individual[:],
             "joints": joints,
             "segments": segments,
+            "tail_adjustment": evaluation.tail_adjustment,
+            "gap": evaluation.gap,
             "valid": False,
             "errors": errors,
             "assignments": [],
@@ -756,6 +876,8 @@ def evaluate_individual(
             "individual": individual[:],
             "joints": joints,
             "segments": segments,
+            "tail_adjustment": evaluation.tail_adjustment,
+            "gap": evaluation.gap,
             "valid": False,
             "errors": ["無法配料，可能無合適庫存或可購買長度"],
             "assignments": [],
@@ -771,6 +893,8 @@ def evaluate_individual(
             "individual": individual[:],
             "joints": joints,
             "segments": segments,
+            "tail_adjustment": evaluation.tail_adjustment,
+            "gap": evaluation.gap,
             "valid": True,
             "errors": [],
             "assignments": list(evaluation.assignments or ()),
@@ -1189,11 +1313,16 @@ def create_individual(cfg: Config) -> List[int]:
     return repaired
 
 
-def initial_population(cfg: Config) -> List[List[int]]:
+def initial_population(
+    cfg: Config,
+    cancellation_token: CancellationToken | None = None,
+) -> List[List[int]]:
     debug_print("INITIAL POPULATION START")
     pop: List[List[int]] = []
     start = time.perf_counter()
     for i in range(cfg.population_size):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         debug_print(f"DEBUG: CREATE INDIVIDUAL {i+1}/{cfg.population_size}")
         pop.append(create_individual(cfg))
     elapsed = time.perf_counter() - start
@@ -1258,13 +1387,18 @@ def _run_generations(
     generation_count: int,
     start_generation: int,
     history_out: Optional[List[Dict]] = None,
+    cancellation_token: CancellationToken | None = None,
 ) -> Tuple[List[List[int]], List[Dict]]:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     evaluated_for_population = [
         evaluate_individual(individual, cfg, stock_items)
         for individual in population
     ]
 
     for generation_offset in range(generation_count):
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         gen_start = time.perf_counter()
         sorted_evaluated = sorted(
             evaluated_for_population,
@@ -1340,6 +1474,8 @@ def _run_generations(
             f"最佳方案分段={best['segments']}，"
             f"耗時={time.perf_counter() - gen_start:.6f} 秒"
         )
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
 
     return population, evaluated_for_population
 
@@ -1359,18 +1495,48 @@ def _log_performance_statistics() -> None:
     )
 
 
+def _result_tail_values(item: Dict, cfg: Config) -> Tuple[int, int]:
+    """Read canonical evaluator fields, with a legacy/synthetic fallback."""
+
+    tail_adjustment = item.get("tail_adjustment")
+    gap = item.get("gap")
+    if tail_adjustment is not None and gap is not None:
+        return int(tail_adjustment), int(gap)
+
+    steel_length = sum(item.get("segments", []) or [])
+    resolution = resolve_waler_tail(
+        cfg.total_length,
+        steel_length=steel_length,
+        adjustment_options=WALER_TAIL_ADJUSTMENTS,
+        max_gap=cfg.max_gap,
+        steel_step=cfg.candidate_joint_step,
+    )
+    if resolution is not None:
+        return resolution.tail_adjustment, resolution.gap
+    return 0, cfg.total_length - steel_length
+
+
 def _waler_result_signature(item: Dict, cfg: Config) -> Tuple[object, ...]:
     """Canonical uniqueness signature for a formal Waler result."""
 
+    tail_adjustment, gap = _result_tail_values(item, cfg)
     return (
         tuple(item.get("segments", []) or []),
         tuple(item.get("joints", []) or []),
-        0,
-        int(cfg.total_length - sum(item.get("segments", []) or [])),
+        tail_adjustment,
+        gap,
     )
 
 
-def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
+def _top_results(
+    final_evaluated: List[Dict],
+    cfg: Config,
+    *,
+    retain_all_final_results: bool = False,
+    cancellation_token: CancellationToken | None = None,
+) -> List[Dict]:
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     candidates = final_evaluated
 
     # 優先只保留有效方案；若沒有任何有效方案，再退回所有方案
@@ -1381,25 +1547,35 @@ def _top_results(final_evaluated: List[Dict], cfg: Config) -> List[Dict]:
     # 去重：使用完整正式幾何簽章，不只比較材料長度。
     unique = {}
     for item in candidates:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         key = _waler_result_signature(item, cfg)
         if key not in unique or item["score"] < unique[key]["score"]:
             unique[key] = item
 
     results = list(unique.values())
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     results.sort(key=lambda x: (x["score"], _waler_result_signature(x, cfg)))
     top_results = []
-    for item in results[: cfg.top_n]:
+    retained_results = results if retain_all_final_results else results[: cfg.top_n]
+    for item in retained_results:
+        if cancellation_token is not None:
+            cancellation_token.raise_if_cancelled()
         enriched = dict(item)
         pieces = [
             ("steel", length)
             for length in item.get("segments", [])
         ]
         steel_length = sum(item.get("segments", []) or [])
+        tail_adjustment, gap = _result_tail_values(item, cfg)
+        if tail_adjustment:
+            pieces.append(("shim", tail_adjustment))
         enriched.update(
             required_length=cfg.total_length,
             steel_length=steel_length,
-            tail_adjustment=0,
-            gap=cfg.total_length - steel_length,
+            tail_adjustment=tail_adjustment,
+            gap=gap,
             pieces=pieces,
         )
         top_results.append(enriched)
@@ -1419,13 +1595,17 @@ def evolve(
     stock_items: List[Dict],
     seed: int = DEFAULT_SEARCH_POLICY.waler_search_stages[0].random_seed,
     diagnostics_out: Optional[Dict[str, object]] = None,
+    cancellation_token: CancellationToken | None = None,
+    retain_all_final_results: bool = False,
 ) -> List[Dict]:
     """建立初始族群並執行 cfg.generations 代。"""
     _reset_performance_counters()
     debug_print("DEBUG: ENTER EVOLVE")
     random.seed(seed)
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     debug_print("DEBUG: START INITIAL_POPULATION")
-    population = initial_population(cfg)
+    population = initial_population(cfg, cancellation_token=cancellation_token)
     debug_print("DEBUG: END INITIAL_POPULATION")
 
     generation_history: List[Dict] = []
@@ -1436,10 +1616,20 @@ def evolve(
         cfg.generations,
         start_generation=0,
         history_out=generation_history,
+        cancellation_token=cancellation_token,
     )
 
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     _log_performance_statistics()
-    results = _top_results(final_evaluated, cfg)
+    results = _top_results(
+        final_evaluated,
+        cfg,
+        retain_all_final_results=retain_all_final_results,
+        cancellation_token=cancellation_token,
+    )
+    if cancellation_token is not None:
+        cancellation_token.raise_if_cancelled()
     if diagnostics_out is not None:
         valid_items = [item for item in final_evaluated if item.get("valid")]
         unique_valid_signatures = {

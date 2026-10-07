@@ -84,8 +84,10 @@ def recognize_result_material_specs(
     """Populate Waler/Strut specs from their recognized physical widths."""
 
     def recognize(member: Waler | Strut, usage: str) -> Waler | Strut:
-        if member.material_spec_source == "auto_hatch":
+        if member.material_spec_source in {"auto_hatch", "manual"}:
             return member
+        if isinstance(member, Waler) and member.source_width_state != "unique":
+            return replace(member, material_spec="", material_spec_source="")
         spec = recognize_material_spec_from_width(
             member.source_width,
             usage,

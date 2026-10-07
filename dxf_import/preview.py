@@ -46,6 +46,7 @@ class RenderDirty(IntFlag):
 
     NONE = 0
     FULL_SCENE = auto()
+    SOURCE_STYLE = auto()
     COMPONENT_LAYER = auto()
     CANDIDATE_LAYER = auto()
     COMPONENT_SELECTION = auto()
@@ -214,6 +215,30 @@ class PreviewRenderer:
     def delete_layer(self, layer: str) -> None:
         self.canvas.delete(layer)
         self.scene.clear_layer(layer)
+
+    def delete_source_handles(self, handles: Sequence[str]) -> None:
+        """Delete only canvas items indexed by the selected source handles."""
+
+        removed: set[int] = set()
+        for handle in tuple(dict.fromkeys(map(str, handles))):
+            for item_id in self.scene.source_handle_items.pop(handle, ()):
+                self.canvas.delete(item_id)
+                removed.add(item_id)
+        if not removed:
+            return
+        self.scene.source_geometry_items[:] = [
+            item_id
+            for item_id in self.scene.source_geometry_items
+            if item_id not in removed
+        ]
+        self.scene.auxiliary_geometry_items[:] = [
+            item_id
+            for item_id in self.scene.auxiliary_geometry_items
+            if item_id not in removed
+        ]
+        for item_id in removed:
+            self.scene.item_to_component.pop(item_id, None)
+            self.scene.item_to_candidate_point.pop(item_id, None)
 
     def _register(
         self,

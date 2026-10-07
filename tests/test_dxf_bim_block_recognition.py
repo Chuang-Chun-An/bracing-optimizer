@@ -59,15 +59,13 @@ from dxf_import.source_exclusion import (
     replay_manual_overrides,
 )
 from dxf_import.validation import build_problem_records, build_review_items
+from tests.sample_dxf_assets import Y05_DXF_PATH, Y1A_DXF_PATH, Y29_DXF_PATH
 
 
 STRUT_LAYER = "STRUT"
 BRACE_LAYER = "BRACE"
 WALER_LAYER = "WALER"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-Y05_DXF_PATH = next(PROJECT_ROOT.glob("670-CO-Y05*.dxf"), None)
-Y1A_DXF_PATH = PROJECT_ROOT / "Y1A擋土支撐簡化版.dxf"
-Y29_DXF_PATH = PROJECT_ROOT / "Y29_test.dxf"
 Y05_LAYER_ROLES = {
     "I-WALL": "continuous_wall",
     "0": "continuous_wall",

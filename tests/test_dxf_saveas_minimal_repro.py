@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
@@ -9,10 +11,11 @@ from typing import Any, Iterable
 
 import ezdxf
 from ezdxf.audit import AuditError
+from tests.sample_dxf_assets import Y1A_DXF_PATH
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_DXF = ROOT / "project_cases" / "Y1A站第一層支撐" / "source" / "source.dxf"
+SOURCE_DXF = Y1A_DXF_PATH
 FULL_EXPORT_DXF = ROOT / "source_配置標註.dxf"
 JACK_ASSET_DXF = ROOT / "assets" / "dxf" / "jack_symbol.dxf"
 ARTIFACT_DIR = ROOT / "tmp" / "dxf_minimal_repro"
@@ -509,9 +512,26 @@ def _write_report(cases: list[dict[str, Any]]) -> None:
 
 
 @unittest.skipUnless(SOURCE_DXF.is_file(), f"Missing fixture: {SOURCE_DXF}")
-@unittest.skipUnless(FULL_EXPORT_DXF.is_file(), f"Missing fixture: {FULL_EXPORT_DXF}")
 @unittest.skipUnless(JACK_ASSET_DXF.is_file(), f"Missing fixture: {JACK_ASSET_DXF}")
 class DXFSaveasMinimalReproTests(unittest.TestCase):
+    def test_y1a_user_material_immediate_saveas_preserves_source_hash(self):
+        source_hash = hashlib.sha256(SOURCE_DXF.read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "immediate-saveas.dxf"
+            document = ezdxf.readfile(SOURCE_DXF)
+            document.saveas(output_path)
+
+            self.assertTrue(output_path.is_file())
+            self.assertTrue(ezdxf.readfile(output_path).dxfversion)
+            self.assertEqual(
+                source_hash,
+                hashlib.sha256(SOURCE_DXF.read_bytes()).hexdigest(),
+            )
+
+    @unittest.skipUnless(
+        FULL_EXPORT_DXF.is_file(),
+        f"Missing fixture: {FULL_EXPORT_DXF}",
+    )
     def test_compare_source_saveas_dimension_block_and_full_export(self):
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 

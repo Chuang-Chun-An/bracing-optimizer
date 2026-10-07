@@ -10,8 +10,16 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from bracing_optimizer.algorithms import solver_search, support
+from bracing_optimizer.algorithms.cancellation import SolverCancelled
 from bracing_optimizer.application.optimize_support_zone import OptimizeSupportZoneRequest
 from bracing_optimizer.application.solver_input_builder import SupportZoneInput
+from bracing_optimizer.application.solver_operation_registry import (
+    CompletionDisposition,
+    SolverExecution,
+    SolverOperationRegistry,
+    SolverOperationUnavailable,
+    SolverSnapshotHandle,
+)
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
 from .solver_dialog_base import (
@@ -28,6 +36,9 @@ LOGGER = logging.getLogger(__name__)
 SUPPORT_SOLVER_CLOSE_BUSY_MESSAGE = (
     "支撐最佳化仍在計算中，請等待計算完成後再關閉。"
 )
+CAD_STALE_OPEN_MESSAGE = "CAD 已更新；請關閉後重新開啟 Solver"
+CAD_STALE_RUNNING_MESSAGE = "CAD 更新，計算已停止；請關閉後重新開啟 Solver"
+ADOPTION_BLOCKED_MESSAGE = "計算完成，但CAD ACK尚未完成，結果未採用"
 
 
 def _compact_support_ids(support_ids) -> str:
@@ -80,14 +91,21 @@ class SupportSolverDialog(SolverDialogThreadBridge):
         support_input: SupportZoneInput,
         callback,
         optimize_support_zone,
+        operation_registry: SolverOperationRegistry,
+        snapshot_handle: SolverSnapshotHandle,
+        adoption_guard,
     ):
         self.support_input = support_input
         self.zoning = support_input.zoning
         self.configs = support_input.configs
         self.callback = callback
         self.optimize_support_zone = optimize_support_zone
+        self.operation_registry = operation_registry
+        self.snapshot_handle = snapshot_handle
+        self.adoption_guard = adoption_guard
         self.solution = None
         self._calculation_running = False
+        self._snapshot_stale = False
 
         zoning = support_input.zoning
         configs = support_input.configs
@@ -304,6 +322,10 @@ class SupportSolverDialog(SolverDialogThreadBridge):
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         self._initialize_ui_bridge()
+        self.operation_registry.set_stale_listener(
+            self.snapshot_handle,
+            self._on_snapshot_stale,
+        )
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)
@@ -352,18 +374,38 @@ class SupportSolverDialog(SolverDialogThreadBridge):
             material_ratio_targets=material_ratio_targets,
             material_ratio_weight=support.SUPPORT_MATERIAL_RATIO_WEIGHT,
         )
+        execution = None
+        if hasattr(self, "operation_registry"):
+            try:
+                execution = self.operation_registry.start_execution(
+                    self.snapshot_handle
+                )
+            except SolverOperationUnavailable:
+                self._on_snapshot_stale("cad_update")
+                return
         self.run_button.configure(state="disabled")
         try:
             thread = threading.Thread(
                 target=self._solver_thread,
-                args=(request,),
+                args=(request, execution),
                 daemon=True,
             )
             self._calculation_running = True
             thread.start()
         except Exception:
+            if execution is not None:
+                self.operation_registry.abort_execution(
+                    self.snapshot_handle,
+                    execution.identity,
+                )
             self._calculation_running = False
-            self.run_button.configure(state="normal")
+            self.run_button.configure(
+                state=(
+                    "disabled"
+                    if getattr(self, "_snapshot_stale", False)
+                    else "normal"
+                )
+            )
             LOGGER.exception("Support Solver thread start failed")
             messagebox.showerror(
                 "支撐計算失敗",
@@ -371,7 +413,7 @@ class SupportSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
 
-    def _solver_thread(self, request):
+    def _solver_thread(self, request, execution: SolverExecution | None = None):
         def gui_logger(*args):
             message = " ".join(str(arg) for arg in args)
             if not message.endswith("\n"):
@@ -380,20 +422,31 @@ class SupportSolverDialog(SolverDialogThreadBridge):
 
         def on_progress(progress):
             self._post_ui(
-                lambda message=progress.message: self.summary_var.set(message)
+                lambda message=progress.message: self._show_progress_if_current(
+                    execution,
+                    message,
+                )
             )
 
+        operation_result = None
         solution = None
         diagnostics = None
         worker_error = None
         try:
-            result = self.optimize_support_zone.execute(
+            operation_result = self.optimize_support_zone.execute(
                 request,
                 on_progress=on_progress,
                 logger=gui_logger,
+                cancellation_token=(
+                    execution.cancellation_token
+                    if execution is not None
+                    else None
+                ),
             )
-            solution = result.solution
-            diagnostics = result.diagnostics
+            solution = operation_result.solution
+            diagnostics = operation_result.diagnostics
+        except SolverCancelled as exc:
+            worker_error = exc
         except Exception as exc:
             import traceback
 
@@ -404,25 +457,74 @@ class SupportSolverDialog(SolverDialogThreadBridge):
             self._post_ui(
                 lambda solution=solution,
                 diagnostics=diagnostics,
-                error=worker_error: self._finish_worker(
+                error=worker_error,
+                execution=execution,
+                operation_result=operation_result: self._finish_worker(
                     solution,
                     diagnostics,
                     error,
+                    execution=execution,
+                    operation_result=operation_result,
                 )
             )
 
-    def _finish_worker(self, solution, diagnostics, error):
+    def _show_progress_if_current(self, execution, message):
+        if execution is None or self.operation_registry.can_adopt(
+            self.snapshot_handle,
+            execution.identity,
+        ):
+            self.summary_var.set(message)
+
+    def _finish_worker(
+        self,
+        solution,
+        diagnostics,
+        error,
+        *,
+        execution: SolverExecution | None = None,
+        operation_result=None,
+    ):
+        disposition = CompletionDisposition.ADOPTABLE
+        if execution is not None:
+            disposition = self.operation_registry.complete_execution(
+                self.snapshot_handle,
+                execution.identity,
+            )
+        if disposition is CompletionDisposition.IGNORED:
+            return
         try:
-            if error is not None:
+            if disposition is CompletionDisposition.STALE or getattr(
+                self,
+                "_snapshot_stale",
+                False,
+            ):
+                self._snapshot_stale = True
+                self.summary_var.set(CAD_STALE_RUNNING_MESSAGE)
+            elif isinstance(error, SolverCancelled):
+                self.summary_var.set("計算已取消。")
+            elif error is not None:
                 self.summary_var.set(
                     "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
                 )
-            elif solution is not None:
-                self._display_solution(solution, diagnostics)
-            elif diagnostics is not None:
-                self._display_diagnostics_only(diagnostics)
             else:
-                self.summary_var.set("計算發生錯誤；Solver 未回傳結果。")
+                if execution is not None:
+                    try:
+                        self.adoption_guard()
+                    except RuntimeError:
+                        self.summary_var.set(ADOPTION_BLOCKED_MESSAGE)
+                        return
+                if solution is not None and execution is not None:
+                    self.callback(self.zoning, solution)
+                if operation_result is not None:
+                    self.optimize_support_zone.adopt_candidate_cache_updates(
+                        operation_result
+                    )
+                if solution is not None:
+                    self._display_solution(solution, diagnostics)
+                elif diagnostics is not None:
+                    self._display_diagnostics_only(diagnostics)
+                else:
+                    self.summary_var.set("計算發生錯誤；Solver 未回傳結果。")
         except Exception:
             LOGGER.exception("Support Solver result UI callback failed")
             self.summary_var.set(
@@ -430,7 +532,22 @@ class SupportSolverDialog(SolverDialogThreadBridge):
             )
         finally:
             self._calculation_running = False
-            self.run_button.configure(state="normal")
+            self.run_button.configure(
+                state=(
+                    "disabled"
+                    if getattr(self, "_snapshot_stale", False)
+                    else "normal"
+                )
+            )
+
+    def _on_snapshot_stale(self, _reason):
+        self._snapshot_stale = True
+        self.run_button.configure(state="disabled")
+        self.summary_var.set(
+            CAD_STALE_RUNNING_MESSAGE
+            if self._calculation_running
+            else CAD_STALE_OPEN_MESSAGE
+        )
 
     def _display_diagnostics_only(self, diagnostics):
         self.summary_var.set(self._format_support_engineer_summary(None, diagnostics))
@@ -615,7 +732,6 @@ class SupportSolverDialog(SolverDialogThreadBridge):
                 lines.append(f"  說明：{plan.reason}")
 
         self.text_writer.write("\n".join(lines) + "\n")
-        self.callback(self.zoning, solution)
 
     @staticmethod
     def _format_global_material_ratio_lines(solution):
@@ -653,6 +769,12 @@ class SupportSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
             return
+        if hasattr(self, "operation_registry"):
+            self.operation_registry.set_stale_listener(
+                self.snapshot_handle,
+                None,
+            )
+            self.operation_registry.close_snapshot(self.snapshot_handle)
         self._close_ui_bridge()
         self.dialog.destroy()
 

@@ -652,7 +652,15 @@ def rebuild_candidate_points_for_components(
         if member.id not in identifiers:
             return member
         rebuilt = builder.build(member)
-        return replace(rebuilt, selection_source=selection_source)
+        retained_selection_source = (
+            member.selection_source
+            if isinstance(member, Brace)
+            and selection_source == "waler_contact_adjustment"
+            and member.selection_source
+            in {"manual_candidate_points", "cad_manual"}
+            else selection_source
+        )
+        return replace(rebuilt, selection_source=retained_selection_source)
 
     return replace(
         result,
@@ -1027,152 +1035,6 @@ def ambiguous_column_repair_options(
     return AmbiguousColumnRepairOptions(column.id, options[:2])
 
 
-def _associate_components_to_struts_legacy(
-    struts: Sequence[Strut],
-    columns: Sequence[Column],
-    beams: Sequence[Beam],
-    tolerances: GeometryTolerances | None = None,
-) -> tuple[
-    tuple[Strut, ...],
-    tuple[Column, ...],
-    tuple[Beam, ...],
-    tuple[ComponentAssociation, ...],
-    tuple[ValidationMessage, ...],
-]:
-    """Assign every Column/Beam to exactly one nearest valid Strut."""
-
-    tolerances = tolerances or GeometryTolerances()
-    assignments: dict[str, dict[str, list[tuple[float, str]]]] = {
-        strut.id: {"column": [], "beam": []} for strut in struts
-    }
-    associations: list[ComponentAssociation] = []
-    messages: list[ValidationMessage] = []
-
-    def associate_component(
-        component: Column | Beam,
-        role: str,
-    ) -> Column | Beam:
-        component_start = component.world_start or component.start
-        component_end = component.world_end or component.end
-        center = (
-            component.world_reference_point
-            if isinstance(component, Column)
-            and component.world_reference_point is not None
-            else _midpoint(component_start, component_end)
-        )
-        options: list[tuple[float, str, float, Point]] = []
-        for strut in struts:
-            strut_start = strut.world_start or strut.start
-            strut_end = strut.world_end or strut.end
-            axis = _unit(strut_start, strut_end)
-            strut_length = _length(strut_start, strut_end)
-            if axis is None or strut_length <= 1e-9:
-                continue
-            station = _dot(_vector(strut_start, center), axis)
-            if not (0.0 <= station <= strut_length):
-                continue
-            projection = (
-                strut_start[0] + axis[0] * station,
-                strut_start[1] + axis[1] * station,
-            )
-            distance = _distance(center, projection)
-            if distance > _column_association_tolerance(
-                component,
-                strut,
-                tolerances,
-            ):
-                continue
-            options.append((distance, strut.id, station, projection))
-        options.sort(key=lambda item: (item[0], item[1]))
-        if not options:
-            label = "中間柱" if role == "column" else "托梁"
-            messages.append(
-                ValidationMessage(
-                    "error",
-                    f"{role.upper()}_NOT_ASSOCIATED",
-                    f"{component.id} 無法在有效範圍及容差內找到所屬支撐。",
-                    role,
-                    component.source_handles,
-                )
-            )
-            return replace(
-                component,
-                associated_strut_id="",
-                association_station=None,
-                association_distance=None,
-                world_association_point=None,
-                local_association_point=None,
-            )
-        distance, strut_id, station, projection = options[0]
-        if (
-            len(options) > 1
-            and options[1][0] - distance
-            <= tolerances.ambiguous_connection_delta_mm
-        ):
-            messages.append(
-                ValidationMessage(
-                    "warning",
-                    "AMBIGUOUS_COMPONENT_ASSOCIATION",
-                    f"{component.id} 同時接近 {strut_id} 與 {options[1][1]}，採用距離較近的 {strut_id}。",
-                    role,
-                    component.source_handles,
-                )
-            )
-        assignments[strut_id][role].append((station, component.id))
-        associations.append(
-            ComponentAssociation(
-                component.id,
-                role,
-                strut_id,
-                station,
-                distance,
-                projection,
-                projection,
-            )
-        )
-        return replace(
-            component,
-            associated_strut_id=strut_id,
-            association_station=station,
-            association_distance=distance,
-            world_association_point=projection,
-            local_association_point=projection,
-        )
-
-    associated_columns = tuple(
-        associate_component(component, "column") for component in columns
-    )
-    associated_beams = tuple(
-        associate_component(component, "beam") for component in beams
-    )
-
-    def unique_stations(values: Sequence[tuple[float, str]]) -> tuple[float, ...]:
-        stations: list[float] = []
-        for station, _identifier in sorted(values):
-            if not any(abs(station - existing) <= 1.0 for existing in stations):
-                stations.append(station)
-        return tuple(stations)
-
-    associated_struts = []
-    for strut in struts:
-        column_values = sorted(assignments[strut.id]["column"])
-        beam_values = sorted(assignments[strut.id]["beam"])
-        associated_struts.append(
-            replace(
-                strut,
-                associated_columns=tuple(identifier for _station, identifier in column_values),
-                associated_beams=tuple(identifier for _station, identifier in beam_values),
-                column_positions=unique_stations(column_values),
-                beam_positions=unique_stations(beam_values),
-            )
-        )
-    return (
-        tuple(associated_struts),
-        associated_columns,
-        associated_beams,
-        tuple(associations),
-        tuple(messages),
-    )
 
 
 def _canonical_segment_key(segment: tuple[Point, Point]) -> tuple[Point, Point]:

@@ -246,6 +246,18 @@ def _line_separation(first: tuple[Point, Point], second: tuple[Point, Point]) ->
     ) / 4
 
 
+def _supporting_line_separation(
+    first: tuple[Point, Point],
+    second: tuple[Point, Point],
+) -> float:
+    """Return symmetric perpendicular separation of two supporting lines."""
+
+    return (
+        _line_distance(_midpoint(*first), *second)
+        + _line_distance(_midpoint(*second), *first)
+    ) / 2.0
+
+
 def _ordered_line(start: Point, end: Point) -> tuple[Point, Point]:
     return (start, end) if start <= end else (end, start)
 

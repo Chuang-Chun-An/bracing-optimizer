@@ -193,6 +193,7 @@ Application / Domain contract
 Domain → UI
 Algorithms → UI
 Domain → Infrastructure
+```
 
 若現有程式存在歷史例外，
 不要為了單一功能順手重構整個架構。

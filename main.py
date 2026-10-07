@@ -65,6 +65,10 @@ from dxf_import.source_exclusion import (
     source_file_fingerprint,
 )
 from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
+from bracing_optimizer.application.solver_operation_registry import (
+    SolverKind,
+    SolverOperationRegistry,
+)
 from bracing_optimizer.presentation.cad_view_interaction import (
     CADViewInteractionController,
 )
@@ -104,14 +108,23 @@ from bracing_optimizer.application.project_results import (
     MaterialDetailBuildError,
     ProjectResultModel,
 )
+from bracing_optimizer.application.project_state_transactions import (
+    CadEventMutationOutcome,
+    ProjectStateMutationOutcome,
+)
 from bracing_optimizer.application.optimize_waler import (
     is_rc_waler_material,
     partition_waler_optimization_inputs,
 )
 from bracing_optimizer.application.project_validation import ProjectDataValidator
+from bracing_optimizer.application.software_information import SoftwareInformation
+from bracing_optimizer.infrastructure.software_history import SoftwareHistoryRepository
+from bracing_optimizer.product_metadata import PRODUCT_IDENTITY
 from bracing_optimizer.presentation import (
     PreviewNavigationToolbar,
+    ProjectSelectionDialog,
     SolverDialogThreadBridge,
+    SoftwareInformationDialog,
     SupportSolverDialog,
     TextRedirector,
     WalerSelectionDialog,
@@ -136,6 +149,91 @@ APP_DIR = (
     else RESOURCE_DIR
 )
 LOGGER = logging.getLogger(__name__)
+APP_ICON_DIR = RESOURCE_DIR / "assets" / "app_icon"
+APP_ICON_PNG_PATHS = tuple(
+    APP_ICON_DIR / f"support_optimizer_transparent_{size}.png"
+    for size in (256, 64, 32, 16)
+)
+APP_ICON_ICO_PATH = APP_ICON_DIR / "support_optimizer_transparent.ico"
+WINDOWS_APP_USER_MODEL_ID = "SupportOptimizer.Desktop"
+WORKSPACE_NOTEBOOK_STYLES = {
+    "Primary": {
+        "background": "#DCE6ED",
+        "foreground": "#253746",
+        "selected_background": "#2F5D7C",
+        "selected_foreground": "#FFFFFF",
+        "active_background": "#BFD2DF",
+        "active_foreground": "#173B57",
+        "disabled_background": "#ECEFF1",
+        "disabled_foreground": "#90A4AE",
+        "padding": (12, 6),
+    },
+    "Secondary": {
+        "background": "#EEF3F6",
+        "foreground": "#425466",
+        "selected_background": "#C8DDEA",
+        "selected_foreground": "#173B57",
+        "active_background": "#DDEAF2",
+        "active_foreground": "#264A60",
+        "disabled_background": "#F4F6F7",
+        "disabled_foreground": "#9AA7AF",
+        "padding": (10, 4),
+    },
+}
+
+
+def _set_windows_app_user_model_id() -> None:
+    """Give Windows a stable taskbar identity before Tk creates a window."""
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        result = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            WINDOWS_APP_USER_MODEL_ID
+        )
+        if result != 0:
+            LOGGER.warning("Windows AppUserModelID setup returned HRESULT %s", result)
+    except (AttributeError, OSError):
+        LOGGER.warning("Windows AppUserModelID setup failed", exc_info=True)
+
+
+def _apply_application_icon(root: tk.Tk) -> None:
+    """Apply Tk photo icons and the native Windows multi-size ICO."""
+
+    if sys.platform == "win32":
+        try:
+            icon_path = str(APP_ICON_ICO_PATH)
+            # Set the class default for future Toplevel windows, then set the
+            # already-created root explicitly so Windows receives both its
+            # large and small per-window icon handles.
+            root.iconbitmap(default=icon_path)
+            root.iconbitmap(icon_path)
+            return
+        except (OSError, tk.TclError):
+            LOGGER.warning(
+                "Unable to apply native Windows app icon: %s",
+                APP_ICON_ICO_PATH,
+                exc_info=True,
+            )
+
+    # iconphoto and iconbitmap override one another on Windows.  PNG photos
+    # are the portable path and the Windows fallback when ICO loading fails.
+    icon_photos = []
+    for icon_path in APP_ICON_PNG_PATHS:
+        try:
+            icon_photos.append(tk.PhotoImage(master=root, file=str(icon_path)))
+        except (OSError, tk.TclError):
+            LOGGER.warning("Unable to load Tk app icon: %s", icon_path, exc_info=True)
+
+    if icon_photos:
+        try:
+            root.iconphoto(True, *icon_photos)
+        except tk.TclError:
+            LOGGER.warning("Unable to apply Tk app icon photos", exc_info=True)
+        # Tk keeps image names, while Python owns the PhotoImage objects.
+        root._support_optimizer_icon_photos = tuple(icon_photos)
 
 
 @dataclass(frozen=True)
@@ -236,6 +334,20 @@ class SupportInputApp:
     DXF_BINDING_FIELDS = PROJECT_DXF_BINDING_FIELDS
     DXF_BINDING_STALE_KEY = "project_binding_stale"
     DXF_BINDING_STALE_REASON_KEY = "project_binding_stale_reason"
+    PROJECT_WARNING_DXF_STATUSES = frozenset({
+        DxfStatus.MANAGED_COPY_MODIFIED,
+        DxfStatus.SOURCE_MODIFIED,
+        DxfStatus.MISSING,
+        DxfStatus.RELINK_REQUIRED,
+        DxfStatus.BINDING_REQUIRED,
+        DxfStatus.LEGACY_NO_STATE,
+        DxfStatus.INCOMPATIBLE,
+        DxfStatus.GEOMETRY_COMPATIBLE,
+    })
+    PROJECT_PENDING_SAVE_DXF_STATUSES = frozenset({
+        DxfStatus.RUNTIME_READY,
+        DxfStatus.VERIFIED_PENDING_SAVE,
+    })
 
     def _current_dxf_workflow_status(self):
         raw = getattr(self, "dxf_workflow_status", None)
@@ -309,6 +421,139 @@ class SupportInputApp:
         self.project_dirty_reason = ""
         self._update_window_title()
 
+    def _current_runtime_outcome(self):
+        """Capture all formal runtime references without copying or mutating them."""
+
+        return ProjectStateMutationOutcome(
+            project_data=self._ensure_project_data(),
+            project_results=self._ensure_project_results(),
+            solver_memory=getattr(self, "solver_memory", {}),
+            support_candidate_cache=getattr(
+                self, "support_candidate_cache", {}
+            ),
+            dxf_workflow_status=getattr(
+                self, "dxf_workflow_status", DxfWorkflowStatus.NONE
+            ),
+            dxf_review_session=getattr(self, "dxf_review_session", None),
+            dxf_last_import_debug=getattr(
+                self, "dxf_last_import_debug", None
+            ),
+            dxf_asset=getattr(self, "dxf_asset", None),
+            dxf_asset_status_report=getattr(
+                self, "dxf_asset_status_report", None
+            ),
+            last_dxf_compatibility_report=getattr(
+                self, "last_dxf_compatibility_report", None
+            ),
+            last_dxf_recovery_summary=getattr(
+                self, "last_dxf_recovery_summary", None
+            ),
+            last_cad_validation_report=getattr(
+                self, "last_cad_validation_report", None
+            ),
+            current_project_path=getattr(self, "current_project_path", None),
+            project_dirty=bool(getattr(self, "project_dirty", False)),
+            project_dirty_reason=str(
+                getattr(self, "project_dirty_reason", "") or ""
+            ),
+        )
+
+    def _commit_runtime_outcome(self, outcome):
+        """Commit by plain reference/scalar assignment only.
+
+        All validation, copying, serialization, cache construction and UI work
+        belongs before or after this method.
+        """
+
+        self.project_data = outcome.project_data
+        self._project_results = outcome.project_results
+        self.solver_memory = outcome.solver_memory
+        self.support_candidate_cache = outcome.support_candidate_cache
+        self.dxf_workflow_status = outcome.dxf_workflow_status
+        self.dxf_review_session = outcome.dxf_review_session
+        self.dxf_last_import_debug = outcome.dxf_last_import_debug
+        self.dxf_asset = outcome.dxf_asset
+        self.dxf_asset_status_report = outcome.dxf_asset_status_report
+        self.last_dxf_compatibility_report = outcome.last_dxf_compatibility_report
+        self.last_dxf_recovery_summary = outcome.last_dxf_recovery_summary
+        self.last_cad_validation_report = outcome.last_cad_validation_report
+        self.current_project_path = outcome.current_project_path
+        self.project_dirty = outcome.project_dirty
+        self.project_dirty_reason = outcome.project_dirty_reason
+
+    def _refresh_projection_guard_ui(self):
+        self._sync_main_menu_projection()
+
+    def _mark_projection_stale(self, error):
+        self.projection_stale = True
+        self.projection_error = str(error)
+        try:
+            self._refresh_projection_guard_ui()
+        except Exception:
+            LOGGER.exception("Projection guard UI refresh failed")
+
+    def _project_after_commit(self, callback):
+        try:
+            return callback()
+        except Exception as exc:
+            self._mark_projection_stale(exc)
+            raise
+
+    def _ensure_mutation_allowed(self):
+        if getattr(self, "cad_ack_unresolved_event_id", None) is not None:
+            raise RuntimeError(
+                "CAD 事件已套用但 ACK 尚未完成；請先處理待確認事件。"
+            )
+        if getattr(self, "projection_stale", False):
+            raise RuntimeError(
+                "畫面尚未完整重新整理；請先按「重新整理全部畫面」。"
+            )
+
+    def _project_all_runtime_state(self):
+        for table_name in (
+            "walers",
+            "struts",
+            "braces",
+            "inventory",
+            "material_specs",
+        ):
+            self._refresh_tree(table_name)
+        self._refresh_results_tree()
+        self._update_material_summary()
+        self.update_preview()
+        self._refresh_project_status_display()
+        self._refresh_dxf_workflow_ui()
+        self._refresh_cad_import_status()
+        if hasattr(self, "notebook"):
+            self._sync_current_table_from_active_tabs()
+        if hasattr(self, "context_toolbar"):
+            self._update_context_toolbar()
+        self._update_project_action_states()
+        self._update_window_title()
+
+    def _reproject_all_from_committed_state(self):
+        """User recovery entry; only a fully successful pass unlocks editing."""
+
+        try:
+            self._project_all_runtime_state()
+        except Exception as exc:
+            self._mark_projection_stale(exc)
+            try:
+                messagebox.showerror(
+                    "重新整理失敗",
+                    f"畫面仍維持鎖定：\n{exc}",
+                    parent=getattr(self, "root", None),
+                )
+            except Exception:
+                pass
+            return False
+        self.projection_stale = False
+        self.projection_error = ""
+        self._refresh_projection_guard_ui()
+        if getattr(self, "cad_import_enabled", False):
+            self._schedule_cad_event_poll()
+        return True
+
     def _ensure_project_services(self):
         service = getattr(self, "project_service", None)
         if service is not None:
@@ -371,9 +616,21 @@ class SupportInputApp:
             self.waler_solver_guard = guard
         return guard
 
+    def _ensure_solver_operation_registry(self):
+        registry = getattr(self, "solver_operation_registry", None)
+        if registry is None:
+            registry = SolverOperationRegistry()
+            self.solver_operation_registry = registry
+        return registry
+
     def _show_waler_solver_busy(self, workflow):
         LOGGER.warning("%s Waler blocked by busy guard", workflow)
-        message = "目前已有圍令計算正在執行，請等待完成後再試。"
+        registry = self._ensure_solver_operation_registry()
+        message = (
+            "前一次計算正在停止，請稍後再試"
+            if registry.has_stale_running_waler()
+            else "目前已有圍令計算正在執行，請等待完成後再試。"
+        )
         messagebox.showwarning("圍令計算中", message, parent=self.root)
         self.show_result(message)
 
@@ -493,6 +750,8 @@ class SupportInputApp:
         self.current_project_path = None
         self.project_dirty = False
         self.project_dirty_reason = ""
+        self.projection_stale = False
+        self.projection_error = ""
         self.dxf_asset = None
         self.dxf_asset_status_report = self.project_service.inspect_dxf_state(
             None, None, None
@@ -501,6 +760,7 @@ class SupportInputApp:
         self.last_dxf_recovery_summary = None
         self.solver_memory = {}
         self.support_candidate_cache = {}
+        self.solver_operation_registry = SolverOperationRegistry()
         self.cad_import_enabled = True
         self.dxf_dialog_active = False
         self.dxf_import_status = "尚未執行 DXF 批次匯入"
@@ -508,12 +768,14 @@ class SupportInputApp:
         self.cad_import_status = "等待 CAD 事件"
         self.cad_last_event = None
         self.cad_last_error = None
+        self.cad_ack_unresolved_event_id = None
+        self.cad_ack_unresolved_event = None
         self.last_cad_validation_report = None
         self.dxf_last_import_debug = None
         self.dxf_workflow_status = DxfWorkflowStatus.NONE
         self.dxf_review_session = None
         self._cad_poll_after_id = None
-        self.project_cases_dir.mkdir(exist_ok=True)
+        self.project_cases_dir.mkdir(parents=True, exist_ok=True)
         self.inventory = self._load_default_inventory()
 
         self.table_columns = {
@@ -558,6 +820,7 @@ class SupportInputApp:
         self.treeviews = {}
         self.current_table = "walers"
         self.editing_entry = None
+        self.editing_context = None
 
         self._build_ui()
         self._load_initial_data()
@@ -569,6 +832,7 @@ class SupportInputApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
 
     def _build_ui(self):
+        self._configure_workspace_notebook_styles()
         self._build_project_menu_and_toolbar()
 
         self.main_paned = ttk.PanedWindow(self.root, orient="horizontal")
@@ -579,7 +843,7 @@ class SupportInputApp:
         self.main_paned.add(self.left_frame, weight=1)
         self.main_paned.add(self.right_frame, weight=1)
 
-        self.notebook = ttk.Notebook(self.left_frame)
+        self.notebook = ttk.Notebook(self.left_frame, style="Primary.TNotebook")
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -588,7 +852,7 @@ class SupportInputApp:
             self.engineering_workspace,
             text=self.workspace_tab_labels["engineering"],
         )
-        self.engineering_notebook = ttk.Notebook(self.engineering_workspace)
+        self.engineering_notebook = ttk.Notebook(self.engineering_workspace, style="Secondary.TNotebook")
         self.engineering_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.engineering_notebook.bind(
             "<<NotebookTabChanged>>",
@@ -613,7 +877,7 @@ class SupportInputApp:
             self.materials_workspace,
             text=self.workspace_tab_labels["materials"],
         )
-        self.materials_notebook = ttk.Notebook(self.materials_workspace)
+        self.materials_notebook = ttk.Notebook(self.materials_workspace, style="Secondary.TNotebook")
         self.materials_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.settings_notebook = self.materials_notebook
         self._create_table_tab(
@@ -692,6 +956,83 @@ class SupportInputApp:
 
         self._build_preview(self.right_frame)
         self._update_context_toolbar()
+
+    def _configure_workspace_notebook_styles(self):
+        """Give the main and nested workspaces distinct, local tab styles."""
+
+        style = ttk.Style(master=self.root)
+        for role, colors in WORKSPACE_NOTEBOOK_STYLES.items():
+            notebook_style = f"{role}.TNotebook"
+            tab_style = f"{notebook_style}.Tab"
+            tab_element = f"{role}.Notebook.tab"
+            if tab_element not in style.element_names():
+                style.element_create(
+                    tab_element,
+                    "from",
+                    "clam",
+                    "Notebook.tab",
+                )
+            style.layout(
+                tab_style,
+                [
+                    (
+                        tab_element,
+                        {
+                            "sticky": "nswe",
+                            "children": [
+                                (
+                                    "Notebook.padding",
+                                    {
+                                        "side": "top",
+                                        "sticky": "nswe",
+                                        "children": [
+                                            (
+                                                "Notebook.focus",
+                                                {
+                                                    "side": "top",
+                                                    "sticky": "nswe",
+                                                    "children": [
+                                                        (
+                                                            "Notebook.label",
+                                                            {
+                                                                "side": "top",
+                                                                "sticky": "",
+                                                            },
+                                                        )
+                                                    ],
+                                                },
+                                            )
+                                        ],
+                                    },
+                                )
+                            ],
+                        },
+                    )
+                ],
+            )
+            style.configure(
+                notebook_style,
+                background=colors["background"],
+            )
+            style.configure(
+                tab_style,
+                background=colors["background"],
+                foreground=colors["foreground"],
+                padding=colors["padding"],
+            )
+            style.map(
+                tab_style,
+                background=[
+                    ("disabled", colors["disabled_background"]),
+                    ("selected", colors["selected_background"]),
+                    ("active", colors["active_background"]),
+                ],
+                foreground=[
+                    ("disabled", colors["disabled_foreground"]),
+                    ("selected", colors["selected_foreground"]),
+                    ("active", colors["active_foreground"]),
+                ],
+            )
 
     def _build_execution_messages(self, parent):
         self.execution_message_frame = ttk.LabelFrame(parent, text="Solver 診斷與執行訊息")
@@ -1567,6 +1908,8 @@ class SupportInputApp:
     ):
         """Parse, locally validate, commit, and run shared post-processing."""
 
+        self._ensure_mutation_allowed()
+
         rows = getattr(self, table_name, ())
         if not (0 <= index < len(rows)):
             return False, None, "找不到要修改的資料列。"
@@ -1624,68 +1967,199 @@ class SupportInputApp:
         self._sync_preview_to_strut_selection(index)
 
     def _build_project_menu_and_toolbar(self):
-        """Expose project file operations without consuming a workspace tab."""
+        """Expose Project operations through the native application menu."""
 
-        menu_bar = tk.Menu(self.root)
+        menu_bar = tk.Menu(self.root, tearoff=False)
         file_menu = tk.Menu(menu_bar, tearoff=False)
-        file_menu.add_command(label="新建專案", command=self._new_project)
-        file_menu.add_command(label="開啟選取專案", command=self._load_selected_project_case)
-        file_menu.add_command(label="儲存專案", command=self._save_current_project)
-        file_menu.add_command(label="另存新專案", command=self._save_project_as)
+        file_menu.add_command(
+            label="新建專案",
+            accelerator="Ctrl+N",
+            command=self._new_project,
+        )
+        file_menu.add_command(
+            label="開啟專案…",
+            accelerator="Ctrl+O",
+            command=self._load_selected_project_case,
+        )
         file_menu.add_separator()
-        file_menu.add_command(label="重新連結 DXF", command=self._relink_dxf)
-        file_menu.add_command(label="專案與 DXF 狀態", command=self._show_project_status)
-        file_menu.add_command(label="刪除選取專案", command=self._delete_selected_project_case)
+        file_menu.add_command(
+            label="儲存專案",
+            accelerator="Ctrl+S",
+            command=self._save_current_project,
+        )
+        file_menu.add_command(
+            label="另存新專案…",
+            accelerator="Ctrl+Shift+S",
+            command=self._save_project_as,
+        )
         file_menu.add_separator()
         file_menu.add_command(label="結束", command=self._on_main_window_close)
         menu_bar.add_cascade(label="檔案", menu=file_menu)
+
+        project_menu = tk.Menu(menu_bar, tearoff=False)
+        project_menu.add_command(
+            label="專案與 DXF 狀態…",
+            command=self._show_project_status,
+        )
+        project_menu.add_separator()
+        project_menu.add_command(
+            label="重新連結 DXF…",
+            command=self._relink_dxf,
+        )
+        project_menu.add_separator()
+        project_menu.add_command(
+            label="刪除目前專案…",
+            command=self._delete_current_project_case,
+        )
+        menu_bar.add_cascade(label="專案", menu=project_menu)
+        self.project_menu_index = menu_bar.index("end")
+
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        help_menu.add_command(
+            label="軟體資訊",
+            command=self._show_software_information,
+        )
+        menu_bar.add_cascade(label="說明", menu=help_menu)
         self.root.configure(menu=menu_bar)
+        self.menu_bar = menu_bar
         self.file_menu = file_menu
-
-        toolbar = ttk.Frame(self.root, padding=(8, 5))
-        toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="新建", command=self._new_project).pack(
-            side="left",
-            padx=(0, 4),
-        )
-        ttk.Label(toolbar, text="專案：").pack(side="left", padx=(8, 3))
-        self.project_case_var = tk.StringVar(value="")
-        self.project_case_selector = ttk.Combobox(
-            toolbar,
-            textvariable=self.project_case_var,
-            state="readonly",
-            width=26,
-        )
-        self.project_case_selector.pack(side="left", padx=(0, 4))
-        self.project_case_selector.bind(
-            "<<ComboboxSelected>>",
-            self._update_project_action_states,
-        )
-        self.open_project_button = ttk.Button(
-            toolbar,
-            text="開啟",
-            command=self._load_selected_project_case,
-        )
-        self.open_project_button.pack(side="left", padx=(0, 4))
-        ttk.Button(toolbar, text="儲存", command=self._save_current_project).pack(
-            side="left",
-            padx=(0, 4),
-        )
-        ttk.Button(toolbar, text="另存", command=self._save_project_as).pack(
-            side="left",
-            padx=(0, 8),
-        )
-
-        self.project_quick_status_var = tk.StringVar(value="目前專案：未命名專案")
-        ttk.Label(
-            toolbar,
-            textvariable=self.project_quick_status_var,
-            foreground="#455a64",
-        ).pack(side="right", padx=(8, 4))
+        self.project_menu = project_menu
+        self.help_menu = help_menu
+        self._reprojection_menu_visible = False
         self.project_asset_status_var = tk.StringVar(value="")
-        self._refresh_project_case_list()
+        self._bind_project_shortcuts()
         self._refresh_project_status_display()
         self._update_project_action_states()
+
+    def _bind_project_shortcuts(self):
+        bindings = (
+            ("<Control-n>", "new", self._new_project),
+            ("<Control-o>", "open", self._load_selected_project_case),
+            ("<Control-s>", "save", self._save_current_project),
+            ("<Control-Shift-S>", "save_as", self._save_project_as),
+        )
+        self.project_shortcut_bindings = {}
+        for sequence, command_name, handler in bindings:
+            def invoke(event, name=command_name, callback=handler):
+                return self._invoke_project_shortcut(event, name, callback)
+
+            self.project_shortcut_bindings[sequence] = invoke
+            self.root.bind(sequence, invoke)
+
+    def _invoke_project_shortcut(self, _event, command_name, handler):
+        focus_widget = self.root.focus_get()
+        if focus_widget is None:
+            return None
+        try:
+            focus_root = focus_widget.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            return None
+        if focus_root is not self.root:
+            return None
+        if not self._project_command_is_enabled(command_name):
+            return "break"
+        handler()
+        return "break"
+
+    def _project_command_is_enabled(self, command_name):
+        if command_name in {"new", "open", "save", "save_as", "relink"}:
+            return not getattr(self, "projection_stale", False)
+        if command_name == "delete":
+            return (
+                not getattr(self, "projection_stale", False)
+                and self._validated_current_project_target() is not None
+            )
+        return True
+
+    def _project_menu_label(self):
+        report = getattr(self, "dxf_asset_status_report", None)
+        status = getattr(report, "status", None)
+        if status in self.PROJECT_WARNING_DXF_STATUSES:
+            return "專案 ⚠"
+        if status in self.PROJECT_PENDING_SAVE_DXF_STATUSES:
+            return "專案 待儲存"
+        return "專案"
+
+    @staticmethod
+    def _configure_menu_state(menu, label, enabled):
+        try:
+            menu.entryconfigure(
+                label,
+                state="normal" if enabled else "disabled",
+            )
+        except tk.TclError:
+            pass
+
+    def _sync_main_menu_projection(self):
+        menu_bar = getattr(self, "menu_bar", None)
+        file_menu = getattr(self, "file_menu", None)
+        project_menu = getattr(self, "project_menu", None)
+        project_menu_index = getattr(self, "project_menu_index", None)
+        if (
+            menu_bar is None
+            or file_menu is None
+            or project_menu is None
+            or project_menu_index is None
+        ):
+            return
+
+        try:
+            menu_bar.entryconfigure(
+                project_menu_index,
+                label=self._project_menu_label(),
+            )
+        except tk.TclError:
+            pass
+
+        for label, command_name in (
+            ("新建專案", "new"),
+            ("開啟專案…", "open"),
+            ("儲存專案", "save"),
+            ("另存新專案…", "save_as"),
+        ):
+            self._configure_menu_state(
+                file_menu,
+                label,
+                self._project_command_is_enabled(command_name),
+            )
+        self._configure_menu_state(project_menu, "專案與 DXF 狀態…", True)
+        self._configure_menu_state(
+            project_menu,
+            "重新連結 DXF…",
+            self._project_command_is_enabled("relink"),
+        )
+        self._configure_menu_state(
+            project_menu,
+            "刪除目前專案…",
+            self._project_command_is_enabled("delete"),
+        )
+
+        stale = bool(getattr(self, "projection_stale", False))
+        visible = bool(getattr(self, "_reprojection_menu_visible", False))
+        reprojection_menu_index = project_menu_index + 1
+        if stale and not visible:
+            menu_bar.insert_command(
+                reprojection_menu_index,
+                label="⚠ 重新整理畫面",
+                command=self._reproject_all_from_committed_state,
+            )
+            self._reprojection_menu_visible = True
+        elif not stale and visible:
+            try:
+                menu_bar.delete(reprojection_menu_index)
+            except tk.TclError:
+                pass
+            self._reprojection_menu_visible = False
+
+    def _show_software_information(self):
+        history = SoftwareHistoryRepository(
+            RESOURCE_DIR / "assets" / "software_history.json"
+        ).load()
+        information = SoftwareInformation(
+            identity=PRODUCT_IDENTITY,
+            history=history,
+        )
+        SoftwareInformationDialog(self.root, information).open()
 
     def _show_project_status(self):
         self._refresh_project_status_display()
@@ -1849,6 +2323,11 @@ class SupportInputApp:
             text="重新顯示狀態",
             command=self._refresh_cad_import_status,
         ).pack(side="left")
+        ttk.Button(
+            action_frame,
+            text="重新處理待確認事件",
+            command=self._resolve_cad_ack_failure,
+        ).pack(side="left", padx=(6, 0))
 
         instructions = (
             "本頁只負責在既有工程模型中新增單一構件。使用方式：先在 progeCAD 載入 "
@@ -1866,7 +2345,7 @@ class SupportInputApp:
 
     def _create_results_tab(self, parent=None):
         parent = parent or self.notebook
-        self.analysis_notebook = ttk.Notebook(parent)
+        self.analysis_notebook = ttk.Notebook(parent, style="Secondary.TNotebook")
         self.analysis_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.analysis_notebook.bind(
             "<<NotebookTabChanged>>",
@@ -2138,7 +2617,7 @@ class SupportInputApp:
         text_widget.configure(state="disabled")
 
     def _project_case_json_files(self):
-        self.project_cases_dir.mkdir(exist_ok=True)
+        self.project_cases_dir.mkdir(parents=True, exist_ok=True)
         managed = {
             path.parent.name: path
             for path in self.project_cases_dir.glob("*/project.json")
@@ -2187,71 +2666,41 @@ class SupportInputApp:
         legacy = self.project_cases_dir / f"{managed.parent.name}.json"
         return legacy if legacy.is_file() else managed
 
+    def _validated_current_project_target(self):
+        path = getattr(self, "current_project_path", None)
+        if path is None:
+            return None
+        try:
+            project_cases_dir = self.project_cases_dir.resolve()
+            target_path = Path(path).resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return None
+        is_legacy = (
+            target_path.parent == project_cases_dir
+            and target_path.suffix.lower() == ".json"
+            and target_path.name.lower() != "project.json"
+        )
+        is_managed = (
+            target_path.name == "project.json"
+            and target_path.parent.parent == project_cases_dir
+        )
+        if not (is_legacy or is_managed) or not target_path.is_file():
+            return None
+        return target_path, is_managed
+
     @staticmethod
     def _project_case_name_from_path(path):
         path = Path(path)
         return path.parent.name if path.name == "project.json" else path.stem
 
     def _refresh_project_case_list(self, selected_name=None, select_first=False):
-        project_names = [
-            self._project_case_name_from_path(path)
-            for path in self._project_case_json_files()
-        ]
-        selector = getattr(self, "project_case_selector", None)
-        if selector is not None:
-            current_var = getattr(self, "project_case_var", None)
-            current = str(current_var.get() or "") if current_var is not None else ""
-            selector.configure(values=project_names)
-            target = selected_name
-            if target is None and current in project_names:
-                target = current
-            if target is None and select_first and project_names:
-                target = project_names[0]
-            self.project_case_var.set(target if target in project_names else "")
-
-        if not hasattr(self, "project_case_listbox"):
-            self._update_project_action_states()
-            return
-        self.project_case_listbox.delete(0, "end")
-        selected_index = None
-        for index, display_name in enumerate(project_names):
-            self.project_case_listbox.insert("end", display_name)
-            if selected_name is not None and display_name == selected_name:
-                selected_index = index
-        if selected_index is None and select_first and self.project_case_listbox.size() > 0:
-            selected_index = 0
-        if selected_index is not None:
-            self.project_case_listbox.selection_set(selected_index)
-            self.project_case_listbox.see(selected_index)
+        # Project discovery now belongs to the modal Open dialog.  Keep this
+        # method as the existing post-save/load refresh contract for callers
+        # that only need menu/action state synchronized.
         self._update_project_action_states()
 
-    def _selected_project_case_name(self):
-        variable = getattr(self, "project_case_var", None)
-        if variable is not None:
-            selected = str(variable.get() or "").strip()
-            if selected:
-                return selected
-        if not hasattr(self, "project_case_listbox"):
-            return None
-        selection = self.project_case_listbox.curselection()
-        if not selection:
-            return None
-        return self.project_case_listbox.get(selection[0])
-
     def _update_project_action_states(self, _event=None):
-        has_selection = bool(self._selected_project_case_name())
-        state = "normal" if has_selection else "disabled"
-        for attribute in ("open_project_button", "delete_project_button"):
-            button = getattr(self, attribute, None)
-            if button is not None:
-                button.configure(state=state)
-        file_menu = getattr(self, "file_menu", None)
-        if file_menu is not None:
-            for label in ("開啟選取專案", "刪除選取專案"):
-                try:
-                    file_menu.entryconfigure(label, state=state)
-                except tk.TclError:
-                    pass
+        self._sync_main_menu_projection()
 
     def _refresh_project_status_display(self):
         variable = getattr(self, "project_asset_status_var", None)
@@ -2321,28 +2770,37 @@ class SupportInputApp:
             f"Solver 結果：{'已保留，未重新計算' if self.result_items else '目前無結果'}"
         )
         variable.set("\n".join(lines))
-        quick_variable = getattr(self, "project_quick_status_var", None)
-        if quick_variable is not None:
-            dxf_text = (
-                status_labels.get(report.status, report.status.value)
-                if report is not None
-                else "尚未檢查"
-            )
-            if self._dxf_binding_is_stale():
-                dxf_text += "／工程資料已修改"
-            quick_variable.set(
-                f"目前專案：{self._project_display_name()}｜DXF：{dxf_text}"
-            )
         source_variable = getattr(self, "dxf_import_source_var", None)
         if source_variable is not None:
             state = getattr(self, "dxf_last_import_debug", None)
             source = state.get("source_path") if isinstance(state, dict) else None
             source_variable.set(f"來源檔案：{source or '—'}")
+        self._sync_main_menu_projection()
 
     def _load_selected_project_case(self):
-        project_name = self._selected_project_case_name()
+        project_names = tuple(
+            self._project_case_name_from_path(path)
+            for path in self._project_case_json_files()
+        )
+        current_name = None
+        current_path = getattr(self, "current_project_path", None)
+        if current_path is not None:
+            candidate = self._project_case_name_from_path(current_path)
+            if candidate in project_names:
+                current_name = candidate
+        project_name = self._select_project_case_for_open(
+            project_names,
+            current_name=current_name,
+        )
         if not project_name:
-            messagebox.showwarning("載入專案", "請先選擇要載入的專案。")
+            return
+
+        if not self._open_project_target_is_valid(project_name):
+            messagebox.showwarning(
+                "開啟專案",
+                "選取的專案已不存在，請重新選擇。",
+                parent=self.root,
+            )
             return
         if (
             self._guard_unsaved_project_changes()
@@ -2354,64 +2812,78 @@ class SupportInputApp:
         except Exception as exc:
             messagebox.showerror("載入專案失敗", str(exc))
 
-    def _delete_selected_project_case(self):
-        project_name = self._selected_project_case_name()
-        if not project_name:
-            messagebox.showwarning("刪除專案", "請先選擇要刪除的專案。")
-            return
+    def _select_project_case_for_open(self, project_names, *, current_name=None):
+        return ProjectSelectionDialog(
+            self.root,
+            project_names,
+            current_name=current_name,
+        ).open()
 
-        path = self._project_case_path(project_name)
-        if path is None:
-            messagebox.showwarning("刪除專案", "請先選擇要刪除的專案。")
-            return
+    def _open_project_target_is_valid(self, project_name):
+        target_path = self._project_case_path(project_name)
+        return target_path is not None and target_path.is_file()
+
+    def _delete_selected_project_case(self):
+        """Backward-compatible handler name for the current-project action."""
+
+        return self._delete_current_project_case()
+
+    def _delete_current_project_case(self):
+        validated = self._validated_current_project_target()
+        if validated is None:
+            messagebox.showwarning(
+                "刪除專案",
+                "目前專案沒有可刪除的有效儲存路徑。",
+                parent=self.root,
+            )
+            return False
+        target_path, is_managed = validated
 
         try:
-            project_cases_dir = self.project_cases_dir.resolve()
-            target_path = path.resolve(strict=False)
-        except Exception as exc:
-            messagebox.showerror(
-                "刪除專案",
-                f"無法刪除：\n{path}\n\n原因：\n{exc}",
+            self._ensure_mutation_allowed()
+        except RuntimeError as exc:
+            messagebox.showwarning(
+                "無法刪除專案",
+                str(exc),
+                parent=self.root,
             )
-            return
+            return False
 
-        is_legacy = (
-            target_path.parent == project_cases_dir
-            and target_path.suffix.lower() == ".json"
-        )
-        is_managed = (
-            target_path.name == "project.json"
-            and target_path.parent.parent == project_cases_dir
-        )
-        if not (is_legacy or is_managed):
-            messagebox.showerror(
-                "刪除專案",
-                f"無法刪除：\n{path}\n\n原因：\n目標不是有效的專案檔案。",
-            )
-            return
-
-        if not target_path.is_file():
-            messagebox.showwarning("刪除專案", "找不到專案檔案。")
-            self._refresh_project_case_list(select_first=True)
-            return
-
+        project_name = self._project_case_name_from_path(target_path)
         managed_dxf = target_path.parent / "source" / "source.dxf"
         managed_dxf_text = (
             "是（將連同專案資料夾刪除）"
             if is_managed and managed_dxf.is_file()
             else "否"
         )
+        dirty_text = (
+            "是（未儲存變更將被捨棄）"
+            if getattr(self, "project_dirty", False)
+            else "否"
+        )
         confirmed = messagebox.askyesno(
             "確認刪除",
             (
-                f"確定要刪除專案：{project_name}\n\n"
+                f"確定要刪除目前專案：{project_name}\n\n"
                 f"專案路徑：\n{target_path}\n\n"
-                f"包含管理 DXF：{managed_dxf_text}\n\n"
+                f"包含管理 DXF：{managed_dxf_text}\n"
+                f"具有未儲存變更：{dirty_text}\n\n"
                 "此動作無法復原。"
             ),
+            parent=self.root,
         )
         if not confirmed:
-            return
+            return False
+
+        try:
+            blank_outcome = self._prepare_blank_project_runtime_outcome()
+        except Exception as exc:
+            messagebox.showerror(
+                "刪除專案",
+                f"無法準備新的空白專案，尚未刪除任何檔案：\n{exc}",
+                parent=self.root,
+            )
+            return False
 
         try:
             if is_managed:
@@ -2422,13 +2894,64 @@ class SupportInputApp:
             messagebox.showerror(
                 "刪除專案",
                 f"無法刪除：\n{target_path}\n\n原因：\n{exc}",
+                parent=self.root,
             )
-            return
+            return False
 
-        self._refresh_project_case_list(select_first=True)
-        messagebox.showinfo("刪除專案", f"已刪除專案：\n{project_name}")
+        self._commit_runtime_outcome(blank_outcome)
+        try:
+            self._project_after_commit(self._project_all_runtime_state)
+        except Exception as exc:
+            messagebox.showerror(
+                "專案已刪除，但畫面更新失敗",
+                (
+                    f"已刪除專案：{project_name}\n"
+                    "目前已切換為未命名的新專案。\n"
+                    "請執行「⚠ 重新整理畫面」。\n\n"
+                    f"原因：\n{exc}"
+                ),
+                parent=self.root,
+            )
+            return True
+
+        messagebox.showinfo(
+            "刪除專案",
+            f"已刪除專案：\n{project_name}",
+            parent=self.root,
+        )
+        return True
+
+    def _prepare_blank_project_runtime_outcome(self):
+        project_data = ProjectDataModel(
+            inventory=self._load_default_inventory()
+        )
+        project_results = ProjectResultModel()
+        dxf_status_report = self._ensure_project_service().inspect_dxf_state(
+            None,
+            None,
+            None,
+        )
+        return ProjectStateMutationOutcome(
+            project_data=project_data,
+            project_results=project_results,
+            solver_memory={},
+            support_candidate_cache={},
+            dxf_workflow_status=DxfWorkflowStatus.NONE,
+            dxf_review_session=None,
+            dxf_last_import_debug=None,
+            dxf_asset=None,
+            dxf_asset_status_report=dxf_status_report,
+            last_dxf_compatibility_report=None,
+            last_dxf_recovery_summary=None,
+            last_cad_validation_report=None,
+            current_project_path=None,
+            project_dirty=False,
+            project_dirty_reason="",
+        )
 
     def _save_project_as(self):
+        if not self._complete_active_edit_before_save():
+            return ProjectSaveOutcome.cancelled()
         project_name = simpledialog.askstring(
             "另存新專案",
             "專案名稱：",
@@ -2472,6 +2995,8 @@ class SupportInputApp:
         return outcome.path if outcome.status is ProjectSaveStatus.SAVED else None
 
     def _save_current_project(self):
+        if not self._complete_active_edit_before_save():
+            return ProjectSaveOutcome.cancelled()
         current = getattr(self, "current_project_path", None)
         if current is None:
             return self._save_project_as()
@@ -2520,13 +3045,13 @@ class SupportInputApp:
     def _reset_to_new_project(self):
         """Perform the destructive New-project continuation."""
 
+        self._ensure_mutation_allowed()
+
         self.project_data = ProjectDataModel(inventory=self._load_default_inventory())
         self.result_items.clear()
         self.project_result = None
         self.last_calculated_time = None
         self.current_project_path = None
-        if hasattr(self, "project_case_var"):
-            self.project_case_var.set("")
         self.dxf_last_import_debug = None
         self.dxf_workflow_status = DxfWorkflowStatus.NONE
         self.dxf_review_session = None
@@ -2552,6 +3077,7 @@ class SupportInputApp:
         self._clear_project_dirty()
 
     def _relink_dxf(self):
+        self._ensure_mutation_allowed()
         if self._current_dxf_workflow_status() == DxfWorkflowStatus.REVIEW:
             return self._relink_paused_dxf_review()
         file_path = filedialog.askopenfilename(
@@ -2846,6 +3372,7 @@ class SupportInputApp:
         return repository.list_items()
 
     def save_project_case(self, project_name):
+        self._ensure_mutation_allowed()
         path = self._managed_project_case_path(project_name)
         if path is None:
             raise ValueError("專案名稱不可空白。")
@@ -2865,14 +3392,25 @@ class SupportInputApp:
                 has_solver_result=bool(self.result_items),
             )
         )
-        self.dxf_asset = copy.deepcopy(result.dxf_asset)
-        self.current_project_path = result.project_path
-        self.project_result = copy.deepcopy(result.payload.get("result"))
-        self.dxf_asset_status_report = result.dxf_status_report
-        self._clear_project_dirty()
+        staged_results = copy.deepcopy(self._ensure_project_results())
+        staged_results.persisted_payload = copy.deepcopy(
+            result.payload.get("result")
+        )
+        outcome = replace(
+            self._current_runtime_outcome(),
+            project_results=staged_results,
+            dxf_asset=copy.deepcopy(result.dxf_asset),
+            current_project_path=result.project_path,
+            dxf_asset_status_report=result.dxf_status_report,
+            project_dirty=False,
+            project_dirty_reason="",
+        )
+        self._commit_runtime_outcome(outcome)
+        self._project_after_commit(self._update_window_title)
         return result.project_path
 
     def load_project_case(self, project_name, *, silent=False):
+        self._ensure_mutation_allowed()
         path = self._project_case_path(project_name)
         if path is None or not path.is_file():
             raise FileNotFoundError(f"找不到專案：{project_name}")
@@ -2882,11 +3420,10 @@ class SupportInputApp:
             default_inventory=self._load_default_inventory(),
         )
         payload = result.payload
-        self._adopt_hydrated_project(result.hydrated_project)
-        self.dxf_asset_status_report = result.dxf_status_report
-        self.last_dxf_compatibility_report = None
-        self.last_dxf_recovery_summary = None
-        self._clear_project_dirty()
+        self._adopt_hydrated_project(
+            result.hydrated_project,
+            dxf_status_report=result.dxf_status_report,
+        )
         display_name = self._project_case_name_from_path(path)
         self._refresh_project_case_list(selected_name=display_name)
         if not silent:
@@ -2911,12 +3448,49 @@ class SupportInputApp:
                 )
         return payload
 
-    def _build_material_summary_payload(self):
+    def _build_material_summary_payload(
+        self,
+        project_results=None,
+        project_data=None,
+    ):
+        if project_results is None and project_data is None:
+            return ProjectResultModel.build_material_summary(
+                self._collect_visible_material_usage(),
+                self._inventory_quantity,
+                unlimited_quantity=UNLIMITED_INVENTORY_QTY,
+            )
+        project_results = project_results or self._ensure_project_results()
+        project_data = project_data or self._ensure_project_data()
         return ProjectResultModel.build_material_summary(
-            self._collect_visible_material_usage(),
-            self._inventory_quantity,
+            project_results.collect_visible_material_usage(),
+            InventoryLookup(project_data.inventory).quantity,
             unlimited_quantity=UNLIMITED_INVENTORY_QTY,
         )
+
+    def _stage_result_items_outcome(self, result_items):
+        staged_results = copy.deepcopy(self._ensure_project_results())
+        staged_results.result_items = copy.deepcopy(result_items)
+        staged_results.mark_updated(
+            self._build_material_summary_payload(
+                staged_results,
+                self._ensure_project_data(),
+            )
+        )
+        return replace(
+            self._current_runtime_outcome(),
+            project_results=staged_results,
+            project_dirty=True,
+            project_dirty_reason="成果配置已變更",
+        )
+
+    def _project_result_adoption(self, *, selected_id=None, message=None):
+        self._refresh_results_tree(selected_id=selected_id)
+        self._update_material_summary()
+        self._select_results_tab()
+        self.update_preview()
+        self._update_window_title()
+        if message:
+            self.show_result(message)
 
     @staticmethod
     def _serialize_support_plan(plan):
@@ -2967,6 +3541,7 @@ class SupportInputApp:
         )
 
     def _apply_project_payload(self, payload, path=None):
+        self._ensure_mutation_allowed()
         hydrated = self._ensure_project_service().hydrate_project(
             payload,
             project_path=path,
@@ -2974,31 +3549,35 @@ class SupportInputApp:
         )
         self._adopt_hydrated_project(hydrated)
 
-    def _adopt_hydrated_project(self, hydrated):
+    def _adopt_hydrated_project(self, hydrated, *, dxf_status_report=None):
         """Adopt an already validated application state, then refresh the UI."""
 
-        self.project_data = hydrated.project_data
-        self._project_results = hydrated.project_results
-        self.dxf_workflow_status = hydrated.workflow_status
-        self.dxf_review_session = None
-        self.dxf_last_import_debug = hydrated.dxf_import_state
-        self.dxf_asset = hydrated.dxf_asset
-        self.last_dxf_recovery_summary = None
+        self._ensure_mutation_allowed()
 
-        self.solver_memory.clear()
-        self.support_candidate_cache.clear()
-        self.current_project_path = hydrated.project_path
-        for table_name in (
-            "walers",
-            "struts",
-            "braces",
-            "inventory",
-            "material_specs",
-        ):
-            self._refresh_tree(table_name)
-        self._refresh_results_tree()
-        self.update_preview()
-        self._refresh_dxf_workflow_ui()
+        outcome = replace(
+            self._current_runtime_outcome(),
+            project_data=hydrated.project_data,
+            project_results=hydrated.project_results,
+            solver_memory={},
+            support_candidate_cache={},
+            dxf_workflow_status=hydrated.workflow_status,
+            dxf_review_session=None,
+            dxf_last_import_debug=hydrated.dxf_import_state,
+            dxf_asset=hydrated.dxf_asset,
+            dxf_asset_status_report=(
+                dxf_status_report
+                if dxf_status_report is not None
+                else getattr(self, "dxf_asset_status_report", None)
+            ),
+            last_dxf_compatibility_report=None,
+            last_dxf_recovery_summary=None,
+            last_cad_validation_report=None,
+            current_project_path=hydrated.project_path,
+            project_dirty=False,
+            project_dirty_reason="",
+        )
+        self._commit_runtime_outcome(outcome)
+        self._project_after_commit(self._project_all_runtime_state)
 
     def _on_results_tree_click(self, event):
         if self.results_tree.identify_region(event.x, event.y) != "cell":
@@ -3167,7 +3746,14 @@ class SupportInputApp:
             command=detail_window.destroy,
         ).pack(anchor="e", padx=8, pady=(4, 8))
 
-    def _visible_dxf_export_plans(self):
+    def _visible_dxf_export_plans(self, legality_rows=None):
+        result_model = ProjectResultModel(result_items=self.result_items)
+        if legality_rows is None:
+            legality_rows = result_model.collect_visible_export_legality()
+        legality_by_member = {
+            (row.result_id, row.member_kind, row.member_id): row
+            for row in legality_rows
+        }
         plans = []
         for result_id, item in self.result_items.items():
             if not item.get("visible", True):
@@ -3193,6 +3779,13 @@ class SupportInputApp:
                     for kind, length in raw_pieces
                 )
                 if pieces:
+                    legality = legality_by_member.get(
+                        (str(result_id), "waler", member_id)
+                    )
+                    if legality is None:
+                        raise ValueError(
+                            f"圍令 {member_id} 缺少匯出合法性投影"
+                        )
                     plans.append(
                         MemberExportPlan(
                             member_id,
@@ -3200,6 +3793,8 @@ class SupportInputApp:
                             pieces,
                             float(plan.get("gap", 0) or 0),
                             str(result_id),
+                            legality.valid,
+                            legality.reasons,
                         )
                     )
                 continue
@@ -3215,6 +3810,13 @@ class SupportInputApp:
                     for kind, length in list(getattr(plan, "pieces", []) or [])
                 )
                 if pieces:
+                    legality = legality_by_member.get(
+                        (str(result_id), "support", member_id)
+                    )
+                    if legality is None:
+                        raise ValueError(
+                            f"支撐 {member_id} 缺少匯出合法性投影"
+                        )
                     plans.append(
                         MemberExportPlan(
                             member_id,
@@ -3222,6 +3824,8 @@ class SupportInputApp:
                             pieces,
                             float(getattr(plan, "gap", 0) or 0),
                             str(result_id),
+                            legality.valid,
+                            legality.reasons,
                         )
                     )
         return plans
@@ -3252,9 +3856,11 @@ class SupportInputApp:
             return
 
         try:
-            detail_rows = ProjectResultModel(
-                result_items=self.result_items,
-            ).collect_visible_material_details()
+            result_model = ProjectResultModel(result_items=self.result_items)
+            legality_rows = result_model.collect_visible_export_legality()
+            detail_rows = result_model.collect_visible_material_details(
+                legality_rows
+            )
             summary_rows = self._build_material_summary_payload()
         except MaterialDetailBuildError as exc:
             messagebox.showerror(
@@ -3650,6 +4256,7 @@ class SupportInputApp:
     def _adopt_support_plan_edit(self, item, staged, zoning, support_id):
         """Commit one changed Support edit and refresh formal result views."""
 
+        self._ensure_mutation_allowed()
         if not staged.changed:
             return False
 
@@ -4435,11 +5042,9 @@ class SupportInputApp:
     def _support_plan_visible(self, item, support_id):
         if not isinstance(item, dict):
             return False
-        visibility = item.setdefault("support_visibility", {})
+        visibility = item.get("support_visibility") or {}
         support_id = str(support_id)
-        if support_id not in visibility:
-            visibility[support_id] = item.get("visible", True)
-        return bool(visibility.get(support_id, True))
+        return bool(visibility.get(support_id, item.get("visible", True)))
 
     def _support_group_visible_mark(self, group_items):
         visible_states = []
@@ -4455,6 +5060,7 @@ class SupportInputApp:
         return "▣"
 
     def _toggle_result_group_visibility(self, group_iid):
+        self._ensure_mutation_allowed()
         grouped_entries = self._get_result_group_entries(group_iid)
         if not grouped_entries:
             return
@@ -4487,6 +5093,7 @@ class SupportInputApp:
         self.update_preview(preserve_view=True)
 
     def _toggle_result_visibility(self, result_id):
+        self._ensure_mutation_allowed()
         item = self.result_items.get(result_id)
         if item is None:
             return
@@ -4497,6 +5104,7 @@ class SupportInputApp:
         self.update_preview(preserve_view=True)
 
     def _toggle_support_plan_visibility(self, zoning, support_id):
+        self._ensure_mutation_allowed()
         item = self.result_items.get(zoning)
         if not item or item.get("type") != "support":
             return
@@ -4538,6 +5146,7 @@ class SupportInputApp:
         )
 
     def _apply_waler_plan_segments(self, result_id, segments):
+        self._ensure_mutation_allowed()
         item = self.result_items.get(result_id)
         if not item or item.get("type") != "waler":
             raise ValueError("找不到要修改的圍令方案")
@@ -5020,19 +5629,27 @@ class SupportInputApp:
                 tags=tags,
             )
 
-    def _store_result_item(self, result_id, result_type, result):
-        if not self._ensure_project_results().store_item(
+    def _store_result_item(self, result_id, result_type, result, *, message=None):
+        self._ensure_mutation_allowed()
+        staged_results = copy.deepcopy(self._ensure_project_results())
+        if not staged_results.store_item(
             result_id,
             result_type,
             result,
         ):
-            return
+            return False
         result_id = str(result_id).strip()
-        self._mark_results_updated()
-        group_iid = self._get_result_tree_info(result_id, self.result_items[result_id])["group_iid"]
-        self._refresh_results_tree(selected_id=group_iid)
-        self._select_results_tab()
-        self.update_preview()
+        outcome = self._stage_result_items_outcome(staged_results.result_items)
+        item = outcome.project_results.result_items[result_id]
+        group_iid = self._get_result_tree_info(result_id, item)["group_iid"]
+        self._commit_runtime_outcome(outcome)
+        self._project_after_commit(
+            lambda: self._project_result_adoption(
+                selected_id=group_iid,
+                message=message,
+            )
+        )
+        return True
 
     def _build_preview(self, parent):
         self._preview_scroll_after_id = None
@@ -5574,7 +6191,11 @@ class SupportInputApp:
         self._preview_scroll_after_id = None
 
     def _schedule_cad_event_poll(self):
-        if self._cad_poll_after_id is not None:
+        if getattr(self, "cad_ack_unresolved_event_id", None) is not None:
+            return
+        if getattr(self, "projection_stale", False):
+            return
+        if getattr(self, "_cad_poll_after_id", None) is not None:
             return
         try:
             self._cad_poll_after_id = self.root.after(
@@ -5627,6 +6248,14 @@ class SupportInputApp:
             self.cad_import_last_event_var.set(text)
 
     def _toggle_cad_import(self):
+        if getattr(self, "cad_ack_unresolved_event_id", None) is not None:
+            self.cad_import_enabled = False
+            self.cad_import_enabled_var.set(False)
+            self._set_cad_import_status(
+                "CAD ACK 尚未完成；請先處理待確認事件。",
+                error=getattr(self, "cad_last_error", None),
+            )
+            return
         self.cad_import_enabled = bool(self.cad_import_enabled_var.get())
         status = "等待 CAD 事件" if self.cad_import_enabled else "CAD 自動接收已停止"
         self._set_cad_import_status(status)
@@ -5710,6 +6339,7 @@ class SupportInputApp:
         return None
 
     def _remember_dxf_review(self, outcome, file_path):
+        self._ensure_mutation_allowed()
         if self._current_dxf_workflow_status() == DxfWorkflowStatus.COMPLETED:
             raise RuntimeError("COMPLETED 狀態不可重新建立 DXF Review。")
         state = copy.deepcopy(dict(outcome.review_state))
@@ -5756,6 +6386,7 @@ class SupportInputApp:
         return "complete"
 
     def _complete_dxf_review(self, outcome, file_path):
+        self._ensure_mutation_allowed()
         result = outcome.result
         previous_project_data = self._ensure_project_data()
         previous_results = copy.deepcopy(self._ensure_project_results())
@@ -6023,16 +6654,7 @@ class SupportInputApp:
         if table_name == "struts":
             self._load_strut_detail(index)
 
-    def _apply_cad_event(self, event):
-        if self.cad_event_mapper.is_cancel_event(event):
-            self.cad_event_mapper.validate_cancel_event(event)
-            self.cad_event_watcher.acknowledge(event)
-            self._set_cad_import_status(
-                "已清除待處理的 CAD 事件；Project 資料未變更。",
-                event=event,
-            )
-            return "control", {}
-
+    def _stage_cad_event(self, event):
         project_rows = self._project_rows_by_table()
         mapped = self.cad_event_mapper.map_command(
             event,
@@ -6040,11 +6662,12 @@ class SupportInputApp:
             coordinate_system=self._cad_coordinate_system(),
         )
         table_name = mapped.table_name
-        rows = getattr(self, table_name)
+        staged_project = copy.deepcopy(self._ensure_project_data())
+        rows = getattr(staged_project, table_name)
         old_state = getattr(self, "dxf_last_import_debug", None)
-        old_row = None
         binding_synced = False
         binding_report = None
+        validation_report = None
         member_label = {
             "walers": "圍令",
             "struts": "支撐",
@@ -6056,9 +6679,8 @@ class SupportInputApp:
                 old_state,
                 f"CAD add 已新增 {table_name}，尚無對應的 DXF binding",
             )
-            rows.append(mapped.row)
+            rows.append(copy.deepcopy(mapped.row))
             committed_index = len(rows) - 1
-            committed_row = rows[committed_index]
         else:
             if mapped.row_index is None:
                 raise ValueError(f"{member_label} update 缺少原資料列索引。")
@@ -6069,15 +6691,18 @@ class SupportInputApp:
                 and not mapped.endpoints_changed
             )
             if mapped.row == old_row or linear_noop:
-                self.cad_event_watcher.acknowledge(event)
-                identifier_field = self.table_columns[table_name][0]
-                identifier = str(old_row.get(identifier_field, "")).strip()
-                self._set_cad_import_status(
-                    f"{member_label} {identifier} 幾何未變更。",
-                    event=event,
+                return (
+                    CadEventMutationOutcome(
+                        runtime_state=None,
+                        table_name=table_name,
+                        committed_index=committed_index,
+                        committed_row=old_row,
+                        no_op=True,
+                    ),
+                    mapped,
+                    member_label,
+                    False,
                 )
-                return table_name, rows[committed_index]
-
             if self._dxf_binding_is_stale():
                 binding_reason = (
                     str(
@@ -6129,50 +6754,134 @@ class SupportInputApp:
                     binding_reason
                     or f"無法可靠同步 {member_label} DXF binding",
                 )
-            committed_row = self._ensure_project_data().replace_row(
+            staged_project.replace_row(
                 table_name,
                 committed_index,
                 mapped.row,
             )
+            validation_report = ProjectDataValidator().validate(staged_project)
 
-        self.dxf_last_import_debug = staged_state
+        committed_row = copy.deepcopy(rows[committed_index])
+        current_results = self._ensure_project_results()
+        had_result = bool(
+            current_results.result_items
+            or current_results.persisted_payload is not None
+        )
+        runtime_outcome = replace(
+            self._current_runtime_outcome(),
+            project_data=staged_project,
+            project_results=ProjectResultModel(),
+            solver_memory={},
+            support_candidate_cache={},
+            dxf_last_import_debug=staged_state,
+            last_dxf_compatibility_report=(
+                binding_report if binding_synced else None
+            ),
+            last_cad_validation_report=validation_report,
+            project_dirty=True,
+            project_dirty_reason="輸入資料已變更",
+        )
+        staged = CadEventMutationOutcome(
+            runtime_state=runtime_outcome,
+            table_name=table_name,
+            committed_index=committed_index,
+            committed_row=committed_row,
+            binding_synced=binding_synced,
+            binding_report=binding_report,
+            validation_report=validation_report,
+        )
+        return staged, mapped, member_label, had_result
+
+    def _mark_cad_ack_unresolved(self, event, error):
+        self.cad_ack_unresolved_event_id = event.get("event_id")
+        self.cad_ack_unresolved_event = copy.deepcopy(dict(event))
+        self.cad_import_enabled = False
+        variable = getattr(self, "cad_import_enabled_var", None)
+        if variable is not None:
+            variable.set(False)
+        self._mark_projection_stale(error)
+        self.cad_import_status = "CAD 事件已套用，但 ACK 尚未完成"
+        self.cad_last_event = copy.deepcopy(dict(event))
+        self.cad_last_error = str(error)
+        try:
+            self._refresh_cad_import_status()
+        except Exception:
+            LOGGER.exception("CAD ACK failure status projection failed")
+
+    def _resolve_cad_ack_failure(self):
+        event = getattr(self, "cad_ack_unresolved_event", None)
+        if event is None:
+            return True
         try:
             self.cad_event_watcher.acknowledge(event)
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-            if mapped.operation == "add":
-                rows.pop()
-            else:
-                self._ensure_project_data().replace_row(
-                    table_name,
-                    committed_index,
-                    old_row,
-                )
-            self.dxf_last_import_debug = old_state
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            self._mark_cad_ack_unresolved(event, exc)
+            return False
+        self.cad_ack_unresolved_event_id = None
+        self.cad_ack_unresolved_event = None
+        self.cad_import_enabled = True
+        variable = getattr(self, "cad_import_enabled_var", None)
+        if variable is not None:
+            variable.set(True)
+        self._set_cad_import_status("CAD ACK 已完成；可重新整理畫面後繼續。")
+        if not getattr(self, "projection_stale", False):
+            self._schedule_cad_event_poll()
+        return True
+
+    def _apply_cad_event(self, event):
+        if self.cad_event_mapper.is_cancel_event(event):
+            self.cad_event_mapper.validate_cancel_event(event)
+            self.cad_event_watcher.acknowledge(event)
+            self.cad_ack_unresolved_event_id = None
+            self.cad_ack_unresolved_event = None
+            self.cad_import_enabled = True
+            self._set_cad_import_status(
+                "已清除待處理的 CAD 事件；Project 資料未變更。",
+                event=event,
+            )
+            return "control", {}
+
+        event_id = event.get("event_id")
+        unresolved_id = getattr(self, "cad_ack_unresolved_event_id", None)
+        if unresolved_id is not None:
+            if event_id == unresolved_id:
+                return "unresolved", {}
+            raise RuntimeError("請先處理 ACK 尚未完成的 CAD 事件。")
+        self._ensure_mutation_allowed()
+        staged, mapped, member_label, had_result = self._stage_cad_event(event)
+        if staged.no_op:
+            self.cad_event_watcher.acknowledge(event)
+            identifier_field = self.table_columns[staged.table_name][0]
+            identifier = str(
+                staged.committed_row.get(identifier_field, "")
+            ).strip()
+            self._set_cad_import_status(
+                f"{member_label} {identifier} 幾何未變更。",
+                event=event,
+            )
+            return staged.table_name, staged.committed_row
+
+        self._ensure_solver_operation_registry().invalidate_open_and_running(
+            "cad_update"
+        )
+        self._commit_runtime_outcome(staged.runtime_state)
+        try:
+            self.cad_event_watcher.acknowledge(event)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            self._mark_cad_ack_unresolved(event, exc)
             raise
 
-        self._refresh_tree(table_name)
-        self._select_input_row(table_name, committed_index)
-        self.last_dxf_compatibility_report = (
-            binding_report if binding_synced else None
-        )
-        self._handle_input_data_changed(
-            preserve_view=False,
-            table_name=table_name,
-            dxf_binding_changed=False,
-        )
-        validation_report = None
-        if mapped.operation == "update":
-            validation_report = ProjectDataValidator().validate(
-                self._ensure_project_data()
-            )
-            self.last_cad_validation_report = validation_report
-
-        identifier_field = self.table_columns[table_name][0]
-        identifier = str(committed_row.get(identifier_field, "")).strip()
+        identifier_field = self.table_columns[staged.table_name][0]
+        identifier = str(
+            staged.committed_row.get(identifier_field, "")
+        ).strip()
         if mapped.operation == "add":
             status = f"匯入成功：{identifier}"
         else:
-            binding_ready = binding_synced and not self._dxf_binding_is_stale()
+            binding_ready = (
+                staged.binding_synced
+                and not self._dxf_binding_is_stale()
+            )
             status = (
                 f"已更新{member_label} {identifier}；DXF 工程線已同步"
                 if binding_ready
@@ -6185,14 +6894,32 @@ class SupportInputApp:
                 notes.append("角撐長度已清除")
             if notes:
                 status += "；" + "；".join(notes)
-            if validation_report is not None and validation_report.errors:
+            if (
+                staged.validation_report is not None
+                and staged.validation_report.errors
+            ):
                 status += (
                     f"；Validation 發現 "
-                    f"{len(validation_report.errors)} 項錯誤"
+                    f"{len(staged.validation_report.errors)} 項錯誤"
                 )
             status += "。"
-        self._set_cad_import_status(status, event=event)
-        return table_name, committed_row
+
+        def project_cad_event():
+            self._refresh_tree(staged.table_name)
+            self._select_input_row(
+                staged.table_name,
+                staged.committed_index,
+            )
+            self._refresh_results_tree()
+            self._update_material_summary()
+            if had_result and hasattr(self, "result_text"):
+                self.show_result("結果已失效，請重新計算")
+            self.update_preview(preserve_view=False)
+            self._update_window_title()
+            self._set_cad_import_status(status, event=event)
+
+        self._project_after_commit(project_cad_event)
+        return staged.table_name, staged.committed_row
 
     def read_cad_event(self, *, report_errors=False):
         try:
@@ -6649,43 +7376,51 @@ class SupportInputApp:
         preserve_view=True,
         refresh_material_specs=True,
     ):
-        previous_project_data = self._ensure_project_data()
+        self._ensure_mutation_allowed()
         previous_results = self._ensure_project_results()
-        previous_solver_memory = copy.deepcopy(self.solver_memory)
-        previous_support_cache = copy.deepcopy(self.support_candidate_cache)
         had_result = (
             bool(previous_results.result_items)
             or previous_results.persisted_payload is not None
         )
-        try:
-            self.project_data = outcome.project_data
-            self._project_results = outcome.project_results
-            if outcome.clear_solver_memory:
-                self.solver_memory.clear()
-            if outcome.clear_support_candidate_cache:
-                self.support_candidate_cache.clear()
-        except Exception:
-            self.project_data = previous_project_data
-            self._project_results = previous_results
-            self.solver_memory = previous_solver_memory
-            self.support_candidate_cache = previous_support_cache
-            raise
-
-        for changed_table in outcome.changed_tables:
-            if changed_table == "material_specs" and not refresh_material_specs:
-                continue
-            self._refresh_tree(changed_table)
-        self._handle_input_data_changed(
-            preserve_view=preserve_view,
-            table_name=(
-                None if outcome.clear_solver_memory else "material_specs"
-            ),
-            field_name=(
-                "material_spec" if outcome.clear_solver_memory else field_name
-            ),
-            staged_change=outcome,
-            had_result=had_result,
+        staged_solver_memory = (
+            {}
+            if outcome.clear_solver_memory
+            else copy.deepcopy(getattr(self, "solver_memory", {}))
         )
+        staged_support_cache = (
+            {}
+            if outcome.clear_support_candidate_cache
+            else copy.deepcopy(getattr(self, "support_candidate_cache", {}))
+        )
+        runtime_outcome = replace(
+            self._current_runtime_outcome(),
+            project_data=outcome.project_data,
+            project_results=outcome.project_results,
+            solver_memory=staged_solver_memory,
+            support_candidate_cache=staged_support_cache,
+            project_dirty=True,
+            project_dirty_reason=outcome.dirty_reason,
+        )
+        self._commit_runtime_outcome(runtime_outcome)
+
+        def project_material_edit():
+            for changed_table in outcome.changed_tables:
+                if (
+                    changed_table == "material_specs"
+                    and not refresh_material_specs
+                ):
+                    continue
+                self._refresh_tree(changed_table)
+            if outcome.clear_solver_memory:
+                self._refresh_results_tree()
+                if had_result and hasattr(self, "result_text"):
+                    self.show_result("結果已失效，請重新計算")
+            if outcome.update_material_summary:
+                self._update_material_summary()
+            self.update_preview(preserve_view=preserve_view)
+            self._update_window_title()
+
+        self._project_after_commit(project_material_edit)
 
     def _cell_editor_options(self, table_name, column, index):
         """Return (choices, state) for table cells with controlled values."""
@@ -6750,6 +7485,7 @@ class SupportInputApp:
 
         if self.editing_entry is not None:
             self.editing_entry.destroy()
+            self.editing_context = None
 
         combobox_values, combobox_state = self._cell_editor_options(
             table_name,
@@ -6778,22 +7514,77 @@ class SupportInputApp:
             entry.bind("<<ComboboxSelected>>", save_edit)
         entry.bind("<FocusOut>", save_edit)
         self.editing_entry = entry
+        self.editing_context = (tree, row_id, column, entry)
         return True
 
     def _finish_edit(self, tree, row_id, column, entry_widget):
+        try:
+            return self._complete_cell_edit(
+                tree,
+                row_id,
+                column,
+                entry_widget,
+                preserve_editor_on_failure=False,
+            )
+        except Exception:
+            self._close_cell_editor(entry_widget)
+            raise
+
+    def _complete_active_edit_before_save(self):
+        entry = getattr(self, "editing_entry", None)
+        if entry is None:
+            return True
+        context = getattr(self, "editing_context", None)
+        if context is None or len(context) != 4 or context[3] is not entry:
+            return False
+        tree, row_id, column, entry_widget = context
+        return self._complete_cell_edit(
+            tree,
+            row_id,
+            column,
+            entry_widget,
+            preserve_editor_on_failure=True,
+        )
+
+    def _close_cell_editor(self, entry_widget):
+        try:
+            if entry_widget.winfo_exists():
+                entry_widget.destroy()
+        finally:
+            if getattr(self, "editing_entry", None) is entry_widget:
+                self.editing_entry = None
+                self.editing_context = None
+
+    def _complete_cell_edit(
+        self,
+        tree,
+        row_id,
+        column,
+        entry_widget,
+        *,
+        preserve_editor_on_failure,
+    ):
         if not entry_widget.winfo_exists():
-            return
+            self._close_cell_editor(entry_widget)
+            return True
         new_value = entry_widget.get().strip()
-        entry_widget.destroy()
-        self.editing_entry = None
+
+        def abort():
+            if not preserve_editor_on_failure:
+                self._close_cell_editor(entry_widget)
+            return False
+
+        def complete():
+            self._close_cell_editor(entry_widget)
+            return True
 
         table_name = self._get_table_name_by_tree(tree)
         if table_name is None:
-            return
+            return abort()
 
         index = self._item_id_to_index(row_id)
         if index is None:
-            return
+            return abort()
 
         rows = getattr(self, table_name)
         project_field_committed = table_name in GEOMETRY_TABLES
@@ -6810,14 +7601,14 @@ class SupportInputApp:
                     error + " 已保留原值。",
                     parent=self.root,
                 )
-                return
+                return abort()
             if not changed:
-                return
+                return complete()
         else:
             value = self._parse_cell_value(table_name, column, new_value)
             old_value = rows[index].get(column, "")
             if value == old_value:
-                return
+                return complete()
 
         if table_name == "material_specs":
             row = self.material_specs[index]
@@ -6847,7 +7638,7 @@ class SupportInputApp:
                     parent=self.root,
                 )
                 if not confirmed:
-                    return
+                    return abort()
                 outcome = self._ensure_material_spec_editing().stage(
                     self._ensure_project_data(),
                     self._ensure_project_results(),
@@ -6859,12 +7650,12 @@ class SupportInputApp:
                 )
             if outcome.status == MaterialSpecEditStatus.REJECTED:
                 self._show_material_spec_edit_error(outcome)
-                return
+                return abort()
             if outcome.status == MaterialSpecEditStatus.NO_OP:
-                return
+                return complete()
             if outcome.status != MaterialSpecEditStatus.STAGED:
                 self._show_material_spec_edit_error(outcome)
-                return
+                return abort()
             self._adopt_material_spec_edit(
                 outcome,
                 field_name=column,
@@ -6872,7 +7663,7 @@ class SupportInputApp:
                 refresh_material_specs=False,
             )
             tree.set(row_id, column, self._format_display_value(value))
-            return
+            return complete()
 
         if not project_field_committed:
             rows[index][column] = value
@@ -6916,6 +7707,7 @@ class SupportInputApp:
                 self._load_geometry_detail(table_name, index)
             kind = "waler" if table_name == "walers" else "brace"
             self._sync_preview_to_geometry_selection(table_name, kind, index)
+        return complete()
 
     def _item_id_to_index(self, item_id):
         try:
@@ -7847,7 +8639,12 @@ class SupportInputApp:
         except SolverInputBuildError as exc:
             self.show_result(f"無法建立圍令 Solver 輸入：\n{exc}")
             return
+        operation_registry = self._ensure_solver_operation_registry()
+        snapshot_handle = operation_registry.register_snapshot(
+            SolverKind.SINGLE_WALER
+        )
         if not waler_inputs:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result("錯誤：找不到圍令輸入資料")
             return
 
@@ -7855,6 +8652,7 @@ class SupportInputApp:
             tuple(waler_inputs.values())
         )
         if not eligible_inputs:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result("沒有可進行材料配置的 non-RC 圍令。")
             return
 
@@ -7863,6 +8661,7 @@ class SupportInputApp:
         dialog = WalerSelectionDialog(self.root, waler_ids)
         selected_waler = dialog.open()
         if selected_waler is None:
+            operation_registry.close_snapshot(snapshot_handle)
             return
         if self._has_modified_waler_results(
             selected_waler,
@@ -7878,24 +8677,32 @@ class SupportInputApp:
                 parent=self.root,
             )
             if not confirmed:
+                operation_registry.close_snapshot(snapshot_handle)
                 return
 
         waler_input = eligible_by_id[selected_waler]
         if waler_input.material_spec and not waler_input.purchasable_lengths:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result(
                 f"錯誤：圍令 {selected_waler} 所選規格 "
                 f"{waler_input.material_spec} 沒有可用庫存料長"
             )
             return
-        solver_dialog = WalerSolverDialog(
-            self.root,
-            waler_input,
-            self.solver_memory,
-            self._store_waler_result,
-            optimize_waler=self.make_waler_optimizer(),
-            waler_solver_guard=waler_solver_guard,
-        )
-        solver_dialog.open()
+        try:
+            solver_dialog = WalerSolverDialog(
+                self.root,
+                waler_input,
+                self.solver_memory,
+                self._store_waler_result,
+                optimize_waler=self.make_waler_optimizer(),
+                waler_solver_guard=waler_solver_guard,
+                operation_registry=operation_registry,
+                snapshot_handle=snapshot_handle,
+                adoption_guard=self._ensure_mutation_allowed,
+            )
+            solver_dialog.open()
+        finally:
+            operation_registry.close_snapshot(snapshot_handle)
 
     def _open_waler_global_solver(self):
         """Open the project-wide exact selector without changing local scoring."""
@@ -7913,7 +8720,12 @@ class SupportInputApp:
         except SolverInputBuildError as exc:
             self.show_result(f"無法建立全部圍令最佳化輸入：\n{exc}")
             return
+        operation_registry = self._ensure_solver_operation_registry()
+        snapshot_handle = operation_registry.register_snapshot(
+            SolverKind.GLOBAL_WALER
+        )
         if not waler_inputs:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result("錯誤：找不到圍令輸入資料")
             return
 
@@ -7921,6 +8733,7 @@ class SupportInputApp:
             tuple(waler_inputs.values())
         )
         if not eligible_inputs:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result("沒有可進行材料配置的 non-RC 圍令。")
             return
         eligible_by_id = {item.waler_id: item for item in eligible_inputs}
@@ -7931,6 +8744,7 @@ class SupportInputApp:
             if waler_input.material_spec and not waler_input.purchasable_lengths
         ]
         if missing_inventory:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result(
                 "錯誤：下列圍令所選規格沒有可用庫存料長："
                 + "、".join(missing_inventory)
@@ -7954,19 +8768,35 @@ class SupportInputApp:
                 parent=self.root,
             )
             if not confirmed:
+                operation_registry.close_snapshot(snapshot_handle)
                 return
 
-        dialog = WalerGlobalSolverDialog(
-            self.root,
-            tuple(eligible_inputs),
-            self._apply_waler_global_result,
-            optimize_waler_global=self.make_waler_global_optimizer(),
-            waler_solver_guard=waler_solver_guard,
-        )
-        dialog.open()
+        try:
+            dialog = WalerGlobalSolverDialog(
+                self.root,
+                tuple(eligible_inputs),
+                self._apply_waler_global_result,
+                optimize_waler_global=self.make_waler_global_optimizer(),
+                waler_solver_guard=waler_solver_guard,
+                operation_registry=operation_registry,
+                snapshot_handle=snapshot_handle,
+                adoption_guard=self._ensure_mutation_allowed,
+            )
+            dialog.open()
+        finally:
+            operation_registry.close_snapshot(snapshot_handle)
 
     def _apply_waler_global_result(self, global_result):
         """Commit selected Waler data, then refresh the UI independently."""
+
+        try:
+            self._ensure_mutation_allowed()
+        except RuntimeError as exc:
+            return WalerGlobalApplyOutcome(
+                committed=False,
+                refreshed=False,
+                error=str(exc),
+            )
 
         excluded_rc_waler_ids = tuple(
             str(row.get("WalerID", "") or "").strip()
@@ -8078,7 +8908,12 @@ class SupportInputApp:
                 + format_support_input_build_error(exc)
             )
             return
+        operation_registry = self._ensure_solver_operation_registry()
+        snapshot_handle = operation_registry.register_snapshot(
+            SolverKind.SUPPORT
+        )
         if not support_input.configs:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result(f"錯誤：分區 {selected_zoning} 沒有可供計算的支撐")
             return
         missing_inventory = [
@@ -8087,24 +8922,30 @@ class SupportInputApp:
             if config.material_spec and not config.steel_lengths
         ]
         if missing_inventory:
+            operation_registry.close_snapshot(snapshot_handle)
             self.show_result(
                 "錯誤：下列支撐所選規格沒有可用庫存料長："
                 + ", ".join(missing_inventory)
             )
             return
 
-        solver_dialog = SupportSolverDialog(
-            self.root,
-            support_input,
-            self._store_support_solution,
-            optimize_support_zone=self.make_support_optimizer(
-                self.support_candidate_cache
-            ),
-        )
-        solver_dialog.open()
+        try:
+            solver_dialog = SupportSolverDialog(
+                self.root,
+                support_input,
+                self._store_support_solution,
+                optimize_support_zone=self.make_support_optimizer(
+                    self.support_candidate_cache
+                ),
+                operation_registry=operation_registry,
+                snapshot_handle=snapshot_handle,
+                adoption_guard=self._ensure_mutation_allowed,
+            )
+            solver_dialog.open()
+        finally:
+            operation_registry.close_snapshot(snapshot_handle)
 
     def _store_support_solution(self, zoning, solution):
-        self._store_result_item(zoning, "support", solution)
         diagnostics = ProjectResultModel.solver_diagnostic_view(
             getattr(solution, "search_diagnostics", None)
         )
@@ -8114,14 +8955,21 @@ class SupportInputApp:
                 search_status = "，搜尋已穩定"
             elif diagnostics.search_limit_reached:
                 search_status = "，搜尋已達上限"
-        self.show_result(
+        message = (
             f"已完成分區 {zoning} 支撐配置："
             f"支撐數量={len(solution.plans)}，"
             f"總分={solution.total_score:.1f}，"
             f"合法={'是' if solution.valid else '否'}{search_status}"
         )
+        self._store_result_item(
+            zoning,
+            "support",
+            solution,
+            message=message,
+        )
 
     def _store_waler_result(self, result):
+        self._ensure_mutation_allowed()
         try:
             staged = self._ensure_project_results().stage_single_waler_result(
                 result,
@@ -8135,14 +8983,7 @@ class SupportInputApp:
         stored_diagnostics = ProjectResultModel.solver_diagnostic_view(
             staged.search_diagnostics
         )
-        self.result_items = staged.result_items
-
-        self._mark_results_updated()
-        self._refresh_results_tree(
-            selected_id=self._result_group_iid("waler", waler_id),
-        )
-        self.update_preview()
-        self.show_result(
+        message = (
             f"已產生 {waler_id} 前 {staged.result_count} 名單支方案並加入結果。"
             + (
                 "原全域方案已保留。"
@@ -8155,6 +8996,14 @@ class SupportInputApp:
                 else ""
             )
             + "請在結果頁勾選方案查看圖面，雙擊方案可直接修改鋼材配置。"
+        )
+        outcome = self._stage_result_items_outcome(staged.result_items)
+        self._commit_runtime_outcome(outcome)
+        self._project_after_commit(
+            lambda: self._project_result_adoption(
+                selected_id=self._result_group_iid("waler", waler_id),
+                message=message,
+            )
         )
 
     def show_result(self, text):
@@ -8178,7 +9027,9 @@ class SupportInputApp:
         self.result_text.configure(state="disabled")
 
 def main():
+    _set_windows_app_user_model_id()
     root = tk.Tk()
+    _apply_application_icon(root)
     dependencies = build_dependencies(
         resource_dir=RESOURCE_DIR,
         app_dir=APP_DIR,

@@ -7,7 +7,12 @@ import unittest
 from unittest.mock import patch
 
 from dxf_import.dialog import DXFImportDialog
-from dxf_import.geometry import _line_segment_intersection_point
+from dxf_import.geometry import (
+    _line_distance,
+    _line_segment_intersection_point,
+    _line_separation,
+    _supporting_line_separation,
+)
 from dxf_import.importer import (
     DXFImporter,
     Y05_LAYER_MAPPING,
@@ -15,10 +20,15 @@ from dxf_import.importer import (
     Y29_LAYER_MAPPING,
 )
 from dxf_import.models import DXFImportResult, ExcludedSource, GeometryTolerances
+from dxf_import.material_recognition import (
+    recognize_material_spec_from_width,
+    recognize_result_material_specs,
+)
 from dxf_import.recognition import (
     _Candidate,
     _candidate_from_group,
     _resolve_waler_contact_geometry,
+    _waler_source_width_assessment,
 )
 from dxf_import.validation import build_problem_records, build_review_items
 from dxf_import.waler_contact_face import (
@@ -40,16 +50,72 @@ from dxf_import.waler_contact_face import (
     find_waler_overlap_competitions,
     resolve_waler_contact_faces,
 )
+from tests.sample_dxf_assets import Y05_DXF_PATH, Y1A_DXF_PATH, Y29_DXF_PATH
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-Y05_DXF_PATH = next(PROJECT_ROOT.glob("670-CO-Y05*.dxf"), None)
-Y1A_DXF_PATH = PROJECT_ROOT / "Y1A擋土支撐簡化版.dxf"
-Y29_DXF_PATH = PROJECT_ROOT / "Y29_test.dxf"
-
-
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
+
+WALER_MATERIAL_SPECS = (
+    {"Usage": "圍令", "Spec": "H350x350"},
+    {"Usage": "圍令", "Spec": "H400x400"},
+    {"Usage": "圍令", "Spec": "H400x408"},
+    {"Usage": "圍令", "Spec": "H414x405"},
+    {"Usage": "圍令", "Spec": "H428x407"},
+    {"Usage": "圍令", "Spec": "H458x417"},
+)
+
+# source handle -> (legacy finite-segment width, supporting-line width,
+#                    legacy material, corrected material, general gate applies)
+WALER_WIDTH_CHARACTERIZATION = {
+    "Y05": {
+        "971": (312.0, 312.0, "", "", True),
+        "97D": (350.0, 350.0, "H350x350", "H350x350", True),
+        "989": (350.0, 350.0, "H350x350", "H350x350", True),
+        "B1D": (312.0, 312.0, "", "", True),
+        "B29": (350.0, 350.0, "H350x350", "H350x350", True),
+        "B34": (331.0, 331.0, "", "", True),
+        "C86": (350.0, 350.0, "H350x350", "H350x350", True),
+        "C90": (350.0, 350.0, "H350x350", "H350x350", True),
+        "C72": (0.0, 0.0, "", "", False),
+        "CA2": (0.0, 0.0, "", "", False),
+        "ABE": (100.0, 100.0, "RC", "RC", False),
+        "C97": (100.0, 100.0, "RC", "RC", False),
+        "E65": (800.0, 800.0, "RC", "RC", False),
+        "163D": (800.0, 800.0, "RC", "RC", False),
+        "1647": (800.0, 800.0, "RC", "RC", False),
+        "1650": (800.0, 800.0, "RC", "RC", False),
+    },
+    "Y29": {
+        "74": (400.000056, 400.000056, "H400x400", "H400x400", True),
+        "76": (400.0, 400.0, "H400x400", "H400x400", True),
+        "F4": (400.0, 400.0, "H400x400", "H400x400", True),
+        "193": (400.0, 400.0, "H400x400", "H400x400", True),
+        "211": (400.0, 400.0, "H400x400", "H400x400", True),
+        "232": (400.0, 400.0, "H400x400", "H400x400", True),
+        "25E": (400.010038, 400.010038, "H400x400", "H400x400", True),
+        "260": (400.009678, 400.009678, "H400x400", "H400x400", True),
+        "284": (400.0, 400.0, "H400x400", "H400x400", True),
+        "43F": (400.000128, 400.000128, "H400x400", "H400x400", True),
+        "4BC": (400.0, 400.0, "H400x400", "H400x400", True),
+        "4E4": (400.0, 400.0, "H400x400", "H400x400", True),
+        "4E5": (400.0, 400.0, "H400x400", "H400x400", True),
+        "58D": (400.0, 400.0, "H400x400", "H400x400", True),
+        "603": (400.0, 400.0, "H400x400", "H400x400", True),
+        "63D": (400.0, 400.0, "H400x400", "H400x400", True),
+        "69C": (400.0, 400.0, "H400x400", "H400x400", True),
+        "69F": (404.681630, 400.000099, "H414x405", "H400x400", True),
+        "720": (400.0, 400.0, "H400x400", "H400x400", True),
+        "721": (400.0, 400.0, "H400x400", "H400x400", True),
+    },
+    "Y1A": {
+        "CE83A": (350.0, 350.0, "H350x350", "H350x350", True),
+        "CE83B": (350.0, 350.0, "H350x350", "H350x350", True),
+        "CE83C": (350.0, 350.0, "H350x350", "H350x350", True),
+        "CE83D": (349.948428, 349.948426, "H350x350", "H350x350", True),
+    },
+}
 
 
 def _internal_layer_roles(importer: DXFImporter, mapping: dict[str, str]) -> dict[str, str]:
@@ -250,6 +316,67 @@ class PureWalerEnvelopeFactsTests(unittest.TestCase):
             source_handles=("ROOT",),
             component_key="waler:ROOT",
             qualified_exterior_faces=qualified_exterior_faces,
+        )
+
+    def test_supporting_line_width_ignores_longitudinal_overhang(self):
+        first = ((0.0, 0.0), (1000.0, 0.0))
+        second = ((100.0, 400.0), (1100.0, 400.0))
+
+        self.assertGreater(_line_separation(first, second), 400.0)
+        self.assertAlmostEqual(
+            _supporting_line_separation(first, second),
+            400.0,
+        )
+
+    def test_supporting_line_width_is_rotation_direction_and_order_invariant(self):
+        first = ((0.0, 0.0), (1000.0, 0.0))
+        second = ((100.0, 400.0), (1100.0, 400.0))
+        angle = math.radians(37.0)
+
+        def rotate(point: Point) -> Point:
+            return (
+                point[0] * math.cos(angle) - point[1] * math.sin(angle),
+                point[0] * math.sin(angle) + point[1] * math.cos(angle),
+            )
+
+        rotated_first = tuple(rotate(point) for point in first)
+        rotated_second = tuple(rotate(point) for point in second)
+        variants = (
+            (first, second),
+            (second, first),
+            (tuple(reversed(first)), second),
+            (first, tuple(reversed(second))),
+            (rotated_first, rotated_second),
+            (tuple(reversed(rotated_second)), tuple(reversed(rotated_first))),
+        )
+
+        for left, right in variants:
+            with self.subTest(left=left, right=right):
+                self.assertAlmostEqual(
+                    _supporting_line_separation(left, right),
+                    400.0,
+                    places=9,
+                )
+
+    def test_slightly_nonparallel_width_uses_symmetric_supporting_lines(self):
+        first = ((0.0, 0.0), (1000.0, 0.0))
+        second = ((100.0, 400.0), (1100.0, 410.0))
+        expected = (
+            _line_distance((500.0, 0.0), *second)
+            + _line_distance((600.0, 405.0), *first)
+        ) / 2.0
+
+        self.assertLessEqual(
+            math.degrees(math.atan2(10.0, 1000.0)),
+            self.tolerances.parallel_angle_tolerance_deg,
+        )
+        self.assertAlmostEqual(
+            _supporting_line_separation(first, second),
+            expected,
+        )
+        self.assertAlmostEqual(
+            _supporting_line_separation(second, first),
+            expected,
         )
 
     def test_four_rail_contour_retains_outer_physical_faces(self):
@@ -1661,13 +1788,97 @@ class WalerContactStagingTests(unittest.TestCase):
         self.assertEqual(forward[0][("waler", "WB")][-1], "formal")
 
 
+@unittest.skipUnless(
+    Y05_DXF_PATH.is_file()
+    and Y29_DXF_PATH.is_file()
+    and Y1A_DXF_PATH.is_file(),
+    "Y05/Y29/Y1A DXF test assets unavailable",
+)
+class WalerWidthFixtureCharacterizationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.results = {}
+        fixtures = (
+            ("Y05", Y05_DXF_PATH, Y05_LAYER_MAPPING),
+            ("Y29", Y29_DXF_PATH, Y29_LAYER_MAPPING),
+            ("Y1A", Y1A_DXF_PATH, Y1A_LAYER_MAPPING),
+        )
+        for name, path, mapping in fixtures:
+            importer = DXFImporter(path).read()
+            cls.results[name] = importer.convert(
+                layer_roles=_internal_layer_roles(importer, mapping),
+                material_specs=WALER_MATERIAL_SPECS,
+            )
+
+    def test_all_fixture_walers_match_characterized_width_material_and_gate(self):
+        changed_over_geometry_tolerance = []
+        material_changes = []
+        gate_changes = []
+
+        for fixture, expected_rows in WALER_WIDTH_CHARACTERIZATION.items():
+            result = self.results[fixture]
+            actual_by_handle = {
+                waler.source_handles[0]: waler
+                for waler in result.walers
+                if len(waler.source_handles) == 1
+            }
+            self.assertEqual(set(actual_by_handle), set(expected_rows))
+            for handle, row in expected_rows.items():
+                legacy_width, new_width, legacy_material, new_material, gate_applies = row
+                waler = actual_by_handle[handle]
+                with self.subTest(fixture=fixture, handle=handle):
+                    self.assertAlmostEqual(
+                        waler.source_width,
+                        new_width,
+                        delta=1e-5,
+                    )
+                    self.assertEqual(waler.material_spec, new_material)
+                    if new_material == "RC":
+                        self.assertEqual(waler.material_spec_source, "auto_hatch")
+                    else:
+                        self.assertEqual(
+                            recognize_material_spec_from_width(
+                                legacy_width,
+                                "圍令",
+                                WALER_MATERIAL_SPECS,
+                            ),
+                            legacy_material,
+                        )
+                        self.assertEqual(
+                            recognize_material_spec_from_width(
+                                new_width,
+                                "圍令",
+                                WALER_MATERIAL_SPECS,
+                            ),
+                            new_material,
+                        )
+                    if abs(new_width - legacy_width) > 50.0:
+                        changed_over_geometry_tolerance.append((fixture, handle))
+                    if legacy_material != new_material:
+                        material_changes.append(
+                            (fixture, handle, legacy_material, new_material)
+                        )
+                    if gate_applies and (legacy_width <= 600.0) != (new_width <= 600.0):
+                        gate_changes.append((fixture, handle))
+
+        self.assertEqual(changed_over_geometry_tolerance, [])
+        self.assertEqual(
+            material_changes,
+            [("Y29", "69F", "H414x405", "H400x400")],
+        )
+        self.assertEqual(gate_changes, [])
+
+
 @unittest.skipUnless(Y29_DXF_PATH.is_file(), "Y29 DXF test asset unavailable")
 class Y29WalerOverlapRegressionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.importer = DXFImporter(Y29_DXF_PATH).read()
         cls.layer_roles = _internal_layer_roles(cls.importer, Y29_LAYER_MAPPING)
-        cls.result = cls.importer.convert(layer_roles=cls.layer_roles)
+        cls.result = cls.importer.convert(
+            layer_roles=cls.layer_roles,
+            material_specs=WALER_MATERIAL_SPECS,
+        )
         cls.without_69c = cls.importer.convert(
             layer_roles=cls.layer_roles,
             excluded_sources=(ExcludedSource("waler", ("69C",)),),
@@ -1686,6 +1897,49 @@ class Y29WalerOverlapRegressionTests(unittest.TestCase):
         return next(
             waler for waler in result.walers if handle in waler.source_handles
         )
+
+    def test_y29_w18_and_w19_use_orthogonal_width_for_material_matching(self):
+        w18 = self._waler_by_source(self.result, "69F")
+        w19 = self._waler_by_source(self.result, "720")
+
+        self.assertEqual((w18.id, w19.id), ("W18", "W19"))
+        self.assertAlmostEqual(w18.source_width, 400.000099, delta=1e-5)
+        self.assertAlmostEqual(w19.source_width, 400.0, delta=1e-5)
+        self.assertEqual(w18.source_handles, ("69F",))
+        self.assertEqual(w18.contact_face_state, "formal")
+        self.assertEqual(w18.material_spec, "H400x400")
+        self.assertEqual(w19.material_spec, "H400x400")
+        self.assertEqual(w18.material_spec_source, "auto_width")
+        self.assertEqual(w19.material_spec_source, "auto_width")
+
+    def test_y29_w18_w19_overlap_and_b15_ambiguity_survive_width_correction(self):
+        overlap_codes = {
+            message.code
+            for message in self.result.messages
+            if {"69F", "720"}.issubset(message.source_handles)
+        }
+        brace = next(
+            member for member in self.result.braces if "71E" in member.source_handles
+        )
+        ambiguity = next(
+            message
+            for message in self.result.messages
+            if message.code == "AMBIGUOUS_WALER_CONNECTION"
+            and "71E" in message.source_handles
+        )
+
+        self.assertTrue(
+            {"WALER_SOURCE_OVERLAP", "WALER_OVERLAP_COMPETITION"}.issubset(
+                overlap_codes
+            )
+        )
+        self.assertTrue({"71E", "69F", "720"}.issubset(ambiguity.source_handles))
+        self.assertEqual((brace.from_waler, brace.to_waler), ("", ""))
+        self.assertFalse(brace.has_formal_connection)
+        self.assertEqual(brace.recommended_start_point_id, "")
+        self.assertEqual(brace.recommended_end_point_id, "")
+        self.assertEqual(brace.selected_start_point_id, "")
+        self.assertEqual(brace.selected_end_point_id, "")
 
     def test_y29_terminal_competition_characterization_uses_source_identity(self):
         """Freeze the real fixture mapping before changing relation semantics."""
@@ -1824,12 +2078,93 @@ class Y29WalerOverlapRegressionTests(unittest.TestCase):
         )
         legacy_row = dict(debug_row)
         legacy_row.pop("contact_face_state")
+        legacy_row.pop("engineering_line_authority")
+        legacy_row.pop("source_width_state")
 
         restored = type(waler)(**legacy_row)
 
         self.assertEqual(debug_row["contact_face_state"], "formal")
+        self.assertEqual(debug_row["engineering_line_authority"], "automatic")
+        self.assertIn(
+            debug_row["source_width_state"],
+            {"unique", "unknown", "ambiguous"},
+        )
         self.assertEqual(restored.contact_face_state, "formal")
+        self.assertEqual(restored.engineering_line_authority, "automatic")
+        self.assertEqual(
+            restored.source_width_state,
+            "unique" if restored.source_width > 0.0 else "unknown",
+        )
         self.assertTrue(restored.has_formal_contact_face)
+
+    def test_source_width_state_uses_all_orthogonal_measurements(self):
+        def fact(key, width):
+            return WalerEnvelopeFacts(
+                key,
+                (key,),
+                ((0.0, 0.0), (100.0, 0.0)),
+                (
+                    ((0.0, -width / 2.0), (100.0, -width / 2.0)),
+                    ((0.0, width / 2.0), (100.0, width / 2.0)),
+                ),
+                width,
+                (),
+            )
+
+        tolerances = GeometryTolerances(material_width_tolerance_mm=1.0)
+
+        self.assertEqual(
+            _waler_source_width_assessment((), tolerances),
+            ("unknown", 0.0),
+        )
+        self.assertEqual(
+            _waler_source_width_assessment((fact("A", 400.0),), tolerances),
+            ("unique", 400.0),
+        )
+        self.assertEqual(
+            _waler_source_width_assessment(
+                (fact("A", 400.0), fact("B", 400.5)),
+                tolerances,
+            ),
+            ("unique", 400.0),
+        )
+        self.assertEqual(
+            _waler_source_width_assessment(
+                (fact("A", 350.0), fact("B", 400.0)),
+                tolerances,
+            ),
+            ("ambiguous", 0.0),
+        )
+
+        existing = self._waler_by_source(self.result, "69C")
+        ambiguous_auto = replace(
+            existing,
+            source_width=400.0,
+            source_width_state="ambiguous",
+            material_spec="H400x400",
+            material_spec_source="auto_width",
+        )
+        manual = replace(
+            ambiguous_auto,
+            material_spec="MANUAL",
+            material_spec_source="manual",
+        )
+        auto_result = recognize_result_material_specs(
+            replace(self.result, walers=(ambiguous_auto,)),
+            WALER_MATERIAL_SPECS,
+        )
+        manual_result = recognize_result_material_specs(
+            replace(self.result, walers=(manual,)),
+            WALER_MATERIAL_SPECS,
+        )
+        self.assertEqual(
+            (auto_result.walers[0].material_spec, auto_result.walers[0].material_spec_source),
+            ("", ""),
+        )
+        self.assertEqual(
+            (manual_result.walers[0].material_spec, manual_result.walers[0].material_spec_source),
+            ("MANUAL", "manual"),
+        )
 
     def test_review_projection_localizes_pair_and_affected_terminal_sources(self):
         records = build_problem_records(self.result)
@@ -1858,7 +2193,8 @@ class Y29WalerOverlapRegressionTests(unittest.TestCase):
         self.assertEqual(competition.severity, "error")
         self.assertTrue({"69C", "721"}.issubset(set(competition.source_handles)))
         self.assertGreater(len(competition.source_handles), 2)
-        self.assertIn("terminal", competition.description)
+        self.assertIn("構件端點", competition.description)
+        self.assertNotIn("terminal", competition.description)
         self.assertNotIn("建議排除", competition.description)
         self.assertEqual(set(waler_items), {"W17", "W20"})
         self.assertTrue(

@@ -18,6 +18,10 @@ from dxf_import.importer import (
 )
 from dxf_import.models import ExcludedSource, GeometryTolerances
 from dxf_import.review_workflow import DXFReviewWorkflow
+from dxf_import.source_exclusion import (
+    capture_manual_overrides,
+    replay_manual_overrides,
+)
 from dxf_import.recognition import (
     _Candidate,
     _GeometryGroup,
@@ -28,12 +32,9 @@ from dxf_import.recognition import (
     _refine_corner_brace_axis_intersections,
 )
 from dxf_import.validation import build_problem_records, build_review_items
+from tests.sample_dxf_assets import Y05_DXF_PATH, Y1A_DXF_PATH, Y29_DXF_PATH
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-Y29_DXF_PATH = PROJECT_ROOT / "Y29_test.dxf"
-Y1A_DXF_PATH = PROJECT_ROOT / "Y1A擋土支撐簡化版.dxf"
-Y05_DXF_PATH = next(PROJECT_ROOT.glob("670-CO-Y05*.dxf"), None)
 LAYER_USE_TO_ROLE = {
     "圍令": "waler",
     "支撐": "strut",
@@ -979,6 +980,78 @@ class Y29CornerBraceDuplicateWalerRegressionTests(unittest.TestCase):
                     original_count + 1,
                 )
         self.assertEqual(len(self.both_active.corner_braces), original_count)
+
+    def test_relationship_selection_replays_only_the_saved_body_and_relationship(self):
+        items = build_review_items(
+            self.both_active,
+            build_problem_records(self.both_active),
+        )
+        item = next(
+            value
+            for value in items
+            if value.role == "corner_brace" and "4C" in value.source_handles
+        )
+        plan = plan_corner_brace_repair(
+            self.both_active,
+            item,
+            base_revision=0,
+            review_items=items,
+        )
+        selected = plan.candidates[0]
+        updated, member_id = apply_corner_brace_repair(
+            self.both_active,
+            item,
+            plan,
+            selected.id,
+            explicit_adoption=True,
+        )
+        overrides = capture_manual_overrides(updated)
+
+        replayed, report = replay_manual_overrides(self.both_active, overrides)
+
+        self.assertEqual(report.needs_review, ())
+        self.assertEqual(report.disabled, ())
+        self.assertTrue(report.preserved)
+        replayed_member = next(
+            value for value in replayed.corner_braces if value.id == member_id
+        )
+        assert replayed_member.repair_provenance is not None
+        self.assertEqual(
+            replayed_member.repair_provenance.selection_mode,
+            "body_relationship_selection",
+        )
+        self.assertEqual(
+            replayed_member.repair_provenance.body_signature,
+            selected.body_signature,
+        )
+        self.assertEqual(
+            replayed_member.repair_provenance.target_waler_identity,
+            next(
+                value.corner_brace_repair.target_waler_identity
+                for value in overrides
+                if value.corner_brace_repair is not None
+            ),
+        )
+
+        changed_overrides = tuple(
+            replace(
+                value,
+                corner_brace_repair=replace(
+                    value.corner_brace_repair,
+                    body_signature=f"{value.corner_brace_repair.body_signature}-CHANGED",
+                ),
+            )
+            if value.corner_brace_repair is not None
+            else value
+            for value in overrides
+        )
+        rejected, rejected_report = replay_manual_overrides(
+            self.both_active,
+            changed_overrides,
+        )
+        self.assertEqual(rejected.corner_braces, self.both_active.corner_braces)
+        self.assertTrue(rejected_report.needs_review)
+        self.assertEqual(rejected_report.preserved, ())
 
     def test_expected_slenderness_population_remains_52_of_52(self):
         self.assertEqual(len(self.both_active.corner_braces), 52)

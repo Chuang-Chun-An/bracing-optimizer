@@ -32,6 +32,19 @@ class MaterialDetailRow:
     material_spec: str
     length: int | float
     quantity: int = 1
+    valid: bool = True
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExportLegality:
+    """Read-only legality projection for one visible exported member."""
+
+    result_id: str
+    member_kind: str
+    member_id: str
+    valid: bool
+    reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -547,6 +560,116 @@ class ProjectResultModel:
         )
 
     @staticmethod
+    def _ordered_display_reasons(value) -> tuple[str, ...]:
+        if value is None:
+            candidates = ()
+        elif isinstance(value, str):
+            candidates = value.splitlines()
+        elif isinstance(value, Sequence) and not isinstance(
+            value,
+            (bytes, bytearray),
+        ):
+            candidates = value
+        else:
+            candidates = (value,)
+
+        ordered = []
+        seen = set()
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            ordered.append(text)
+        return tuple(ordered)
+
+    def collect_visible_export_legality(self) -> tuple[ExportLegality, ...]:
+        """Project committed validity onto each currently visible member."""
+
+        projections = []
+        for result_id, item in self.result_items.items():
+            if not item.get("visible", True):
+                continue
+            result_type = item.get("type")
+            result = item.get("result")
+
+            if result_type == "waler" and isinstance(result, Mapping):
+                plan = result.get("selected_plan") or {}
+                if not isinstance(plan, Mapping):
+                    continue
+                member_id = str(
+                    result.get("waler_id", "")
+                    or self.waler_result_identity(result_id, item)
+                    or result_id
+                ).strip()
+                if not member_id:
+                    continue
+                legality = plan.get("legality") or {}
+                if not isinstance(legality, Mapping):
+                    legality = {}
+                valid = bool(
+                    legality["valid"]
+                    if "valid" in legality
+                    else plan.get("valid", False)
+                )
+                raw_reasons = (
+                    legality.get("violations")
+                    if "violations" in legality
+                    else plan.get("errors")
+                )
+                reasons = self._ordered_display_reasons(raw_reasons)
+                projections.append(ExportLegality(
+                    result_id=str(result_id),
+                    member_kind="waler",
+                    member_id=member_id,
+                    valid=valid,
+                    reasons=(
+                        ()
+                        if valid
+                        else reasons or ("未提供不合法原因",)
+                    ),
+                ))
+                continue
+
+            if result_type != "support" or result is None:
+                continue
+            support_visibility = item.get("support_visibility")
+            for plan in list(getattr(result, "plans", []) or []):
+                member_id = str(
+                    getattr(plan, "support_id", "") or ""
+                ).strip()
+                if not member_id:
+                    continue
+                is_visible = (
+                    bool(support_visibility.get(member_id, True))
+                    if isinstance(support_visibility, Mapping)
+                    and member_id in support_visibility
+                    else bool(item.get("visible", True))
+                )
+                if not is_visible:
+                    continue
+                reasons = self._ordered_display_reasons(
+                    getattr(plan, "reason", "")
+                )
+                valid = bool(getattr(plan, "valid", False)) and not reasons
+                projections.append(ExportLegality(
+                    result_id=str(result_id),
+                    member_kind="support",
+                    member_id=member_id,
+                    valid=valid,
+                    reasons=(
+                        ()
+                        if valid
+                        else reasons or ("未提供不合法原因",)
+                    ),
+                ))
+
+        return tuple(sorted(
+            projections,
+            key=lambda row: (row.member_kind, row.member_id, row.result_id),
+        ))
+
+    @staticmethod
     def material_length_key(value):
         try:
             number = float(value)
@@ -576,6 +699,7 @@ class ProjectResultModel:
         material_type,
         material_spec: str,
         value,
+        legality: ExportLegality,
     ) -> MaterialDetailRow:
         length = cls.material_length_key(value)
         if length is None:
@@ -591,6 +715,8 @@ class ProjectResultModel:
             material_type=str(material_type or "").strip().lower() or "other",
             material_spec=material_spec,
             length=length,
+            valid=legality.valid,
+            reasons=legality.reasons,
         )
 
     @staticmethod
@@ -614,9 +740,18 @@ class ProjectResultModel:
             pieces.append(("shim", adjustment))
         return pieces
 
-    def collect_visible_material_details(self) -> list[MaterialDetailRow]:
+    def collect_visible_material_details(
+        self,
+        legality_rows: Sequence[ExportLegality] | None = None,
+    ) -> list[MaterialDetailRow]:
         """Return one row per physical piece in the currently visible plans."""
 
+        if legality_rows is None:
+            legality_rows = self.collect_visible_export_legality()
+        legality_by_member = {
+            (row.result_id, row.member_kind, row.member_id): row
+            for row in legality_rows
+        }
         details = []
         for result_id, item in sorted(self.result_items.items()):
             if not item.get("visible", True):
@@ -634,6 +769,13 @@ class ProjectResultModel:
                 material_spec = str(
                     result.get("material_spec", "") or ""
                 ).strip()
+                legality = legality_by_member.get(
+                    (str(result_id), "waler", member_id)
+                )
+                if legality is None:
+                    raise MaterialDetailBuildError(
+                        f"圍令 {member_id} 缺少匯出合法性投影"
+                    )
                 for piece_index, piece in enumerate(
                     self._waler_material_pieces(plan),
                     start=1,
@@ -656,6 +798,7 @@ class ProjectResultModel:
                             else ""
                         ),
                         value=value,
+                        legality=legality,
                     ))
                 continue
 
@@ -673,6 +816,13 @@ class ProjectResultModel:
                 material_spec = str(
                     getattr(plan, "material_spec", "") or ""
                 ).strip()
+                legality = legality_by_member.get(
+                    (str(result_id), "support", member_id)
+                )
+                if legality is None:
+                    raise MaterialDetailBuildError(
+                        f"支撐 {member_id} 缺少匯出合法性投影"
+                    )
                 for piece_index, piece in enumerate(
                     list(getattr(plan, "pieces", []) or []),
                     start=1,
@@ -695,6 +845,7 @@ class ProjectResultModel:
                             else ""
                         ),
                         value=value,
+                        legality=legality,
                     ))
         return details
 
@@ -793,6 +944,7 @@ class ProjectResultModel:
         return summary
 
 __all__ = [
+    "ExportLegality",
     "GlobalWalerApplyPlan",
     "MaterialDetailBuildError",
     "MaterialDetailRow",

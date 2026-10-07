@@ -315,7 +315,7 @@ class WalerPlanEvaluationCharacterizationTests(unittest.TestCase):
 
         self.assertEqual(
             result["errors"],
-            ["鋼材總長 6000 小於允許下限 11800"],
+            ["鋼材總長 6000 小於允許下限 11550"],
         )
         self.assertEqual(result["score"], 1050000)
 
@@ -577,7 +577,7 @@ class WalerPlanEvaluationCharacterizationTests(unittest.TestCase):
             [
                 "❌ 鋼材總長不足",
                 "需求長度：12000 mm",
-                "允許最短鋼材總長：11800 mm",
+                "允許最短鋼材總長：11550 mm",
                 "實際鋼材總長：6000 mm",
             ],
         )
@@ -632,14 +632,20 @@ class WalerPlanEvaluationCharacterizationTests(unittest.TestCase):
             ["無此料長", "無此料長"],
         )
 
-    def test_manual_total_length_boundaries_and_no_waler_shim(self):
+    def test_manual_total_length_boundaries_and_tail_adjustment(self):
         cases = (
-            ([6000, 5799], False, ["鋼材總長不足"]),
-            ([6000, 5800], True, []),
-            ([6000, 6000], True, []),
-            ([6000, 6001], False, ["鋼材總長太長"]),
+            ([6000, 5549], False, ["鋼材總長不足"], None, None),
+            ([6000, 5550], True, [], 300, 150),
+            ([6000, 6000], True, [], 0, 0),
+            ([6000, 6001], False, ["鋼材總長太長"], None, None),
         )
-        for segments, expected_valid, expected_violations in cases:
+        for (
+            segments,
+            expected_valid,
+            expected_violations,
+            expected_adjustment,
+            expected_gap,
+        ) in cases:
             rows = [
                 {
                     "ItemCode": f"W-{length}",
@@ -658,15 +664,14 @@ class WalerPlanEvaluationCharacterizationTests(unittest.TestCase):
                     plan["legality"]["violations"],
                     expected_violations,
                 )
-                self.assertEqual(plan["tail_adjustment"], 0)
-                self.assertEqual(
-                    plan["pieces"],
-                    [("steel", length) for length in segments],
-                )
-                self.assertNotIn(
-                    "shim",
-                    [piece_type for piece_type, _length in plan["pieces"]],
-                )
+                self.assertEqual(plan["tail_adjustment"], expected_adjustment)
+                self.assertEqual(plan["gap"], expected_gap)
+                expected_pieces = [
+                    ("steel", length) for length in segments
+                ]
+                if expected_adjustment:
+                    expected_pieces.append(("shim", expected_adjustment))
+                self.assertEqual(plan["pieces"], expected_pieces)
                 if expected_valid:
                     self.assertIsNotNone(plan["assignments"])
                     self.assertIsNotNone(plan["score"])

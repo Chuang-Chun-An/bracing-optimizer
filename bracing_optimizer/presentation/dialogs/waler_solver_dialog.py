@@ -9,9 +9,17 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from bracing_optimizer.algorithms import solver_search, wales
+from bracing_optimizer.algorithms.cancellation import SolverCancelled
 from bracing_optimizer.application.optimize_waler import OptimizeWalerRequest
 from bracing_optimizer.application.solver_input_builder import WalerProblemInput
 from bracing_optimizer.application.waler_solver_guard import WalerSolverBusyGuard
+from bracing_optimizer.application.solver_operation_registry import (
+    CompletionDisposition,
+    SolverExecution,
+    SolverOperationRegistry,
+    SolverOperationUnavailable,
+    SolverSnapshotHandle,
+)
 from bracing_optimizer.domain.material_rules import MaterialRatioTargets
 
 from .solver_dialog_base import (
@@ -27,6 +35,10 @@ WALER_SOLVER_BUSY_MESSAGE = "目前已有圍令計算正在執行，請等待完
 WALER_SOLVER_CLOSE_BUSY_MESSAGE = (
     "圍令最佳化仍在計算中，請等待計算完成後再關閉。"
 )
+WALER_SOLVER_STOPPING_MESSAGE = "前一次計算正在停止，請稍後再試"
+CAD_STALE_OPEN_MESSAGE = "CAD 已更新；請關閉後重新開啟 Solver"
+CAD_STALE_RUNNING_MESSAGE = "CAD 更新，計算已停止；請關閉後重新開啟 Solver"
+ADOPTION_BLOCKED_MESSAGE = "計算完成，但CAD ACK尚未完成，結果未採用"
 
 
 class WalerSolverDialog(SolverDialogThreadBridge):
@@ -38,6 +50,9 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         callback,
         optimize_waler,
         waler_solver_guard: WalerSolverBusyGuard,
+        operation_registry: SolverOperationRegistry,
+        snapshot_handle: SolverSnapshotHandle,
+        adoption_guard,
     ):
         self.callback = callback
         self.waler_input = waler_input
@@ -51,6 +66,9 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         self.solver_memory = solver_memory
         self.optimize_waler = optimize_waler
         self.waler_solver_guard = waler_solver_guard
+        self.operation_registry = operation_registry
+        self.snapshot_handle = snapshot_handle
+        self.adoption_guard = adoption_guard
         self.min_piece_length = 1000
         self.max_piece_length = 10000
         self.joint_clearance = 300
@@ -60,6 +78,7 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         self.current_results = None
         self.solver_key = None
         self._calculation_running = False
+        self._snapshot_stale = False
 
         waler_id = self.waler_id
         start_point = self.start_point
@@ -67,8 +86,16 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         forbidden_points = self.forbidden_points
         purchasable_lengths = self.purchasable_lengths
         rounded_length = self.length
-        preview_steel_length, preview_tail_gap = (
-            wales.resolve_waler_steel_target(rounded_length)
+        preview_steel_length, preview_shortfall = (
+            wales.resolve_waler_steel_target(
+                rounded_length,
+                steel_step=self.candidate_joint_step,
+            )
+        )
+        preview_tail = wales.resolve_waler_tail(
+            rounded_length,
+            steel_length=preview_steel_length,
+            steel_step=self.candidate_joint_step,
         )
         candidate_joint_count = len(wales.generate_candidate_joint_points(
             preview_steel_length,
@@ -111,8 +138,22 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             (
                 "標準鋼材總長",
                 f"{format_number(preview_steel_length)} mm",
-                "短少量（允許 0～200 mm）",
-                f"{format_number(preview_tail_gap)} mm",
+                "鋼材短差",
+                f"{format_number(preview_shortfall)} mm",
+            ),
+            (
+                "尾端調整塊",
+                (
+                    "無合法組合"
+                    if preview_tail is None
+                    else f"{format_number(preview_tail.tail_adjustment)} mm"
+                ),
+                f"Gap（允許 0～{wales.WALER_MAX_GAP} mm）",
+                (
+                    "無合法組合"
+                    if preview_tail is None
+                    else f"{format_number(preview_tail.gap)} mm"
+                ),
             ),
             ("起點座標", format_point(start_point), "終點座標", format_point(end_point)),
             ("禁止點數量", str(len(forbidden_points)), "候選接頭點數", str(candidate_joint_count)),
@@ -213,6 +254,10 @@ class WalerSolverDialog(SolverDialogThreadBridge):
 
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
         self._initialize_ui_bridge()
+        self.operation_registry.set_stale_listener(
+            self.snapshot_handle,
+            self._on_snapshot_stale,
+        )
 
     def _append_message(self, text):
         follow_new_output = _text_is_at_bottom(self.result_text)
@@ -374,6 +419,16 @@ class WalerSolverDialog(SolverDialogThreadBridge):
         self.solver_key = solver_key
         memory_entry = self.solver_memory.get(solver_key)
 
+        execution = None
+        if hasattr(self, "operation_registry"):
+            try:
+                execution = self.operation_registry.start_execution(
+                    self.snapshot_handle
+                )
+            except SolverOperationUnavailable:
+                self._on_snapshot_stale("cad_update")
+                return
+
         if memory_entry is not None and self._ask_use_memory_result(solver_key):
             self.result_text.configure(state="normal")
             self.result_text.delete("1.0", "end")
@@ -385,15 +440,65 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             ) = self._restore_solver_memory(memory_entry)
             self.current_results = None
             self._append_message("已直接載入本次執行期間的相同條件結果。\n")
-            self._display_results(restored_results, diagnostics=restored_diagnostics)
+            disposition = CompletionDisposition.ADOPTABLE
+            if execution is not None:
+                disposition = self.operation_registry.complete_execution(
+                    self.snapshot_handle,
+                    execution.identity,
+                )
+            if disposition is CompletionDisposition.STALE or getattr(
+                self,
+                "_snapshot_stale",
+                False,
+            ):
+                self._on_snapshot_stale("cad_update")
+                return
+            if disposition is CompletionDisposition.IGNORED:
+                return
+            if execution is not None:
+                try:
+                    self.adoption_guard()
+                except RuntimeError:
+                    self.summary_var.set(ADOPTION_BLOCKED_MESSAGE)
+                    return
+            try:
+                self._display_results(
+                    restored_results,
+                    diagnostics=restored_diagnostics,
+                )
+            except Exception:
+                LOGGER.exception("Single Waler memory result adoption failed")
+                self.summary_var.set(
+                    "計算結果處理發生錯誤；請查看詳細執行訊息。"
+                )
+            return
+
+        if getattr(self, "_snapshot_stale", False):
+            if execution is not None:
+                self.operation_registry.complete_execution(
+                    self.snapshot_handle,
+                    execution.identity,
+                )
+            self._on_snapshot_stale("cad_update")
             return
 
         lease = self.waler_solver_guard.try_acquire("single")
         if lease is None:
+            if execution is not None:
+                self.operation_registry.abort_execution(
+                    self.snapshot_handle,
+                    execution.identity,
+                )
             LOGGER.warning("Single Waler blocked by busy guard")
+            busy_message = (
+                WALER_SOLVER_STOPPING_MESSAGE
+                if hasattr(self, "operation_registry")
+                and self.operation_registry.has_stale_running_waler()
+                else WALER_SOLVER_BUSY_MESSAGE
+            )
             messagebox.showwarning(
                 "圍令計算中",
-                WALER_SOLVER_BUSY_MESSAGE,
+                busy_message,
                 parent=self.dialog,
             )
             return
@@ -413,15 +518,26 @@ class WalerSolverDialog(SolverDialogThreadBridge):
 
             thread = threading.Thread(
                 target=self._solver_thread,
-                args=(request, lease),
+                args=(request, lease, execution),
                 daemon=True,
             )
             self._calculation_running = True
             thread.start()
         except Exception:
             lease.release()
+            if execution is not None:
+                self.operation_registry.abort_execution(
+                    self.snapshot_handle,
+                    execution.identity,
+                )
             self._calculation_running = False
-            self.run_button.configure(state="normal")
+            self.run_button.configure(
+                state=(
+                    "disabled"
+                    if getattr(self, "_snapshot_stale", False)
+                    else "normal"
+                )
+            )
             LOGGER.exception("Single Waler Solver thread start failed")
             messagebox.showerror(
                 "圍令計算失敗",
@@ -430,7 +546,12 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             )
 
 
-    def _solver_thread(self, request, lease):
+    def _solver_thread(
+        self,
+        request,
+        lease,
+        execution: SolverExecution | None = None,
+    ):
         def gui_logger(*args):
             message = " ".join(str(arg) for arg in args)
             if not message.endswith("\n"):
@@ -439,19 +560,29 @@ class WalerSolverDialog(SolverDialogThreadBridge):
 
         results = None
         diagnostics = None
+        config = None
         worker_error = None
         try:
             result = self.optimize_waler.execute(
                 request,
                 logger=gui_logger,
                 on_progress=lambda progress: self._post_ui(
-                    lambda message=progress.message: self.summary_var.set(message)
+                    lambda message=progress.message: self._show_progress_if_current(
+                        execution,
+                        message,
+                    )
+                ),
+                cancellation_token=(
+                    execution.cancellation_token
+                    if execution is not None
+                    else None
                 ),
             )
-            self.cfg = result.config
+            config = result.config
             results = list(result.solutions)
             diagnostics = result.diagnostics
-            self._save_solver_memory(results, diagnostics)
+        except SolverCancelled as exc:
+            worker_error = exc
         except Exception as exc:
             import traceback
 
@@ -464,21 +595,67 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             self._post_ui(
                 lambda results=results,
                 diagnostics=diagnostics,
-                error=worker_error: self._finish_worker(
+                error=worker_error,
+                config=config,
+                execution=execution: self._finish_worker(
                     results,
                     diagnostics,
                     error,
+                    config=config,
+                    execution=execution,
                 )
             )
 
-    def _finish_worker(self, results, diagnostics, error):
+    def _show_progress_if_current(self, execution, message):
+        if execution is None or self.operation_registry.can_adopt(
+            self.snapshot_handle,
+            execution.identity,
+        ):
+            self.summary_var.set(message)
+
+    def _finish_worker(
+        self,
+        results,
+        diagnostics,
+        error,
+        *,
+        config=None,
+        execution: SolverExecution | None = None,
+    ):
+        disposition = CompletionDisposition.ADOPTABLE
+        if execution is not None:
+            disposition = self.operation_registry.complete_execution(
+                self.snapshot_handle,
+                execution.identity,
+            )
+        if disposition is CompletionDisposition.IGNORED:
+            return
         try:
-            if error is not None:
+            if disposition is CompletionDisposition.STALE or getattr(
+                self,
+                "_snapshot_stale",
+                False,
+            ):
+                self._snapshot_stale = True
+                self.summary_var.set(CAD_STALE_RUNNING_MESSAGE)
+            elif isinstance(error, SolverCancelled):
+                self.summary_var.set("計算已取消。")
+            elif error is not None:
                 self.summary_var.set(
                     "計算發生錯誤；這不代表工程條件無解，請查看詳細執行訊息。"
                 )
             elif results is not None:
+                if execution is not None:
+                    try:
+                        self.adoption_guard()
+                    except RuntimeError:
+                        self.summary_var.set(ADOPTION_BLOCKED_MESSAGE)
+                        return
+                if config is not None:
+                    self.cfg = config
                 self._display_results(results, diagnostics=diagnostics)
+                if execution is not None:
+                    self._save_solver_memory(results, diagnostics)
             else:
                 self.summary_var.set("計算發生錯誤；Solver 未回傳結果。")
         except Exception:
@@ -488,7 +665,22 @@ class WalerSolverDialog(SolverDialogThreadBridge):
             )
         finally:
             self._calculation_running = False
-            self.run_button.configure(state="normal")
+            self.run_button.configure(
+                state=(
+                    "disabled"
+                    if getattr(self, "_snapshot_stale", False)
+                    else "normal"
+                )
+            )
+
+    def _on_snapshot_stale(self, _reason):
+        self._snapshot_stale = True
+        self.run_button.configure(state="disabled")
+        self.summary_var.set(
+            CAD_STALE_RUNNING_MESSAGE
+            if self._calculation_running
+            else CAD_STALE_OPEN_MESSAGE
+        )
 
     def _waler_ratio_targets(self):
         return self.material_ratio_targets.as_dict()
@@ -593,6 +785,12 @@ class WalerSolverDialog(SolverDialogThreadBridge):
                 parent=self.dialog,
             )
             return
+        if hasattr(self, "operation_registry"):
+            self.operation_registry.set_stale_listener(
+                self.snapshot_handle,
+                None,
+            )
+            self.operation_registry.close_snapshot(self.snapshot_handle)
         self._close_ui_bridge()
         self.dialog.destroy()
 
