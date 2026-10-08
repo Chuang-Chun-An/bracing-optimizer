@@ -1,0 +1,1510 @@
+"""Validation and problem summaries for prepared DXF models."""
+
+from __future__ import annotations
+
+import math
+import re
+from collections import defaultdict
+from typing import Sequence
+
+from .geometry import (
+    _angle_difference_deg,
+    _distance,
+    _length,
+    _line_distance,
+    _segment_distance,
+)
+from .models import (
+    AuxiliaryComponent,
+    Beam,
+    Brace,
+    CandidatePoint,
+    Column,
+    CornerBrace,
+    DXFImportResult,
+    GeometryTolerances,
+    ProblemRecord,
+    ReviewItem,
+    Strut,
+    ValidationMessage,
+    ValidationOverviewItem,
+    Waler,
+    ERROR_SEVERITIES,
+)
+from .recognition import _lines_duplicate
+
+
+PROBLEM_SEVERITY_RANK = {
+    "critical": 4,
+    "error": 3,
+    "warning": 2,
+    "info": 1,
+}
+
+# Description source is an explicit code contract.  Runtime projection never
+# guesses whether an arbitrary message is already suitable for users.
+PRESERVE_MESSAGE_CODES = frozenset(
+    {
+        "AMBIGUOUS_CENTERLINE",
+        "AMBIGUOUS_INNER_LINE",
+        "BEAM_CROSSING_SNAPPED",
+        "BEAM_NOT_ASSOCIATED",
+        "BEAM_OVERLAPS_STRUT",
+        "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+        "BIM_BLOCK_WALER_FINALIZE_FAILED",
+        "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+        "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+        "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+        "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+        "BIM_JOIST_PAIR_AMBIGUOUS",
+        "BIM_JOIST_PAIR_SPACING_INVALID",
+        "BIM_JOIST_PAIR_UNPAIRED",
+        "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+        "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+        "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+        "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+        "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+        "BRACE_AXIS_EXTENDED_TO_WALER",
+        "BRACE_BODY_WIDTH_TOO_SMALL",
+        "BRACE_NOT_CONNECTED",
+        "BRACE_ONE_END_NOT_CONNECTED",
+        "BRACE_SAME_WALER_CONNECTION",
+        "CAD_MANUAL_LINE_SELECTION",
+        "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+        "CANDIDATE_LINE_DIRECTION_CHANGED",
+        "CANDIDATE_LINE_TOO_SHORT",
+        "CANDIDATE_POINT_INVALID",
+        "CANDIDATE_POINT_MISSING",
+        "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+        "COLUMN_ASSOCIATION_REQUIRES_REVIEW",
+        "COLUMN_NOT_ASSOCIATED",
+        "COMPONENT_TOO_SHORT",
+        "CORNER_BRACE_CONNECTION_INVALID",
+        "CORNER_BRACE_CONNECTION_POINT_FAILED",
+        "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
+        "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
+        "CORNER_BRACE_INTERSECTION_FAILED",
+        "DUPLICATED_COMPONENT",
+        "DUPLICATE_ENGINEERING_COMPONENT",
+        "MANUAL_POINT_SELECTION",
+        "MULTIPLE_MODELS_FROM_ONE_SOURCE",
+        "POSSIBLE_COMPONENT_SHORT_SIDE",
+        "STRUT_NOT_CONNECTED",
+        "STRUT_ONE_END_NOT_CONNECTED",
+        "STRUT_WALER_INTERSECTION_FAILED",
+        "TEXT_SKIPPED",
+        "WALER_CANDIDATE_LINE_UNUSUAL",
+        "WALER_CONTACT_ADJUSTED",
+        "WALER_CONTACT_BASELINE_CHANGED",
+        "WALER_CONTACT_FACE_AMBIGUOUS",
+        "WALER_ENVELOPE_AMBIGUOUS",
+        "WALER_ENVELOPE_UNRESOLVED",
+        "WALER_SUPPORT_SIDE_UNKNOWN",
+        "ZERO_LENGTH_CANDIDATE_LINE",
+        "ZERO_LENGTH_COMPONENT",
+        "WALER_ENGINEERING_LINE_FAILED",
+        "STRUT_CENTERLINE_FAILED",
+        "BRACE_CENTERLINE_FAILED",
+        "CORNER_BRACE_CENTERLINE_FAILED",
+        "COLUMN_CENTERLINE_FAILED",
+        "BEAM_CENTERLINE_FAILED",
+    }
+)
+
+FORMATTER_DESCRIPTION_CODES = frozenset(
+    {
+        "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+        "AMBIGUOUS_COMPONENT_ASSOCIATION",
+        "AMBIGUOUS_WALER_CONNECTION",
+        "BIM_JOIST_DETAIL_IGNORED",
+        "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+        "CORNER_BRACE_BODY_UNRESOLVED",
+        "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
+        "CORNER_BRACE_RELATIONSHIP_UNRESOLVED",
+        "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+        "HATCH_WALER_BOUNDARY_INVALID",
+        "HATCH_WALER_ENGINEERING_LINE_FAILED",
+        "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+        "WALER_COMPETING_SIDE_EVIDENCE_IGNORED",
+        "WALER_CONTACT_FACE_UNRESOLVED",
+        "WALER_CONTACT_FINALIZE_FAILED",
+        "WALER_OVERLAP_COMPETITION",
+        "WALER_SOURCE_OVERLAP",
+        "WALER_RECOGNITION_FAILED",
+        "STRUT_RECOGNITION_FAILED",
+        "BRACE_RECOGNITION_FAILED",
+        "CORNER_BRACE_RECOGNITION_FAILED",
+        "COLUMN_RECOGNITION_FAILED",
+        "BEAM_RECOGNITION_FAILED",
+    }
+)
+
+FALLBACK_DESCRIPTION_CODES = frozenset(
+    {
+        "BIM_JOIST_RECOGNITION_FAILED",
+        "BRACE_TERMINAL_VERDICT_MISSING",
+    }
+)
+
+DXF_REVIEW_DIAGNOSTIC_CODES = frozenset(
+    PRESERVE_MESSAGE_CODES
+    | FORMATTER_DESCRIPTION_CODES
+    | FALLBACK_DESCRIPTION_CODES
+)
+
+
+def assert_problem_code_catalog_complete(producer_codes: Sequence[str]) -> None:
+    """Fail when a producer code has no explicit description-source class."""
+
+    producer_set = {str(code) for code in producer_codes}
+    categories = (
+        PRESERVE_MESSAGE_CODES,
+        FORMATTER_DESCRIPTION_CODES,
+        FALLBACK_DESCRIPTION_CODES,
+    )
+    overlaps = (
+        (categories[0] & categories[1])
+        | (categories[0] & categories[2])
+        | (categories[1] & categories[2])
+    )
+    unclassified = producer_set - DXF_REVIEW_DIAGNOSTIC_CODES
+    stale = DXF_REVIEW_DIAGNOSTIC_CODES - producer_set
+    missing_display_types = (
+        producer_set
+        - FALLBACK_DESCRIPTION_CODES
+        - set(_PROBLEM_DISPLAY_TYPE_BY_CODE)
+    )
+    missing_formatters = FORMATTER_DESCRIPTION_CODES - set(
+        _PROBLEM_DESCRIPTION_FORMATTERS
+    )
+    problems = []
+    if overlaps:
+        problems.append(f"重複分類：{', '.join(sorted(overlaps))}")
+    if unclassified:
+        problems.append(f"未分類：{', '.join(sorted(unclassified))}")
+    if stale:
+        problems.append(f"不在 producer inventory：{', '.join(sorted(stale))}")
+    if missing_display_types:
+        problems.append(
+            "缺少中文類型：" + ", ".join(sorted(missing_display_types))
+        )
+    if missing_formatters:
+        problems.append(
+            "缺少專用 formatter：" + ", ".join(sorted(missing_formatters))
+        )
+    if problems:
+        raise ValueError("；".join(problems))
+
+
+_ROLE_LABELS = {
+    "waler": "圍令",
+    "strut": "支撐",
+    "brace": "斜撐",
+    "corner_brace": "角撐",
+    "column": "中間柱",
+    "beam": "托梁",
+    "unknown": "構件",
+}
+
+_SEVERITY_LABELS = {
+    "critical": "重大錯誤",
+    "error": "錯誤",
+    "warning": "警告",
+    "info": "提示",
+}
+
+_PROBLEM_DISPLAY_TYPE_BY_CODE = {
+    **dict.fromkeys(
+        {
+            "WALER_RECOGNITION_FAILED",
+            "STRUT_RECOGNITION_FAILED",
+            "BRACE_RECOGNITION_FAILED",
+            "CORNER_BRACE_RECOGNITION_FAILED",
+            "COLUMN_RECOGNITION_FAILED",
+            "BEAM_RECOGNITION_FAILED",
+        },
+        "構件辨識失敗",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_ENGINEERING_LINE_FAILED",
+            "STRUT_CENTERLINE_FAILED",
+            "BRACE_CENTERLINE_FAILED",
+            "CORNER_BRACE_CENTERLINE_FAILED",
+            "COLUMN_CENTERLINE_FAILED",
+            "BEAM_CENTERLINE_FAILED",
+            "AMBIGUOUS_CENTERLINE",
+            "AMBIGUOUS_INNER_LINE",
+        },
+        "工程線無法確認",
+    ),
+    **dict.fromkeys(
+        {
+            "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+            "HATCH_WALER_BOUNDARY_INVALID",
+            "HATCH_WALER_ENGINEERING_LINE_FAILED",
+            "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+        },
+        "填充圍令邊界問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+            "BIM_BLOCK_WALER_FINALIZE_FAILED",
+            "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+            "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+            "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+        },
+        "BIM 圖塊辨識問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+            "BIM_JOIST_PAIR_AMBIGUOUS",
+            "BIM_JOIST_PAIR_SPACING_INVALID",
+            "BIM_JOIST_PAIR_UNPAIRED",
+            "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+            "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+            "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+            "BIM_JOIST_TERMINAL_CONTEXT_DRIFT",
+            "BIM_JOIST_TERMINAL_RESIDUAL_AMBIGUOUS",
+            "BIM_JOIST_DETAIL_IGNORED",
+        },
+        "托梁辨識問題",
+    ),
+    **dict.fromkeys(
+        {
+            "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+            "AMBIGUOUS_WALER_CONNECTION",
+            "BRACE_AXIS_EXTENDED_TO_WALER",
+            "BRACE_NOT_CONNECTED",
+            "BRACE_ONE_END_NOT_CONNECTED",
+            "BRACE_SAME_WALER_CONNECTION",
+            "STRUT_NOT_CONNECTED",
+            "STRUT_ONE_END_NOT_CONNECTED",
+        },
+        "端點連接問題",
+    ),
+    **dict.fromkeys(
+        {
+            "AMBIGUOUS_COMPONENT_ASSOCIATION",
+            "BEAM_CROSSING_SNAPPED",
+            "BEAM_NOT_ASSOCIATED",
+            "BEAM_OVERLAPS_STRUT",
+            "COLUMN_ASSOCIATION_MANUALLY_RESOLVED",
+            "COLUMN_NOT_ASSOCIATED",
+        },
+        "構件關聯問題",
+    ),
+    "COLUMN_ASSOCIATION_REQUIRES_REVIEW": "中間柱關聯需確認",
+    **dict.fromkeys(
+        {"CAD_MANUAL_LINE_SELECTION", "MANUAL_POINT_SELECTION"},
+        "人工指定結果",
+    ),
+    **dict.fromkeys(
+        {
+            "COMPONENT_TOO_SHORT",
+            "MULTIPLE_MODELS_FROM_ONE_SOURCE",
+            "POSSIBLE_COMPONENT_SHORT_SIDE",
+            "TEXT_SKIPPED",
+            "ZERO_LENGTH_COMPONENT",
+        },
+        "來源幾何問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BRACE_BODY_WIDTH_TOO_SMALL",
+            "CORNER_BRACE_BODY_UNRESOLVED",
+            "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
+            "CORNER_BRACE_RELATIONSHIP_UNRESOLVED",
+            "CORNER_BRACE_CONNECTION_INVALID",
+            "CORNER_BRACE_CONNECTION_POINT_FAILED",
+            "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
+            "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
+            "CORNER_BRACE_INTERSECTION_FAILED",
+        },
+        "角撐辨識問題",
+    ),
+    **dict.fromkeys(
+        {"DUPLICATED_COMPONENT", "DUPLICATE_ENGINEERING_COMPONENT"},
+        "重複構件",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_ENVELOPE_AMBIGUOUS",
+            "WALER_ENVELOPE_UNRESOLVED",
+        },
+        "圍令外框問題",
+    ),
+    **dict.fromkeys(
+        {
+            "WALER_COMPETING_SIDE_EVIDENCE_IGNORED",
+            "WALER_CONTACT_FACE_AMBIGUOUS",
+            "WALER_CONTACT_FACE_UNRESOLVED",
+            "WALER_CONTACT_FINALIZE_FAILED",
+        },
+        "圍令接觸位置問題",
+    ),
+    **dict.fromkeys(
+        {"WALER_OVERLAP_COMPETITION", "WALER_SOURCE_OVERLAP"},
+        "圍令來源重疊",
+    ),
+    **dict.fromkeys(
+        {
+            "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+            "CANDIDATE_LINE_DIRECTION_CHANGED",
+            "CANDIDATE_LINE_TOO_SHORT",
+            "CANDIDATE_POINT_INVALID",
+            "CANDIDATE_POINT_MISSING",
+            "WALER_CANDIDATE_LINE_UNUSUAL",
+            "ZERO_LENGTH_CANDIDATE_LINE",
+        },
+        "候選工程線問題",
+    ),
+    **dict.fromkeys(
+        {
+            "BRACE_RIGID_TRANSLATION_UNRESOLVED",
+            "STRUT_WALER_INTERSECTION_FAILED",
+            "WALER_CONTACT_ADJUSTED",
+            "WALER_CONTACT_BASELINE_CHANGED",
+            "WALER_SUPPORT_SIDE_UNKNOWN",
+        },
+        "圍令接觸調整問題",
+    ),
+}
+
+_RECOGNITION_CODES = {
+    "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+    "HATCH_WALER_BOUNDARY_INVALID",
+    "HATCH_WALER_ENGINEERING_LINE_FAILED",
+    "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+    "WALER_ENGINEERING_LINE_FAILED",
+    "WALER_RECOGNITION_FAILED",
+    "STRUT_CENTERLINE_FAILED",
+    "STRUT_RECOGNITION_FAILED",
+    "BRACE_CENTERLINE_FAILED",
+    "BRACE_RECOGNITION_FAILED",
+    "COLUMN_CENTERLINE_FAILED",
+    "COLUMN_RECOGNITION_FAILED",
+    "BEAM_CENTERLINE_FAILED",
+    "BEAM_RECOGNITION_FAILED",
+    "CORNER_BRACE_CENTERLINE_FAILED",
+    "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED",
+    "CORNER_BRACE_RECOGNITION_FAILED",
+    "AMBIGUOUS_CENTERLINE",
+    "AMBIGUOUS_INNER_LINE",
+    "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+    "BIM_BLOCK_WALER_FINALIZE_FAILED",
+    "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+    "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+    "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+    "BIM_JOIST_CONFLICTING_WHOLE_AXES",
+    "BIM_JOIST_PAIR_AMBIGUOUS",
+    "BIM_JOIST_PAIR_SPACING_INVALID",
+    "BIM_JOIST_PAIR_UNPAIRED",
+    "BIM_JOIST_RECOGNITION_FAILED",
+    "BIM_JOIST_SINGLE_NO_BRACE_CONTACT",
+    "BIM_JOIST_SINGLE_STRUT_OBLIGATION",
+    "BIM_JOIST_STRUT_FACE_CONTACT_AMBIGUOUS",
+    "BIM_JOIST_WHOLE_SOURCE_AXIS_FAILED",
+    "COMPONENT_TOO_SHORT",
+    "MULTIPLE_MODELS_FROM_ONE_SOURCE",
+    "ZERO_LENGTH_COMPONENT",
+}
+_ENDPOINT_CODES = {
+    "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION",
+    "BRACE_AXIS_EXTENDED_TO_WALER",
+    "BRACE_NOT_CONNECTED",
+    "BRACE_ONE_END_NOT_CONNECTED",
+    "BRACE_SAME_WALER_CONNECTION",
+    "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+    "CANDIDATE_LINE_DIRECTION_CHANGED",
+    "CANDIDATE_LINE_TOO_SHORT",
+    "CANDIDATE_POINT_INVALID",
+    "CANDIDATE_POINT_MISSING",
+    "STRUT_NOT_CONNECTED",
+    "STRUT_ONE_END_NOT_CONNECTED",
+    "WALER_CANDIDATE_LINE_UNUSUAL",
+    "ZERO_LENGTH_CANDIDATE_LINE",
+}
+_RELATIONSHIP_CODES = {
+    "AMBIGUOUS_COMPONENT_ASSOCIATION",
+    "AMBIGUOUS_WALER_CONNECTION",
+    "BEAM_CROSSING_SNAPPED",
+    "BEAM_NOT_ASSOCIATED",
+    "BEAM_OVERLAPS_STRUT",
+    "BRACE_STATION_INVALID",
+    "COLUMN_NOT_ASSOCIATED",
+    "CORNER_BRACE_CONNECTION_INVALID",
+    "CORNER_BRACE_CONNECTION_POINT_FAILED",
+    "CORNER_BRACE_DERIVED_FIELD_CONFLICT",
+    "CORNER_BRACE_INTERSECTION_AMBIGUOUS",
+    "CORNER_BRACE_INTERSECTION_FAILED",
+    "STRUT_WALER_INTERSECTION_FAILED",
+    "WALER_SUPPORT_SIDE_UNKNOWN",
+}
+_DUPLICATE_CODES = {
+    "DUPLICATED_COMPONENT",
+    "DUPLICATE_ENGINEERING_COMPONENT",
+}
+_WALER_CONTACT_CODES = {
+    "INVALID_WALER_CONTACT_VALUE",
+    "WALER_CONTACT_ADJUSTED",
+    "WALER_CONTACT_BASELINE_CHANGED",
+}
+_WALER_OVERLAP_CODES = {
+    "WALER_SOURCE_OVERLAP",
+    "WALER_OVERLAP_COMPETITION",
+}
+
+_DESCRIPTION_COMPETING_IDENTITY_FIELDS = (
+    "competing_source_identities",
+    "structured_competing_identities",
+    "competing_waler_source_handles",
+)
+_SOURCE_LIST_SEPARATOR_PATTERN = re.compile(
+    r"\s*(?:/|／|、|,|，|與|和)\s*"
+)
+_COORDINATE_PATTERN = re.compile(
+    r"[\(\[]\s*"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*,\s*"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:\s*,\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+))*"
+    r"\s*[\)\]]"
+)
+
+
+def _member_id_sort_key(identifier: str) -> tuple[tuple[object, ...], ...]:
+    """Match the Review list's numeric-aware member-ID ordering."""
+
+    return tuple(
+        (0, int(token), token)
+        if token.isdigit()
+        else (1, token.casefold(), token)
+        for token in re.split(r"(\d+)", identifier)
+        if token
+    )
+
+
+def _flatten_structured_handles(value: object) -> tuple[str, ...]:
+    """Flatten only explicitly named structured source-identity fields."""
+
+    if isinstance(value, str):
+        handle = value.strip()
+        return (handle,) if handle else ()
+    if not isinstance(value, Sequence) or isinstance(value, (bytes, bytearray)):
+        return ()
+    return tuple(
+        handle
+        for item in value
+        for handle in _flatten_structured_handles(item)
+    )
+
+
+def _description_handle_allowlist(message: object) -> tuple[str, ...]:
+    """Return source handles explicitly carried by this diagnostic only."""
+
+    values = list(
+        _flatten_structured_handles(getattr(message, "source_handles", ()))
+    )
+    for field_name in _DESCRIPTION_COMPETING_IDENTITY_FIELDS:
+        values.extend(
+            _flatten_structured_handles(getattr(message, field_name, ()))
+        )
+    return tuple(
+        dict.fromkeys(value for value in values if value)
+    )
+
+
+def _is_engineering_number_occurrence(
+    text: str,
+    start: int,
+    end: int,
+    coordinate_spans: Sequence[tuple[int, int]],
+) -> bool:
+    """Protect units, decimals and coordinate values from handle rendering."""
+
+    if any(
+        span_start <= start and end <= span_end
+        for span_start, span_end in coordinate_spans
+    ):
+        return True
+    if (start > 0 and text[start - 1] in ".+-") or (
+        end < len(text) and text[end] == "."
+    ):
+        return True
+    suffix = text[end:]
+    return bool(re.match(r"\s*(?:mm\b|°|%)", suffix, flags=re.IGNORECASE))
+
+
+def _format_problem_description(
+    description: str,
+    message: object,
+    owners_by_handle: dict[str, set[str]],
+) -> str:
+    """Project structured source handles to Review-list labels in UI text."""
+
+    allowlist = _description_handle_allowlist(message)
+    if not description or not allowlist:
+        return description
+
+    canonical_handles = {
+        handle.casefold(): handle
+        for handle in allowlist
+    }
+    alternatives = "|".join(
+        re.escape(handle)
+        for handle in sorted(
+            canonical_handles.values(),
+            key=lambda item: (-len(item), item.casefold(), item),
+        )
+    )
+    if not alternatives:
+        return description
+    handle_pattern = re.compile(
+        rf"(?<![0-9A-Za-z])(?:{alternatives})(?![0-9A-Za-z])",
+        flags=re.IGNORECASE,
+    )
+    coordinate_spans = tuple(
+        (match.start(), match.end())
+        for match in _COORDINATE_PATTERN.finditer(description)
+    )
+    canonical_owners = {
+        str(handle).casefold(): tuple(
+            sorted(
+                {str(owner) for owner in owners if str(owner)},
+                key=_member_id_sort_key,
+            )
+        )
+        for handle, owners in owners_by_handle.items()
+    }
+    occurrences: list[tuple[int, int, str, tuple[str, ...]]] = []
+    for match in handle_pattern.finditer(description):
+        handle = canonical_handles.get(match.group(0).casefold(), match.group(0))
+        owners = canonical_owners.get(handle.casefold(), ())
+        if not owners or _is_engineering_number_occurrence(
+            description,
+            match.start(),
+            match.end(),
+            coordinate_spans,
+        ):
+            continue
+        occurrences.append((match.start(), match.end(), handle, owners))
+    if not occurrences:
+        return description
+
+    replacements: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(occurrences):
+        start, end, handle, owners = occurrences[index]
+        handles = [handle]
+        next_index = index + 1
+        while next_index < len(occurrences):
+            next_start, next_end, next_handle, next_owners = occurrences[next_index]
+            separator = description[end:next_start]
+            if next_owners != owners or not _SOURCE_LIST_SEPARATOR_PATTERN.fullmatch(
+                separator
+            ):
+                break
+            if next_handle not in handles:
+                handles.append(next_handle)
+            end = next_end
+            next_index += 1
+        handle_text = "／".join(handles)
+        label = "／".join(
+            f"{owner}（{handle_text}）"
+            for owner in owners
+        )
+        replacements.append((start, end, label))
+        index = next_index
+
+    rendered = description
+    for start, end, label in reversed(replacements):
+        rendered = f"{rendered[:start]}{label}{rendered[end:]}"
+    return rendered
+
+
+def _message_location(message: object) -> str:
+    """Return only structured identifiers that are safe for user display."""
+
+    member_ids = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in getattr(message, "member_ids", ())
+            if str(value).strip()
+        )
+    )
+    source_handles = tuple(
+        dict.fromkeys(
+            str(value).strip()
+            for value in getattr(message, "source_handles", ())
+            if str(value).strip()
+        )
+    )
+    parts = []
+    if member_ids:
+        parts.append(f"構件 {'／'.join(member_ids)}")
+    if source_handles:
+        parts.append(f"來源 {'／'.join(source_handles)}")
+    return f"（{'；'.join(parts)}）" if parts else ""
+
+
+def _with_location(text: str, message: object) -> str:
+    location = _message_location(message)
+    if not location:
+        return text
+    if text.endswith("。"):
+        return f"{text[:-1]}{location}。"
+    return f"{text}{location}"
+
+
+def _role_label(role: object) -> str:
+    value = str(role or "unknown").strip().lower()
+    return _ROLE_LABELS.get(value, "構件")
+
+
+def _fallback_display_type(message: object) -> str:
+    role = _role_label(getattr(message, "role", ""))
+    severity = _SEVERITY_LABELS.get(
+        str(getattr(message, "severity", "")).strip().lower(),
+        "問題",
+    )
+    return f"{role}檢核{severity}"
+
+
+def _problem_display_type(message: object) -> str:
+    code = str(getattr(message, "code", ""))
+    if code in FALLBACK_DESCRIPTION_CODES or code not in DXF_REVIEW_DIAGNOSTIC_CODES:
+        return _fallback_display_type(message)
+    configured = _PROBLEM_DISPLAY_TYPE_BY_CODE.get(code)
+    if configured == "構件辨識失敗":
+        return f"{_role_label(getattr(message, 'role', ''))}辨識失敗"
+    return configured or _fallback_display_type(message)
+
+
+def _format_recognition_failure(message: object) -> str:
+    return _with_location(
+        f"來源幾何無法可靠辨識為正式{_role_label(getattr(message, 'role', ''))}。",
+        message,
+    )
+
+
+def _format_overlap_measurements(message: object) -> str:
+    """Preserve the two stable engineering measurements for this code only."""
+
+    original = str(getattr(message, "message", ""))
+    length_match = re.search(
+        r"有限重疊長度\s*([-+]?\d+(?:\.\d+)?)\s*mm",
+        original,
+    )
+    ratio_match = re.search(
+        r"占較短\s+provisional\s+axis\s*([-+]?\d+(?:\.\d+)?)%",
+        original,
+        flags=re.IGNORECASE,
+    )
+    measurements = []
+    if length_match:
+        measurements.append(f"重疊長度 {length_match.group(1)} mm")
+    if ratio_match:
+        measurements.append(f"占較短圍令 {ratio_match.group(1)}%")
+    suffix = f"；{'，'.join(measurements)}" if measurements else ""
+    return _with_location(f"兩個圍令來源有重大共線重疊{suffix}。", message)
+
+
+def _format_corner_body_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    count_match = re.search(r"body_hypothesis_count=(\d+)", original)
+    count_text = f"找到 {count_match.group(1)} 組可能結果，" if count_match else ""
+    return _with_location(f"角撐本體{count_text}無法唯一辨識。", message)
+
+
+def _format_corner_rail_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    widths_match = re.search(r"evaluated_widths_mm=\[([^\]]+)\]", original)
+    widths = widths_match.group(1).strip() if widths_match else ""
+    measurement = (
+        f"已檢查寬度：{widths} mm。"
+        if widths and widths.casefold() != "none"
+        else ""
+    )
+    return _with_location(
+        "角撐本體已辨識，但圍令與支撐關係無法唯一確認。" + measurement,
+        message,
+    )
+
+
+def _format_corner_relationship_unresolved(message: object) -> str:
+    original = str(getattr(message, "message", ""))
+    assessed = re.search(r"assessment_count=(\d+)", original)
+    valid = re.search(r"hard_valid_count=(\d+)", original)
+    count_text = ""
+    if assessed and valid:
+        count_text = (
+            f"共檢查 {assessed.group(1)} 組關係，其中 "
+            f"{valid.group(1)} 組符合條件。"
+        )
+    return _with_location(
+        "角撐本體已辨識，但沒有唯一的圍令與支撐關係。" + count_text,
+        message,
+    )
+
+
+def _static_formatter(text: str):
+    def formatter(message: object) -> str:
+        return _with_location(text, message)
+
+    return formatter
+
+
+_PROBLEM_DESCRIPTION_FORMATTERS = {
+    "AMBIGUOUS_BRACE_AXIS_WALER_CONNECTION": _static_formatter(
+        "斜撐端點沿軸線延伸後同時符合多支圍令，無法唯一確認正式連接。"
+    ),
+    "AMBIGUOUS_COMPONENT_ASSOCIATION": _static_formatter(
+        "構件同時符合多個支撐關聯，需重新確認應採用的正式關聯。"
+    ),
+    "AMBIGUOUS_WALER_CONNECTION": _static_formatter(
+        "構件端點同時符合多支圍令，無法唯一確認正式連接。"
+    ),
+    "BIM_JOIST_DETAIL_IGNORED": _static_formatter(
+        "托梁來源未形成完整可辨識結構，已保留為圖面細節，未建立正式托梁。"
+    ),
+    "BRACE_RIGID_TRANSLATION_UNRESOLVED": _static_formatter(
+        "斜撐調整後無法確認兩端正式圍令或原始調整基準，未套用新的斜撐位置。"
+    ),
+    "CORNER_BRACE_BODY_UNRESOLVED": _format_corner_body_unresolved,
+    "CORNER_BRACE_RAIL_CANDIDATE_UNRESOLVED": _format_corner_rail_unresolved,
+    "CORNER_BRACE_RELATIONSHIP_UNRESOLVED": _format_corner_relationship_unresolved,
+    "HATCH_WALER_AMBIGUOUS_BOUNDARY": _static_formatter(
+        "填充圍令有多個可能外框，無法唯一確認圍令邊界。"
+    ),
+    "HATCH_WALER_BOUNDARY_INVALID": _static_formatter(
+        "填充圍令的邊界不完整，無法建立圍令工程線。"
+    ),
+    "HATCH_WALER_ENGINEERING_LINE_FAILED": _static_formatter(
+        "填充圍令的外框無法建立唯一的圍令工程線。"
+    ),
+    "HATCH_WALER_UNSUPPORTED_BOUNDARY": _static_formatter(
+        "填充圍令含目前無法處理的邊界幾何，無法建立圍令工程線。"
+    ),
+    "WALER_COMPETING_SIDE_EVIDENCE_IGNORED": _static_formatter(
+        "圍令已有一致的可靠側向證據；方向相反的其他證據僅保留供追溯，不影響正式接觸面。"
+    ),
+    "WALER_CONTACT_FACE_UNRESOLVED": _static_formatter(
+        "圍令的接觸側仍無法確認，尚未確認正式接觸面。"
+    ),
+    "WALER_CONTACT_FINALIZE_FAILED": _static_formatter(
+        "圍令接觸位置無法確認，相關構件未建立正式連接。"
+    ),
+    "WALER_OVERLAP_COMPETITION": _static_formatter(
+        "重大重疊的圍令來源同時影響同一構件端點或接觸位置，目前無法完成辨識。"
+    ),
+    "WALER_SOURCE_OVERLAP": _format_overlap_measurements,
+    "WALER_RECOGNITION_FAILED": _format_recognition_failure,
+    "STRUT_RECOGNITION_FAILED": _format_recognition_failure,
+    "BRACE_RECOGNITION_FAILED": _format_recognition_failure,
+    "CORNER_BRACE_RECOGNITION_FAILED": _format_recognition_failure,
+    "COLUMN_RECOGNITION_FAILED": _format_recognition_failure,
+    "BEAM_RECOGNITION_FAILED": _format_recognition_failure,
+}
+
+
+def _fallback_problem_description(message: object) -> str:
+    role = _role_label(getattr(message, "role", ""))
+    return _with_location(
+        f"系統無法完成這項{role}檢核，請檢查相關構件與來源圖元。",
+        message,
+    )
+
+
+def _project_problem_description(message: object) -> str:
+    code = str(getattr(message, "code", ""))
+    if code in PRESERVE_MESSAGE_CODES:
+        return str(getattr(message, "message", ""))
+    formatter = _PROBLEM_DESCRIPTION_FORMATTERS.get(code)
+    if formatter is not None:
+        return formatter(message)
+    return _fallback_problem_description(message)
+
+
+def problem_severity_rank(severity: str) -> int:
+    """Return the review priority without changing import-blocking policy."""
+
+    return PROBLEM_SEVERITY_RANK.get(str(severity).lower(), 0)
+
+
+def build_problem_records(result: DXFImportResult) -> tuple[ProblemRecord, ...]:
+    """Convert validation messages into concise, component-oriented UI rows."""
+
+    members: tuple[Waler | Strut | Brace | AuxiliaryComponent, ...] = (
+        *result.walers,
+        *result.struts,
+        *result.braces,
+        *result.columns,
+        *result.beams,
+        *result.corner_braces,
+    )
+    member_by_id = {member.id: member for member in members}
+    member_role_by_id = {
+        member.id: (
+            "waler"
+            if isinstance(member, Waler)
+            else "strut"
+            if isinstance(member, Strut)
+            else "brace"
+            if isinstance(member, Brace)
+            else "beam"
+            if isinstance(member, Beam)
+            else "corner_brace"
+            if isinstance(member, CornerBrace)
+            else "column"
+        )
+        for member in members
+    }
+    owners_by_handle: dict[str, set[str]] = defaultdict(set)
+    for member in members:
+        for handle in member.source_handles:
+            if str(handle):
+                owners_by_handle[str(handle)].add(member.id)
+
+    records = []
+    for message in result.messages:
+        handles = tuple(dict.fromkeys(str(item) for item in message.source_handles if str(item)))
+        member_ids = tuple(
+            dict.fromkeys(
+                member_id
+                for member_id in message.member_ids
+                if member_id in member_by_id
+            )
+        )
+        if not member_ids and handles:
+            owner_sets = [owners_by_handle.get(handle, set()) for handle in handles]
+            if message.code in _WALER_OVERLAP_CODES:
+                member_ids = tuple(
+                    sorted(
+                        {
+                            member_id
+                            for owners in owner_sets
+                            for member_id in owners
+                        }
+                    )
+                )
+            elif message.role:
+                role_owners = tuple(
+                    sorted(
+                        {
+                            member_id
+                            for owners in owner_sets
+                            for member_id in owners
+                            if member_role_by_id.get(member_id) == message.role
+                        }
+                    )
+                )
+                if len(role_owners) == 1:
+                    member_ids = role_owners
+            elif owner_sets and all(len(owners) == 1 for owners in owner_sets):
+                common_owners = set.intersection(*owner_sets)
+                if len(common_owners) == 1:
+                    owner_id = next(iter(common_owners))
+                    member_ids = (owner_id,)
+        component = ", ".join(member_ids)
+        if not component and handles:
+            component = ", ".join(handles)
+        records.append(
+            ProblemRecord(
+                message.severity,
+                message.code,
+                component or "—",
+                _format_problem_description(
+                    _project_problem_description(message),
+                    message,
+                    owners_by_handle,
+                ),
+                message.role,
+                handles,
+                member_ids,
+                _problem_display_type(message),
+            )
+        )
+    # Python's sort is stable, so messages at the same severity retain the
+    # validation pipeline's original order.
+    return tuple(
+        sorted(records, key=lambda item: -problem_severity_rank(item.severity))
+    )
+
+
+def _highest_problem_severity(problems: Sequence[ProblemRecord]) -> str:
+    if not problems:
+        return "success"
+    return max(problems, key=lambda item: problem_severity_rank(item.severity)).severity
+
+
+def _source_metadata(
+    result: DXFImportResult,
+    role: str,
+    handles: Sequence[str],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    handle_set = set(handles)
+    layers: list[str] = []
+    entity_types: list[str] = []
+    for item in result.entity_debug:
+        if item.handle not in handle_set:
+            continue
+        if role not in {"", "unknown"} and item.role and item.role != role:
+            continue
+        if item.layer and item.layer not in layers:
+            layers.append(item.layer)
+        if (
+            item.entity_type
+            and item.entity_type != "TEXT_SUMMARY"
+            and item.entity_type not in entity_types
+        ):
+            entity_types.append(item.entity_type)
+    for geometry in result.source_geometry:
+        if geometry.source_handle not in handle_set:
+            continue
+        if (
+            role not in {"", "unknown"}
+            and geometry.role
+            and geometry.role != role
+        ):
+            continue
+        if geometry.source_layer and geometry.source_layer not in layers:
+            layers.append(geometry.source_layer)
+        if geometry.source_entity_type and geometry.source_entity_type not in entity_types:
+            entity_types.append(geometry.source_entity_type)
+    return tuple(layers), tuple(entity_types)
+
+
+def build_review_items(
+    result: DXFImportResult,
+    problem_records: Sequence[ProblemRecord] | None = None,
+) -> tuple[ReviewItem, ...]:
+    """Project current validation into formal members and unresolved sources."""
+
+    records = tuple(
+        build_problem_records(result)
+        if problem_records is None
+        else problem_records
+    )
+    members = _result_members(result)
+    problems_by_member: dict[str, list[ProblemRecord]] = defaultdict(list)
+    owners_by_handle: dict[str, set[str]] = defaultdict(set)
+    for member in members:
+        for handle in member.source_handles:
+            if str(handle):
+                owners_by_handle[str(handle)].add(member.id)
+    for record in records:
+        for member_id in record.member_ids:
+            bucket = problems_by_member[member_id]
+            if record not in bucket:
+                bucket.append(record)
+
+    items: list[ReviewItem] = []
+    for member in members:
+        role = _member_model_role(member)
+        problems = tuple(problems_by_member.get(member.id, ()))
+        items.append(
+            ReviewItem(
+                key=f"member:{role}:{member.id}",
+                display_id=member.id,
+                role=role,
+                status="recognized",
+                member_id=member.id,
+                source_handles=tuple(member.source_handles),
+                source_layers=((member.source_layer,) if member.source_layer else ()),
+                source_entity_types=tuple(member.source_entity_types),
+                selection_source=member.selection_source,
+                problems=problems,
+                highest_severity=_highest_problem_severity(problems),
+            )
+        )
+
+    unresolved: dict[tuple[str, tuple[str, ...]], list[ProblemRecord]] = {}
+    for record in records:
+        if record.member_ids or record.severity not in {"warning", "error", "critical"}:
+            continue
+        handles = tuple(sorted(set(record.source_handles)))
+        if not handles:
+            continue
+        # A source already used by any formal member is not presented as a
+        # second ghost object when its ownership is ambiguous. The global
+        # problem list retains
+        # the original ProblemRecord for review.
+        if any(owners_by_handle.get(handle) for handle in handles):
+            continue
+        key = (record.role or "unknown", handles)
+        bucket = unresolved.setdefault(key, [])
+        if record not in bucket:
+            bucket.append(record)
+
+    for (role, handles), problems_list in unresolved.items():
+        layers, entity_types = _source_metadata(result, role, handles)
+        display_id = f"待修-{handles[0]}"
+        if len(handles) > 1:
+            display_id += f"（共 {len(handles)} 個圖元）"
+        problems = tuple(problems_list)
+        items.append(
+            ReviewItem(
+                key=f"source:{role}:{'|'.join(handles)}",
+                display_id=display_id,
+                role=role,
+                status="unresolved",
+                member_id=None,
+                source_handles=handles,
+                source_layers=layers,
+                source_entity_types=entity_types,
+                selection_source="",
+                problems=problems,
+                highest_severity=_highest_problem_severity(problems),
+            )
+        )
+
+    for excluded in result.excluded_sources:
+        previous_display_id = (
+            excluded.display_id_when_excluded
+            or (excluded.source_handles[0] if excluded.source_handles else "來源")
+        )
+        display_suffix = (
+            previous_display_id[len("待修-"):]
+            if previous_display_id.startswith("待修-")
+            else previous_display_id
+        )
+        items.append(
+            ReviewItem(
+                key=f"excluded:{excluded.identity}",
+                display_id=f"已排除-{display_suffix}",
+                role=excluded.role,
+                status="excluded",
+                member_id=None,
+                source_handles=excluded.source_handles,
+                source_layers=excluded.source_layers,
+                source_entity_types=excluded.source_entity_types,
+                selection_source="",
+                problems=(),
+                highest_severity="info",
+                exclusion_reason=excluded.reason,
+                display_id_before_exclusion=previous_display_id,
+            )
+        )
+    return tuple(items)
+
+
+def _guidance_for_problem(record: ProblemRecord, item: ReviewItem) -> str:
+    code = record.code
+    if item.status == "unresolved":
+        return (
+            "此來源尚未形成正式工程構件。請開啟「圖層 ✓」確認用途並重新辨識，"
+            "同時檢查原始 DXF 幾何；目前幾何修正工具不適用。"
+        )
+    if code in _WALER_CONTACT_CODES:
+        return "請在工程資料的圍令接觸位置調整中檢查圖面值與採用值。"
+    if code in _WALER_OVERLAP_CODES:
+        return (
+            "請定位問題列出的圍令來源與受影響端點，並依外部工程判斷檢查 DXF。"
+            "若參與辨識的來源有變更，系統會重新辨識；"
+            "本提示不推薦刪除、排除或保留任一來源。"
+        )
+    if "COORDINATE" in code:
+        return "請開啟「座標 ✓」檢查座標系統。"
+    if code in _RECOGNITION_CODES:
+        return "請開啟「圖層 ✓」確認用途後重新辨識，並檢查原始 DXF 幾何。"
+    if code in _ENDPOINT_CODES or code in _DUPLICATE_CODES:
+        if item.role in {"waler", "strut", "brace"}:
+            return (
+                "請在候選點區檢查起點與終點；若需依 CAD 圖面重新指定工程線，"
+                "可使用修改工具中的「從 CAD 指定工程線」。"
+            )
+        return "請在候選點區檢查起點與終點。"
+    if code in _RELATIONSHIP_CODES:
+        if item.role in {"waler", "strut", "brace"}:
+            return (
+                "請先檢查相關構件的工程線與端點；若位置有誤，可由候選點或 CAD 工程線工具修正。"
+            )
+        return (
+            "請先檢查相關構件的工程線與端點；若此構件端點有誤，可在候選點區修正。"
+        )
+    return "請依上方問題內容檢查此構件；目前沒有對應的專用人工修正工具。"
+
+
+def review_item_guidance(item: ReviewItem) -> tuple[str, ...]:
+    """Return de-duplicated text that references only existing review tools."""
+
+    if item.status == "excluded":
+        return (
+            "此 DXF 來源已由使用者排除，不再參與工程辨識。",
+            "原始 DXF 圖元仍保留；若要重新辨識，請使用「復原此來源」。",
+        )
+
+    guidance: list[str] = []
+    for record in item.problems:
+        text = _guidance_for_problem(record, item)
+        if text not in guidance:
+            guidance.append(text)
+    return tuple(guidance)
+
+
+def build_validation_overview(result: DXFImportResult) -> tuple[ValidationOverviewItem, ...]:
+    """Build the short checklist an engineer should be able to scan quickly."""
+
+    coordinate = result.coordinate_system
+    coordinate_text = (
+        f"使用局部座標，原點 ({coordinate.origin_x:g}, {coordinate.origin_y:g})"
+        if coordinate.mode == "local"
+        else "使用原始 CAD 座標"
+    )
+    items = [
+        ValidationOverviewItem("success", "圖層已讀取"),
+        ValidationOverviewItem("success", coordinate_text),
+    ]
+    role_data = (
+        ("strut", "支撐", result.struts),
+        ("waler", "圍令", result.walers),
+        ("brace", "斜撐", result.braces),
+    )
+    for role, label, members in role_data:
+        engineering_line_code = (
+            "WALER_ENGINEERING_LINE_FAILED"
+            if role == "waler"
+            else f"{role.upper()}_CENTERLINE_FAILED"
+        )
+        failed = any(
+            message.role == role
+            and message.severity in ERROR_SEVERITIES
+            and message.code
+            in {
+                f"{role.upper()}_RECOGNITION_FAILED",
+                engineering_line_code,
+                "HATCH_WALER_AMBIGUOUS_BOUNDARY",
+                "HATCH_WALER_BOUNDARY_INVALID",
+                "HATCH_WALER_ENGINEERING_LINE_FAILED",
+                "HATCH_WALER_UNSUPPORTED_BOUNDARY",
+                "BIM_BLOCK_CONFLICTING_WHOLE_AXES",
+                "BIM_BLOCK_WALER_FINALIZE_FAILED",
+                "BIM_BLOCK_WALER_SPAN_AMBIGUOUS",
+                "BIM_BLOCK_WALER_SPAN_INCOMPLETE",
+                "BIM_BLOCK_WHOLE_EXTENT_UNRELIABLE",
+            }
+            for message in result.messages
+        )
+        if members and not failed:
+            items.append(ValidationOverviewItem("success", f"{label}辨識成功（{len(members)}）"))
+        elif not failed and any(
+            source.role == role for source in result.excluded_sources
+        ):
+            excluded_count = sum(
+                source.role == role for source in result.excluded_sources
+            )
+            items.append(
+                ValidationOverviewItem(
+                    "success",
+                    f"{label}來源已全部排除（{excluded_count}）",
+                )
+            )
+        else:
+            items.append(ValidationOverviewItem("error", f"{label}辨識失敗或沒有可用構件"))
+
+    for label, members in (
+        ("中間柱", result.columns),
+        ("托梁", result.beams),
+        ("角撐", result.corner_braces),
+    ):
+        if members:
+            items.append(
+                ValidationOverviewItem("success", f"{label}辨識成功（{len(members)}）")
+            )
+
+    unassociated_columns = sum(not member.associated_strut_id for member in result.columns)
+    unassociated_beams = sum(
+        not member.crossings and not member.brace_contacts
+        for member in result.beams
+    )
+    if result.columns:
+        items.append(
+            ValidationOverviewItem(
+                "error" if unassociated_columns else "success",
+                (
+                    f"{unassociated_columns} 根中間柱尚未關聯支撐"
+                    if unassociated_columns
+                    else "中間柱皆已關聯支撐"
+                ),
+            )
+        )
+    if result.beams:
+        items.append(
+            ValidationOverviewItem(
+                "error" if unassociated_beams else "success",
+                (
+                    f"{unassociated_beams} 根托梁尚未連接支撐或斜撐"
+                    if unassociated_beams
+                    else "托梁皆已連接支撐或斜撐"
+                ),
+            )
+        )
+
+    for role, label, members in (("strut", "支撐", result.struts), ("brace", "斜撐", result.braces)):
+        incomplete = sum(not (member.from_waler and member.to_waler) for member in members)
+        if incomplete:
+            items.append(ValidationOverviewItem("error", f"{incomplete} 根{label}未完整連接圍令"))
+        elif members:
+            items.append(ValidationOverviewItem("success", f"{label}皆已連接圍令"))
+
+    failed_engineering_lines = sum(
+        "CENTERLINE_FAILED" in message.code
+        or message.code
+        in {
+            "WALER_ENGINEERING_LINE_FAILED",
+            "HATCH_WALER_ENGINEERING_LINE_FAILED",
+        }
+        for message in result.messages
+    )
+    if failed_engineering_lines:
+        items.append(
+            ValidationOverviewItem(
+                "error", f"{failed_engineering_lines} 個構件工程線建立失敗"
+            )
+        )
+    duplicate_count = sum(message.code == "DUPLICATED_COMPONENT" for message in result.messages)
+    if duplicate_count:
+        items.append(ValidationOverviewItem("warning", f"{duplicate_count} 組重複幾何已自動合併"))
+    manual_count = sum(
+        member.selection_source != "auto"
+        for member in (
+            *result.walers,
+            *result.struts,
+            *result.braces,
+            *result.columns,
+            *result.beams,
+            *result.corner_braces,
+        )
+    )
+    if manual_count:
+        items.append(
+            ValidationOverviewItem("info", f"已人工選擇 {manual_count} 個構件工程線")
+        )
+    if result.can_import:
+        items.append(ValidationOverviewItem("success", "工程模型可以匯入求解器"))
+    else:
+        items.append(ValidationOverviewItem("error", "存在阻擋錯誤，目前不可匯入求解器"))
+    return tuple(items)
+
+
+def validate_duplicate_engineering_members(
+    collections: Sequence[
+        Sequence[Waler | Strut | Brace | AuxiliaryComponent]
+    ],
+    tolerances: GeometryTolerances,
+) -> tuple[ValidationMessage, ...]:
+    """Detect duplicates introduced by manual endpoint combinations."""
+
+    messages: list[ValidationMessage] = []
+    for members in collections:
+        for index, first in enumerate(members):
+            first_line = (
+                first.world_start or first.start,
+                first.world_end or first.end,
+            )
+            for second in members[index + 1 :]:
+                second_line = (
+                    second.world_start or second.start,
+                    second.world_end or second.end,
+                )
+                if not _lines_duplicate(first_line, second_line, tolerances):
+                    continue
+                messages.append(
+                    ValidationMessage(
+                        "error",
+                        "DUPLICATE_ENGINEERING_COMPONENT",
+                        f"{first.id} 與 {second.id} 的工程線重複，請修正候選點。",
+                        _member_model_role(first),
+                        tuple(
+                            sorted(
+                                {
+                                    *first.source_handles,
+                                    *second.source_handles,
+                                }
+                            )
+                        ),
+                        member_ids=(first.id, second.id),
+                    )
+                )
+    return tuple(messages)
+
+
+def _result_members(
+    result: DXFImportResult,
+) -> tuple[Waler | Strut | Brace | AuxiliaryComponent, ...]:
+    return (
+        *result.walers,
+        *result.struts,
+        *result.braces,
+        *result.columns,
+        *result.beams,
+        *result.corner_braces,
+    )
+
+
+def _member_model_role(
+    member: Waler | Strut | Brace | AuxiliaryComponent,
+) -> str:
+    if isinstance(member, Waler):
+        return "waler"
+    if isinstance(member, Strut):
+        return "strut"
+    if isinstance(member, Brace):
+        return "brace"
+    if isinstance(member, Column):
+        return "column"
+    if isinstance(member, Beam):
+        return "beam"
+    return "corner_brace"
+
+
+def candidate_point_by_id(
+    member: Waler | Strut | Brace | AuxiliaryComponent,
+    point_id: str,
+) -> CandidatePoint | None:
+    return next(
+        (point for point in member.candidate_points if point.id == point_id),
+        None,
+    )
+
+
+def validate_candidate_point_pair(
+    member: Waler | Strut | Brace | AuxiliaryComponent,
+    start_point_id: str,
+    end_point_id: str,
+    tolerances: GeometryTolerances | None = None,
+    walers: Sequence[Waler] = (),
+) -> tuple[ValidationMessage, ...]:
+    """Validate one pending pair without changing the formal engineering model."""
+
+    tolerances = tolerances or GeometryTolerances()
+    start_point = candidate_point_by_id(member, start_point_id)
+    end_point = candidate_point_by_id(member, end_point_id)
+    role = _member_model_role(member)
+    if start_point is None or end_point is None:
+        return (
+            ValidationMessage(
+                "error",
+                "CANDIDATE_POINT_MISSING",
+                f"{member.id} 的待套用候選點資料遺失。",
+                role,
+                member.source_handles,
+            ),
+        )
+    coordinates = (*start_point.world_point, *end_point.world_point)
+    if not all(math.isfinite(value) for value in coordinates):
+        return (
+            ValidationMessage(
+                "error",
+                "CANDIDATE_POINT_INVALID",
+                f"{member.id} 的候選點座標不是有效數字。",
+                role,
+                member.source_handles,
+            ),
+        )
+    selected_length = _distance(start_point.world_point, end_point.world_point)
+    if start_point.id == end_point.id or selected_length <= 1e-9:
+        return (
+            ValidationMessage(
+                "error",
+                "ZERO_LENGTH_CANDIDATE_LINE",
+                f"{member.id} 的起點與終點不可相同。",
+                role,
+                member.source_handles,
+            ),
+        )
+    if selected_length < tolerances.minimum_component_length_mm:
+        return (
+            ValidationMessage(
+                "error",
+                "CANDIDATE_LINE_TOO_SHORT",
+                f"{member.id} 的待套用工程線長度 {selected_length:.1f} 小於絕對最小值。",
+                role,
+                member.source_handles,
+            ),
+        )
+
+    original_line = (
+        (
+            member.line_candidates[0].world_start,
+            member.line_candidates[0].world_end,
+        )
+        if member.line_candidates
+        else (member.world_start or member.start, member.world_end or member.end)
+    )
+    selected_line = start_point.world_point, end_point.world_point
+    angle = _angle_difference_deg(original_line, selected_line)
+    messages: list[ValidationMessage] = []
+    if angle > max(10.0, tolerances.parallel_angle_tolerance_deg * 4):
+        messages.append(
+            ValidationMessage(
+                "warning",
+                "CANDIDATE_LINE_DIRECTION_CHANGED",
+                f"{member.id} 新工程線與自動辨識長軸差異 {angle:.1f}°，請確認方向。",
+                role,
+                member.source_handles,
+            )
+        )
+    original_length = _length(*original_line)
+    if original_length > 0 and selected_length < original_length * 0.35:
+        messages.append(
+            ValidationMessage(
+                "warning",
+                "POSSIBLE_COMPONENT_SHORT_SIDE",
+                f"{member.id} 新工程線明顯短於自動辨識結果，可能選到構件短邊。",
+                role,
+                member.source_handles,
+            )
+        )
+    if isinstance(member, Waler) and member.line_candidates:
+        best_fit = min(
+            max(
+                _line_distance(
+                    start_point.world_point,
+                    candidate.world_start,
+                    candidate.world_end,
+                ),
+                _line_distance(
+                    end_point.world_point,
+                    candidate.world_start,
+                    candidate.world_end,
+                ),
+            )
+            for candidate in member.line_candidates
+        )
+        if best_fit > tolerances.connection_tolerance_mm:
+            messages.append(
+                ValidationMessage(
+                    "warning",
+                    "WALER_CANDIDATE_LINE_UNUSUAL",
+                    f"{member.id} 新工程線未落在既有圍令辨識線附近。",
+                    role,
+                    member.source_handles,
+                )
+            )
+    if isinstance(member, (Strut, Brace)) and walers:
+        for endpoint_name, endpoint in (
+            ("起點", start_point.world_point),
+            ("終點", end_point.world_point),
+        ):
+            nearest = min(
+                _segment_distance(
+                    endpoint,
+                    waler.world_start or waler.start,
+                    waler.world_end or waler.end,
+                )
+                for waler in walers
+            )
+            if nearest > tolerances.connection_tolerance_mm:
+                messages.append(
+                    ValidationMessage(
+                        "warning",
+                        "CANDIDATE_ENDPOINT_NOT_NEAR_WALER",
+                        f"{member.id} {endpoint_name}距圍令內側線 {nearest:.1f}，套用後可能無法連接。",
+                        role,
+                        member.source_handles,
+                    )
+                )
+    return tuple(messages)

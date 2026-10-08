@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
 import unittest
 from types import SimpleNamespace
 
@@ -47,41 +46,13 @@ class MainWindowLayoutSmokeTests(unittest.TestCase):
         app._sync_main_menu_projection()
         self.assertEqual(menu_labels(), ("檔案", "專案 ⚠", "說明"))
 
-        style = ttk.Style(master=root)
-        self.assertEqual(
-            style.lookup(
-                "Primary.TNotebook.Tab",
-                "background",
-                state=("selected",),
-            ),
-            "#2F5D7C",
-        )
-        self.assertEqual(
-            style.lookup(
-                "Secondary.TNotebook.Tab",
-                "background",
-                state=("selected",),
-            ),
-            "#C8DDEA",
-        )
-        self.assertEqual(
-            tuple(
-                int(value)
-                for value in style.configure(
-                    "Primary.TNotebook.Tab"
-                )["padding"].split()
-            ),
-            (12, 6),
-        )
-        self.assertEqual(
-            tuple(
-                int(value)
-                for value in style.configure(
-                    "Secondary.TNotebook.Tab"
-                )["padding"].split()
-            ),
-            (10, 4),
-        )
+        for notebook in (
+            app.notebook,
+            app.engineering_notebook,
+            app.materials_notebook,
+            app.analysis_notebook,
+        ):
+            self.assertEqual(notebook.cget("style"), "")
 
         for geometry in ("900x600", "1024x768"):
             with self.subTest(geometry=geometry):

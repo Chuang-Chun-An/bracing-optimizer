@@ -6,6 +6,7 @@
 - **必讀**：「完整重新投影入口只在 stale 時顯示」；此 Requirement 只定義入口投影，不改 `project-state-transaction-consistency` 已成立的 mutation lock 與重新投影 transaction。
 - **條件式閱讀**：「Project 選單必須投影目前專案狀態」與「刪除目前專案必須明確且安全」；修改 DXF status label、menu state 或刪除流程時必讀。
 - **條件式閱讀**：「視窗標題必須成為目前 Project 的精簡狀態來源」；修改 title、dirty projection 或 Project rename／load refresh 時必讀。
+- **條件式閱讀**：「工作區頁籤必須沿用作業系統原生配色」；修改 Notebook style 或 ttk theme 時必讀。
 - **可先跳過**：主／次分頁內容、下方情境工具列、Preview toolbar、DXF Review 內部 workflow、Solver、Domain、材料與 persistence schema；本 capability 不修改那些行為。
 
 ## Purpose
@@ -42,38 +43,30 @@
 - **THEN** 下方情境工具列 SHALL 仍依目前區域提供既有操作
 - **AND** `DXF 批次匯入`、`CAD 新增構件`及其他主／次分頁名稱與順序 MUST 維持不變
 
-### Requirement: 主、次工作區頁籤必須具有可辨識的視覺層級
+### Requirement: 工作區頁籤必須沿用作業系統原生配色
 
-主視窗 SHALL 以一致的低彩度藍灰色系區分主工作區頁籤與其巢狀次頁籤。主頁籤的選取狀態 MUST 使用較強的視覺重點；次頁籤 MUST 使用同色系但較淡的層級。兩層頁籤的選取、未選取、滑鼠停留及 disabled 狀態 SHALL 保持文字可讀，且不得只以頁籤文字或順序表達目前選取狀態。
+主視窗的主工作區與巢狀次工作區 Notebook SHALL 使用目前 Windows／ttk theme 的原生 `TNotebook` 樣式。系統 MUST NOT 為工作區頁籤指定自訂背景色、文字色、狀態 palette，或從其他 theme 複製頁籤元素；選取、未選取、滑鼠停留及 disabled 外觀 SHALL 由目前作業系統主題決定。
 
-配色 MUST 透過兩組共享樣式一致套用：`工程配置／材料設定／分析結果` 使用主層樣式；這些工作區內的所有既有 Notebook 使用次層樣式。樣式變更 MUST NOT 改變頁籤文字、順序、內容、切換事件、命令可用狀態或其他 widget 的全域外觀。
+回復原生樣式 MUST NOT 改變頁籤文字、順序、內容、切換事件、命令可用狀態、選單狀態投影或其他 widget 的外觀。
 
-#### Scenario: 主工作區顯示目前選取頁籤
+#### Scenario: 主工作區使用原生頁籤樣式
 
-- **WHEN** 使用者在「工程配置」、「材料設定」與「分析結果」之間切換
-- **THEN** 目前選取的主頁籤 SHALL 使用深藍灰底與高對比淺色文字
-- **AND** 其他主頁籤 SHALL 使用較淺的藍灰底與深色文字
-- **AND** 頁籤文字、順序與切換後內容 MUST 維持既有行為
+- **WHEN** 主視窗建立「工程配置」、「材料設定」與「分析結果」頁籤
+- **THEN** 主工作區 Notebook SHALL 使用目前 ttk theme 的預設 `TNotebook` 樣式
+- **AND** 系統 MUST NOT 套用 `Primary.TNotebook` 或其他自訂 palette
 
-#### Scenario: 巢狀次頁籤與主頁籤形成層級
+#### Scenario: 巢狀次頁籤使用原生頁籤樣式
 
-- **WHEN** 任一主工作區顯示其巢狀次頁籤
-- **THEN** 次頁籤 SHALL 使用比主頁籤更淡的同系藍灰色
-- **AND** 目前選取的次頁籤 SHALL 可與未選取次頁籤清楚區分
+- **WHEN** 任一主工作區建立其巢狀次頁籤
+- **THEN** 次工作區 Notebook SHALL 使用目前 ttk theme 的預設 `TNotebook` 樣式
+- **AND** 系統 MUST NOT 套用 `Secondary.TNotebook`、自訂 `Notebook.tab` 元素或寫死的顏色
 - **AND** 次頁籤的名稱、順序、內容與切換事件 MUST 維持既有行為
 
-#### Scenario: 樣式不得污染其他 widget
+#### Scenario: 不切換全域 theme
 
-- **WHEN** 主、次頁籤樣式完成套用
-- **THEN** Treeview、Button、Entry、Dialog 及原生選單列 SHALL 繼續使用其既有或作業系統主題外觀
-- **AND** 系統 MUST NOT 為了頁籤配色而切換造成全應用程式外觀變化的全域 theme
-
-#### Scenario: 平台主題不接受背景色
-
-- **WHEN** 目前 Windows ttk theme 無法可靠呈現自訂頁籤背景色
-- **THEN** 系統 SHALL 保留主、次兩層的共享樣式與可辨識選取狀態
-- **AND** SHALL 以該 theme 可可靠呈現的文字色、字重或 padding 維持視覺層級
-- **AND** MUST NOT 降級為自繪選單列或全面修改其他 widget 主題
+- **WHEN** 工作區頁籤建立完成
+- **THEN** 系統 MUST NOT 為了頁籤外觀呼叫 `theme_use()` 切換全域 theme
+- **AND** Treeview、Button、Entry、Dialog 及原生選單列 SHALL 繼續使用其既有或作業系統主題外觀
 
 ### Requirement: File 選單與快捷鍵必須使用相同命令
 

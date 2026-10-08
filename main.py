@@ -156,30 +156,6 @@ APP_ICON_PNG_PATHS = tuple(
 )
 APP_ICON_ICO_PATH = APP_ICON_DIR / "support_optimizer_transparent.ico"
 WINDOWS_APP_USER_MODEL_ID = "SupportOptimizer.Desktop"
-WORKSPACE_NOTEBOOK_STYLES = {
-    "Primary": {
-        "background": "#DCE6ED",
-        "foreground": "#253746",
-        "selected_background": "#2F5D7C",
-        "selected_foreground": "#FFFFFF",
-        "active_background": "#BFD2DF",
-        "active_foreground": "#173B57",
-        "disabled_background": "#ECEFF1",
-        "disabled_foreground": "#90A4AE",
-        "padding": (12, 6),
-    },
-    "Secondary": {
-        "background": "#EEF3F6",
-        "foreground": "#425466",
-        "selected_background": "#C8DDEA",
-        "selected_foreground": "#173B57",
-        "active_background": "#DDEAF2",
-        "active_foreground": "#264A60",
-        "disabled_background": "#F4F6F7",
-        "disabled_foreground": "#9AA7AF",
-        "padding": (10, 4),
-    },
-}
 
 
 def _set_windows_app_user_model_id() -> None:
@@ -832,7 +808,6 @@ class SupportInputApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
 
     def _build_ui(self):
-        self._configure_workspace_notebook_styles()
         self._build_project_menu_and_toolbar()
 
         self.main_paned = ttk.PanedWindow(self.root, orient="horizontal")
@@ -843,7 +818,7 @@ class SupportInputApp:
         self.main_paned.add(self.left_frame, weight=1)
         self.main_paned.add(self.right_frame, weight=1)
 
-        self.notebook = ttk.Notebook(self.left_frame, style="Primary.TNotebook")
+        self.notebook = ttk.Notebook(self.left_frame)
         self.notebook.pack(fill="both", expand=True, padx=8, pady=8)
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -852,7 +827,7 @@ class SupportInputApp:
             self.engineering_workspace,
             text=self.workspace_tab_labels["engineering"],
         )
-        self.engineering_notebook = ttk.Notebook(self.engineering_workspace, style="Secondary.TNotebook")
+        self.engineering_notebook = ttk.Notebook(self.engineering_workspace)
         self.engineering_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.engineering_notebook.bind(
             "<<NotebookTabChanged>>",
@@ -877,7 +852,7 @@ class SupportInputApp:
             self.materials_workspace,
             text=self.workspace_tab_labels["materials"],
         )
-        self.materials_notebook = ttk.Notebook(self.materials_workspace, style="Secondary.TNotebook")
+        self.materials_notebook = ttk.Notebook(self.materials_workspace)
         self.materials_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.settings_notebook = self.materials_notebook
         self._create_table_tab(
@@ -956,83 +931,6 @@ class SupportInputApp:
 
         self._build_preview(self.right_frame)
         self._update_context_toolbar()
-
-    def _configure_workspace_notebook_styles(self):
-        """Give the main and nested workspaces distinct, local tab styles."""
-
-        style = ttk.Style(master=self.root)
-        for role, colors in WORKSPACE_NOTEBOOK_STYLES.items():
-            notebook_style = f"{role}.TNotebook"
-            tab_style = f"{notebook_style}.Tab"
-            tab_element = f"{role}.Notebook.tab"
-            if tab_element not in style.element_names():
-                style.element_create(
-                    tab_element,
-                    "from",
-                    "clam",
-                    "Notebook.tab",
-                )
-            style.layout(
-                tab_style,
-                [
-                    (
-                        tab_element,
-                        {
-                            "sticky": "nswe",
-                            "children": [
-                                (
-                                    "Notebook.padding",
-                                    {
-                                        "side": "top",
-                                        "sticky": "nswe",
-                                        "children": [
-                                            (
-                                                "Notebook.focus",
-                                                {
-                                                    "side": "top",
-                                                    "sticky": "nswe",
-                                                    "children": [
-                                                        (
-                                                            "Notebook.label",
-                                                            {
-                                                                "side": "top",
-                                                                "sticky": "",
-                                                            },
-                                                        )
-                                                    ],
-                                                },
-                                            )
-                                        ],
-                                    },
-                                )
-                            ],
-                        },
-                    )
-                ],
-            )
-            style.configure(
-                notebook_style,
-                background=colors["background"],
-            )
-            style.configure(
-                tab_style,
-                background=colors["background"],
-                foreground=colors["foreground"],
-                padding=colors["padding"],
-            )
-            style.map(
-                tab_style,
-                background=[
-                    ("disabled", colors["disabled_background"]),
-                    ("selected", colors["selected_background"]),
-                    ("active", colors["active_background"]),
-                ],
-                foreground=[
-                    ("disabled", colors["disabled_foreground"]),
-                    ("selected", colors["selected_foreground"]),
-                    ("active", colors["active_foreground"]),
-                ],
-            )
 
     def _build_execution_messages(self, parent):
         self.execution_message_frame = ttk.LabelFrame(parent, text="Solver 診斷與執行訊息")
@@ -2345,7 +2243,7 @@ class SupportInputApp:
 
     def _create_results_tab(self, parent=None):
         parent = parent or self.notebook
-        self.analysis_notebook = ttk.Notebook(parent, style="Secondary.TNotebook")
+        self.analysis_notebook = ttk.Notebook(parent)
         self.analysis_notebook.pack(fill="both", expand=True, padx=4, pady=4)
         self.analysis_notebook.bind(
             "<<NotebookTabChanged>>",

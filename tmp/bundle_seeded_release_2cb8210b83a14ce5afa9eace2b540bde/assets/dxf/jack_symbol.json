@@ -1,0 +1,59 @@
+{
+  "asset_version": 1,
+  "source_file": "千斤頂專用.dxf",
+  "source_block": "JACK",
+  "block_name": "SUPPORT_JACK",
+  "units": "mm",
+  "source_to_mm_scale": 100.0,
+  "base_point": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "axis": {
+    "start": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "end": [
+      600.0,
+      0.0,
+      0.0
+    ],
+    "insert_point_role": "start"
+  },
+  "nominal_length_mm": 600.0,
+  "nominal_width_mm": 300.0,
+  "entity_count": 72,
+  "native_extents": {
+    "min": [
+      -6e-14,
+      -1.50000000000003,
+      0.0
+    ],
+    "max": [
+      6.0,
+      1.49999999999999,
+      0.0
+    ]
+  },
+  "physical_extents_mm": {
+    "min": [
+      -5.9999999999999995e-12,
+      -150.00000000000298,
+      0.0
+    ],
+    "max": [
+      600.0,
+      149.999999999999,
+      0.0
+    ]
+  },
+  "insertion": {
+    "scale": 1.0,
+    "rotation_degrees": "member axis angle",
+    "layer": "component source layer",
+    "annotate": false
+  }
+}

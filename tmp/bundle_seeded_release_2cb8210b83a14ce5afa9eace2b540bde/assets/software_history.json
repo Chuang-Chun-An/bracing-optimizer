@@ -1,0 +1,206 @@
+{
+    "schema_version":  1,
+    "source_heading":  "起始歷史紀錄（截至 2026/09/28 早上）",
+    "entries":  [
+                    {
+                        "date_label":  "**2026/05/19**",
+                        "record":  "副理提供相關檔案及廠商先前製作的支撐配置試作品影片。"
+                    },
+                    {
+                        "date_label":  "**2026/05/29**",
+                        "record":  "索取 CAD 圖面並開始確認工程規則；確認千斤頂彼此至少 **600 mm（心到心）**。"
+                    },
+                    {
+                        "date_label":  "**2026/06/11**",
+                        "record":  "已有新的支撐配置成果，約副理討論程式進度。"
+                    },
+                    {
+                        "date_label":  "**2026/07/14**",
+                        "record":  "開始思考將圍令材料配置與橫向支撐拼接兩個最佳化問題整合，逐漸形成「全域配置＋單支可行拼接」的分層架構。"
+                    },
+                    {
+                        "date_label":  "**2026/07/15　【Git｜v1.0.0】**",
+                        "record":  "**`11ee6e7` — Initial commit**。第一次將專案正式放入 Git 版本控制。這可以視為 Git 上可追溯的起始版本；實際開發則早於此日期。"
+                    },
+                    {
+                        "date_label":  "**2026/07/20–23**",
+                        "record":  "持續與副理討論新版支撐程式，並交換最新檔案及 Y01 CAD 資料。"
+                    },
+                    {
+                        "date_label":  "**2026/07/21**",
+                        "record":  "以 W1、總長 95,500 mm 等實際資料測試圍令最佳化，整理庫存、接頭禁區與評分條件。"
+                    },
+                    {
+                        "date_label":  "**2026/07/27　【Git｜v1.0.0】**",
+                        "record":  "**`61b6d67` —「Solver第一版」**。這是第一個很明確的功能里程碑：支撐／圍令最佳化已經形成可以獨立稱為 Solver 的版本；commit 中也已包含材料庫存資料及打包設定。"
+                    },
+                    {
+                        "date_label":  "**2026/07/29　【Git｜v1.0.0】**",
+                        "record":  "**`3b9b53f` — `CAD_builder update`**。CAD 輸入正式成為重大版本功能；同期開發 progeCAD ↔ Python 的資料橋接。Git 版本與對話紀錄時間吻合。"
+                    },
+                    {
+                        "date_label":  "**2026/07/29–30**",
+                        "record":  "測試 CAD Bridge 及公司電腦執行環境，遇到 Python 在其他電腦無法正常執行的問題。"
+                    },
+                    {
+                        "date_label":  "**2026/08/05–07**",
+                        "record":  "開始由「人工點 CAD」往「直接讀 DXF」發展；研究 DXF、`ezdxf`、Layer、Entity 與工程模型辨識。"
+                    },
+                    {
+                        "date_label":  "**2026/08/07–10**",
+                        "record":  "以 Y1A 人工配置與 Solver 比較，持續調查材料比例、候選池、Jack 位置、Phase 1 Cache、TopN 等問題；DXF 辨識亦逐步加入人工確認、候選點等機制。"
+                    },
+                    {
+                        "date_label":  "**2026/08/12　【Git｜v1.0.0】**",
+                        "record":  "**`8dac57c` —「增加DXF匯入功能」**。這是一個很大的產品版本分界：輸入不再主要依靠手動／CAD Bridge，而開始能直接從 DXF 批次建立工程模型。"
+                    },
+                    {
+                        "date_label":  "**2026/08/12–13**",
+                        "record":  "繼續處理 DXF 專案管理，包括 `dxf_import_state`、DXF 管理副本、重新連結、相對路徑及來源檔驗證。"
+                    },
+                    {
+                        "date_label":  "**2026/08/14　【Git｜v1.0.0】**",
+                        "record":  "**`ce7b2ed` —「新增DXF匯出功能」**。資料流程從「匯入 DXF → Solver」延伸成「匯入 → 最佳化 → 再輸出 DXF」，開始形成完整的工程資料閉環。"
+                    },
+                    {
+                        "date_label":  "**2026/08/13–16**",
+                        "record":  "持續處理 DXF 匯出相容性、Audit／XRecord、Clean DXF 等問題，同時開始整理打包方式與給同事測試的執行版本。"
+                    },
+                    {
+                        "date_label":  "**2026/08/17　【Git｜v1.0.0】**",
+                        "record":  "**`5851d43` —「介面小調整」**。功能趨於完整後，開始集中整理使用者操作介面。"
+                    },
+                    {
+                        "date_label":  "**2026/08/17　【Git｜v1.0.0】**",
+                        "record":  "**`6dcfc6a` —「第一版介面定稿」**。可視為第一版產品介面的正式基準點。之後即使功能、架構仍持續修改，整體操作形式已大致確立。"
+                    },
+                    {
+                        "date_label":  "**2026/08 下旬**",
+                        "record":  "開發重心逐漸轉向專案儲存、材料管理、操作體驗、測試與程式架構整理。"
+                    },
+                    {
+                        "date_label":  "**2026/08/28–30 起**",
+                        "record":  "開始進行較系統性的 Architecture Review 與漸進式重構，包括 Domain、Application、Presentation、ProjectService、Input Builder、DI 等議題。"
+                    },
+                    {
+                        "date_label":  "**2026/09/02**",
+                        "record":  "將「支撐最佳化」投入資訊部活動／提案。"
+                    },
+                    {
+                        "date_label":  "**2026/09/04**",
+                        "record":  "副理提出至 680C 進行程式使用說明，開始進入實際發布準備。"
+                    },
+                    {
+                        "date_label":  "**2026/09/08–09**",
+                        "record":  "處理公司電腦 Defender／ASR 阻擋打包程式問題，經資訊部協助後解決執行限制。"
+                    },
+                    {
+                        "date_label":  "**2026/09/09–10**",
+                        "record":  "完成舊版操作文件、LSP 實機測試與第一版發布前準備。"
+                    },
+                    {
+                        "date_label":  "**2026/09/10【v1.0.0】**",
+                        "record":  "**680C 第一版（v1.0.0）發布／使用說明。**"
+                    },
+                    {
+                        "date_label":  "2026/09/12【Git｜v1.0.0】",
+                        "record":  "b98aa33 —「第一版_架構調整版」。第一版發布後開始進行較正式的架構整理，逐步建立 domain / algorithms / application / infrastructure / presentation 等責任邊界。"
+                    },
+                    {
+                        "date_label":  "2026/09/15【Git｜v1.0.0】",
+                        "record":  "56b74cd —「第一版_waler背填、錯誤辨識」。第一版架構調整後繼續補強 Waler 與 DXF 辨識相關功能。"
+                    },
+                    {
+                        "date_label":  "2026/09/17【Git｜v2.0.0】",
+                        "record":  "0cfbb20 —「第二版_DXF介面調整」。DXF Import / Review 已由單純匯入功能逐漸發展成完整子系統，包含辨識、Review、人工修正、Validation、Preview 等流程。"
+                    },
+                    {
+                        "date_label":  "2026/09/17",
+                        "record":  "參與 Vibe Coding / AI Agent 開發工作流相關學習，開始系統性研究 SDD（Spec Driven Development）、AGENTS.md、Agent 工作規範、Skill 與 Context Engineering；開發方式開始由「直接要求 AI 改 Code」轉向「需求 → 分析 → 規格 → 設計 → 計畫 → 實作 → 驗證」。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09/17–18",
+                        "record":  "重新檢視 AGENTS.md 定位，逐條建立 AI 開發規則：修改前先理解現況、先提出方案、重大技術選擇由使用者確認、Clean Code、分層測試、文件修改需確認、Git 由使用者自行操作等。"
+                    },
+                    {
+                        "date_label":  "2026/09/17–18",
+                        "record":  "進行第二輪 Architecture Audit。不以檔案大小判斷技術債，而是重新繪製 System Architecture、Component、Dependency、DXF Data Flow、Solver Flow、Persistence Flow 等 As-Is 圖，辨識出 DXF Review workflow、main.py workflow、UI → Algorithms 等主要責任問題。"
+                    },
+                    {
+                        "date_label":  "2026/09/18【Git｜v2.0.0】",
+                        "record":  "8d1c218 —「第二版_架構調整」。依 Architecture Audit 逐步處理 UI / Application 邊界，重點不是重寫 Solver，而是把 workflow ownership 從 UI 收回適當層級。"
+                    },
+                    {
+                        "date_label":  "2026/09/18 後",
+                        "record":  "Phase 1～4 架構整理完成後進行 Final Architecture Audit；結果判定已無 High architecture debt，當時 663 項測試中 662 通過、1 項因缺外部 fixture 跳過，因此停止繼續重構，轉入 SDD 文件建設。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09 下旬",
+                        "record":  "正式建立長期 SDD 文件體系：AGENTS.md 管 AI 工作方式；ARCHITECTURE.md 管責任與依賴；DOMAIN.md 管工程語意；SOLVER.md 管求解器；WORKFLOW.md 管 runtime 流程。DOMAIN.md 也開始明確區分 Engineering Hard Constraint、Solver Preference、Heuristic 與 Implementation Detail。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09 下旬",
+                        "record":  "SOLVER.md 正式建立，開始把 Support Phase 1 / Phase 2、Waler Solver、Global Waler、Search Policy、Diagnostics 等由「存在於程式與對話裡的知識」轉為長期文件。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09 下旬",
+                        "record":  "WORKFLOW.md 正式建立並精簡至 710 行，整理 Solver Result lifecycle、Manual Editing immediate commit、DXF/CAD/Persistence transaction boundary，以及 Confirmed Product Gaps / Technical Limitations。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09 下旬",
+                        "record":  "第一次正式以 SDD 規格方式處理 Geometry-based Support Adjacency；建立 836 行 Feature Spec，定義 Zoning、幾何相鄰、SharedLayoutGroup、Jack spacing 等工程語意，進一步從「AI 寫功能」轉向「先固定工程契約」。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09/22 起",
+                        "record":  "開始研究並導入 OpenSpec，將既有手工 SDD 流程接到 proposal → spec → design → tasks → apply → verify → archive；長期的 ARCHITECTURE / DOMAIN / SOLVER / WORKFLOW 不搬家，而是作為跨 capability reference documents。   AI Agent 工作流整理"
+                    },
+                    {
+                        "date_label":  "2026/09/23",
+                        "record":  "OpenSpec 正式進入實際開發：完成／封存 Geometry-based Support Adjacency、Global Waler Auto Apply、Paused DXF Review Source Relink、Unsaved Changes Save Option 等 change。"
+                    },
+                    {
+                        "date_label":  "2026/09/24",
+                        "record":  "OpenSpec 開發快速擴展至 DXF 與可靠性需求，包括 BIM Block Strut Recognition、BIM Strut Outline Topology、RC Waler 不參與最佳化、Solver 執行中禁止關閉、Support Editor no-op、Paused DXF Review recovery、Corner Brace centerline extension。"
+                    },
+                    {
+                        "date_label":  "2026/09/25",
+                        "record":  "延伸 BIM / DXF 辨識能力：BIM Brace Block Recognition、Brace Axis → Waler Extension、HATCH RC Waler Recognition、Waler-constrained BIM Strut Recognition。"
+                    },
+                    {
+                        "date_label":  "2026/09/26",
+                        "record":  "對 Brace → Waler extension 補上更嚴格範圍限制，開始呈現「先做 capability，再用後續 change 修正邊界」的 OpenSpec 演進方式。"
+                    },
+                    {
+                        "date_label":  "2026/09/27",
+                        "record":  "新增 Corner Brace Repair Tool、Contextual BIM Joist Recognition、BIM Strut Center Selection Repair 等 change；DXF 辨識已由一般幾何辨識逐漸延伸到 BIM 匯出圖面的特殊結構辨識。"
+                    },
+                    {
+                        "date_label":  "2026/09/28【Git｜v2.0.0】",
+                        "record":  "4d5e722 —「第二版_Y05匯入修正」。目前 GitHub 最新 commit。相較 9/18「第二版_架構調整」，這次一次整合大量 SDD/OpenSpec 成果、Y05 DXF/BIM 辨識修正、新 Domain/Application 元件與 regression tests；Git 中已可看到 19 個 archived OpenSpec changes。"
+                    },
+                    {
+                        "date_label":  "2026/09/29",
+                        "record":  "集中補強 DXF／BIM 辨識與 Review 操作：納入托梁與斜撐連接、圍令直接連接構件資料、中間柱歧義關聯修補及暫定雙路支撐候選；同時強化斜撐與角撐本體辨識，建立嚴格大於 250 mm 的寬度規則，並改善構件寬度顯示與角撐修補預覽。"
+                    },
+                    {
+                        "date_label":  "2026/09/30",
+                        "record":  "收斂 DXF Review 的幾何判定與人工修補流程：分離圍令側向證據與端點身分、要求斜撐兩端各自唯一連接不同圍令、加入圍令重疊診斷，並重整角撐遮蔽辨識契約；同步改善中間柱修補入口、問題識別文字及 Preview 錯誤構件點選。"
+                    },
+                    {
+                        "date_label":  "2026/10/01",
+                        "record":  "完成一輪核心契約整理：統一自動 Solver 與人工編輯使用的 Waler plan evaluation，集中 Support Shim／接頭驗證；正式移除舊 Strut 欄位正規化並定義 Project schema 相容政策。另新增手動 Project 的 result-only DXF 匯出、將 Material Spec 編輯移入 Application layer、支援斜切斜撐外框辨識，並全面校正 repository 文件。"
+                    },
+                    {
+                        "date_label":  "2026/10/04",
+                        "record":  "強化執行期可靠性與狀態一致性：建立 Project load、結果採用、CAD 與材料異動的 transaction 契約；CAD 更新會取消過期 Solver 並阻止 stale result 採用。Excel／DXF 匯出開始明確標示不合法成果，Solver 對空材料集合與無合法方案的處理亦完成對齊；同時移除確認無使用者的 DXF legacy functions 並修正文檔。"
+                    },
+                    {
+                        "date_label":  "2026/10/05",
+                        "record":  "修正圍令寬度為外側線的正交間距，避免斜端與端點錯位造成錯誤材料匹配；圍令調整時改以剛體平移同步更新斜撐兩端關係。打包方面將正式發行素材與 regression fixtures 分離，只以 allowlist 納入三份使用者 DXF 範例。"
+                    },
+                    {
+                        "date_label":  "2026/10/06",
+                        "record":  "擴充圍令求解與 DXF Review：Waler 支援 100／150／200／300 mm 尾端調整塊，Global Waler 可保留跨 stage 的完整合法候選池；新增 provisional Waler 的專用正式化流程，可由候選點或 CAD 工程線人工採用。另將 Review 診斷改為一致的繁體中文說明，並在不改變工程規則下加速來源排除與角撐修補規劃。"
+                    }
+                ]
+}

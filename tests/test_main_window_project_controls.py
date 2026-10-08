@@ -284,92 +284,17 @@ class ProjectMenuProjectionTests(unittest.TestCase):
 
 
 class WorkspaceNotebookStyleTests(unittest.TestCase):
-    def test_named_styles_define_primary_and_secondary_state_palettes(self):
-        app = SupportInputApp.__new__(SupportInputApp)
-        app.root = MagicMock()
-        style = MagicMock()
-
-        with patch.object(main.ttk, "Style", return_value=style) as style_factory:
-            app._configure_workspace_notebook_styles()
-
-        style_factory.assert_called_once_with(master=app.root)
-        style.theme_use.assert_not_called()
-        self.assertEqual(
-            style.element_create.call_args_list,
-            [
-                call(
-                    "Primary.Notebook.tab",
-                    "from",
-                    "clam",
-                    "Notebook.tab",
-                ),
-                call(
-                    "Secondary.Notebook.tab",
-                    "from",
-                    "clam",
-                    "Notebook.tab",
-                ),
-            ],
-        )
-        self.assertEqual(
-            {item.args[0] for item in style.layout.call_args_list},
-            {"Primary.TNotebook.Tab", "Secondary.TNotebook.Tab"},
-        )
-        self.assertEqual(
-            {item.args[0] for item in style.configure.call_args_list},
-            {"Primary.TNotebook", "Primary.TNotebook.Tab",
-             "Secondary.TNotebook", "Secondary.TNotebook.Tab"},
-        )
-        self.assertEqual(
-            {item.args[0] for item in style.map.call_args_list},
-            {"Primary.TNotebook.Tab", "Secondary.TNotebook.Tab"},
-        )
-        self.assertIn(
-            call(
-                "Primary.TNotebook.Tab",
-                background=[
-                    ("disabled", "#ECEFF1"),
-                    ("selected", "#2F5D7C"),
-                    ("active", "#BFD2DF"),
-                ],
-                foreground=[
-                    ("disabled", "#90A4AE"),
-                    ("selected", "#FFFFFF"),
-                    ("active", "#173B57"),
-                ],
-            ),
-            style.map.call_args_list,
-        )
-        self.assertIn(
-            call(
-                "Secondary.TNotebook.Tab",
-                background=[
-                    ("disabled", "#F4F6F7"),
-                    ("selected", "#C8DDEA"),
-                    ("active", "#DDEAF2"),
-                ],
-                foreground=[
-                    ("disabled", "#9AA7AF"),
-                    ("selected", "#173B57"),
-                    ("active", "#264A60"),
-                ],
-            ),
-            style.map.call_args_list,
-        )
-
-    def test_main_and_nested_notebooks_use_separate_named_styles(self):
+    def test_main_and_nested_notebooks_use_native_default_style(self):
         source = inspect.getsource(SupportInputApp._build_ui)
         results_source = inspect.getsource(SupportInputApp._create_results_tab)
 
-        self.assertIn(
-            'ttk.Notebook(self.left_frame, style="Primary.TNotebook")',
-            source,
-        )
-        self.assertEqual(source.count('style="Secondary.TNotebook"'), 2)
-        self.assertIn(
-            'ttk.Notebook(parent, style="Secondary.TNotebook")',
-            results_source,
-        )
+        self.assertIn("ttk.Notebook(self.left_frame)", source)
+        self.assertIn("ttk.Notebook(self.engineering_workspace)", source)
+        self.assertIn("ttk.Notebook(self.materials_workspace)", source)
+        self.assertIn("ttk.Notebook(parent)", results_source)
+        self.assertNotIn("Primary.TNotebook", inspect.getsource(main))
+        self.assertNotIn("Secondary.TNotebook", inspect.getsource(main))
+        self.assertNotIn("Notebook.tab", inspect.getsource(main))
         self.assertNotIn("theme_use", source)
 
 
